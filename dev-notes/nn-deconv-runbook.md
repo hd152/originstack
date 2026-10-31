@@ -876,3 +876,28 @@ stars 4.03 -> 3.01 px (truth 1.76), ratio 0.75 as on Origin's 4.4 px stars; wing
 10.9% -> 6.3% of the peak (truth 1.0%); no negative ring. The network stops well short of
 survey sharpness at that noise level; this is its training target (sharpest 30% of frames), not a
 failure. No case found that needs a wider-PSF retrain.
+
+**Phase 4 bench of the star-aware restore (2026-10-31).** `tools/bench_phase4.py` on the five
+held-out Origin stacks, `--deconvolve nn` with `nn_deconv_star_restore_frac` 0 (previous
+behaviour) vs 0.4 (default); logs/results `C:\nn_work\bench_sr\{bench.log,results.json}`. Rows
+that moved, 0 -> 0.4 (`ring` positive = bright halo, lower is better; `colour_slope_lin` higher
+is better):
+
+| stack (FWHM px) | fwhm_ratio | colour_slope_lin | hue_err deg | faint_cnr | ring | sky_noise |
+|---|---|---|---|---|---|---|
+| Omega (4.42), Orion (5.08) | identical | identical | identical | identical | identical | identical |
+| **Pleiades (4.37)** | **0.730 -> 1.031** | 0.915 -> 0.929 | 12.92 -> 12.85 | 67.9 -> 62.7 (-7.6%) | 4.38 -> 4.59 (+4.8%) | 0.302 -> 0.309 |
+| Sculptor (2.97) | 0.499 -> 0.489 | 0.493 -> 0.624 | 3.73 -> 4.09 (+0.35) | 249 -> 246 (-1.2%) | 8.93 -> 5.06 (-43%) | unchanged |
+| Sunflower (3.56) | 0.474 -> 0.471 | 0.646 -> 0.738 | 4.38 -> 4.66 (+0.28) | 191.8 -> 191.3 | 7.37 -> 4.90 (-34%) | unchanged |
+
+Narrow stacks (Sculptor, Sunflower) gain as intended: more of the star colour kept in the linear
+output, a third to a half less bright halo, width unchanged; the costs (hue error +0.3 deg,
+faint contrast -1.2% / -0.3%) are small. **Pleiades regresses: the stars lose all their
+sharpening (0.73 -> 1.03).** Cause: the fade-out between 3.6 and 4.4 px scales the blur width
+(`frac * ramp * fw`) instead of the weight. Pleiades (4.37 px) gets a ramp of 0.04, i.e. a
+~0.07 px blur inside the star mask: the restore then adds the residual back almost unblurred
+and the stars return to the input. (Omega at 4.42 px is just past the ramp and unaffected; the
+earlier flux and width checks did not include a star width in the ramp.) Verdict: **needs a
+fix before #233 merges**: fade the mask weight with the ramp and keep the blur width fixed
+(`smask * ramp`, sigma `frac * fw`), then re-run this table; thresholds used: fwhm_ratio change
+> 0.02, faint_cnr > 3%, hue_err > 0.5 deg, ring > 10% count as moves beyond noise.
