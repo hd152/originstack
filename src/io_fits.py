@@ -8,10 +8,15 @@ from typing import Dict, List, NamedTuple, Optional, Tuple, Union
 
 import numpy as np
 from astropy.io import fits
-from astropy.stats import sigma_clipped_stats
 
 from src.debayer import luminance
 from src.models import FrameInfo, ProcessingStats
+
+
+def sigma_clipped_stats(*args, **kwargs):
+    # astropy.stats costs ~0.3 s to import; only the preview/sky paths need it.
+    from astropy.stats import sigma_clipped_stats as _scs
+    return _scs(*args, **kwargs)
 
 try:
     from PIL import Image

@@ -44,7 +44,7 @@ rules only). The convention linter ([tools/lint_conventions.py](tools/lint_conve
 enforces repo rules ruff can't express: **OS001** `logging.getLogger` must pass `"originstack"`,
 not `__name__`/root; **OS002** module-level optional-dependency imports in `src/` must be
 `try/except`-guarded; **OS003** (warn) no bare `print()` in library code — use `safe_print`;
-**OS004** (warn) every native `#[pyfunction]` needs a test reference; **OS005** (warn, `--git`)
+**OS004** (warn) every native `#[pyfunction]` needs a test reference; **OS006** (warn) no broad `except Exception: pass` (log at debug instead); **OS005** (warn, `--git`)
 bump `ext/astro_native/Cargo.toml` when the crate source changes.
 
 ### Run the stacker

@@ -112,7 +112,7 @@ pub(crate) fn aperture_photometry_batch<'py>(
     let sub_off: Vec<f64> = (0..sub)
         .map(|k| (k as f64 + 0.5) / sub as f64 - 0.5)
         .collect();
-    const HALF_DIAG: f64 = 0.7071067811865476; // sqrt(0.5)
+    const HALF_DIAG: f64 = std::f64::consts::FRAC_1_SQRT_2; // sqrt(0.5)
     let r_ap2 = r_ap * r_ap;
     let r_in2 = r_in * r_in;
     let r_out2 = r_out * r_out;

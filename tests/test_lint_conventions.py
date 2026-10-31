@@ -68,3 +68,12 @@ def test_os003_skips_main_guard():
     assert _run(lc.check_bare_print, body) == ["OS003"]
     guarded = "if __name__ == '__main__':\n    print('x')\n"
     assert _run(lc.check_bare_print, guarded) == []
+
+
+def test_os006_flags_only_silent_broad_except():
+    silent = "try:\n    f()\nexcept Exception:\n    pass\n"
+    assert _run(lc.check_silent_except, silent) == ["OS006"]
+    assert _run(lc.check_silent_except, "try:\n    f()\nexcept:\n    pass\n") == ["OS006"]
+    # narrow type, or a handler that does something, is fine
+    assert _run(lc.check_silent_except, "try:\n    f()\nexcept OSError:\n    pass\n") == []
+    assert _run(lc.check_silent_except, "try:\n    f()\nexcept Exception:\n    log()\n") == []

@@ -5,12 +5,17 @@ import logging
 from typing import Optional, Tuple
 
 import numpy as np
-from scipy import signal as _scipy_signal
 
 from src.debayer import luminance
 from src.models import Config
 
 _log = logging.getLogger("originstack")
+
+
+def _scipy_signal():
+    # scipy.signal costs ~0.35 s to import; only deconvolution needs it.
+    from scipy import signal
+    return signal
 
 try:
     from scipy.optimize import curve_fit
@@ -503,8 +508,8 @@ def sparse_wavelet_deconvolve(img: np.ndarray, psf: np.ndarray,
     t_k = 1.0
 
     for _ in range(int(iterations)):
-        hz = _scipy_signal.fftconvolve(z_k, psf_d, mode='same')
-        grad = _scipy_signal.fftconvolve(hz - y_obs, psf_flip, mode='same')
+        hz = _scipy_signal().fftconvolve(z_k, psf_d, mode='same')
+        grad = _scipy_signal().fftconvolve(hz - y_obs, psf_flip, mode='same')
         x_temp = z_k - step * grad
 
         if use_levels >= 1:
@@ -609,9 +614,9 @@ def richardson_lucy_deconvolve(img: np.ndarray, psf: np.ndarray,
                 # just repeat the same OOM on every remaining tile.
                 _gpu.disable()
             _log.debug("GPU RL failed (%s); falling back to CPU", exc)
-            Y_deconv = _rl_deconvolve_xp(Y_pos, psf, iterations, np, _scipy_signal)
+            Y_deconv = _rl_deconvolve_xp(Y_pos, psf, iterations, np, _scipy_signal())
     else:
-        Y_deconv = _rl_deconvolve_xp(Y_pos, psf, iterations, np, _scipy_signal)
+        Y_deconv = _rl_deconvolve_xp(Y_pos, psf, iterations, np, _scipy_signal())
     Y_deconv = np.asarray(Y_deconv, dtype=np.float64) - pedestal
 
     # Star protection: blend original at star cores
