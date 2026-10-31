@@ -127,3 +127,21 @@ Two entry points, both against Gaia DR3, both needing a WCS (Origin `info.json` 
 .\packaging\verify_build.ps1   # launches the real exe, confirms the window appears and astro_native (not the numpy fallback) loaded, confirms clean shutdown
 ```
 Output: `packaging\dist\OriginStack\` (onedir — instant startup, unlike onefile which re-extracts the whole numpy/scipy/astropy payload on every launch) plus a zipped `OriginStack-<VERSION>-windows-x64.zip`. `VERSION` (repo root) is read at runtime via `read_version()` (`src/utils.py`) and shown in the window title; bump it alongside each release tag. `ext/astro_native` must be built as a real wheel (`maturin build --release` + `pip install`, not the dev-mode `maturin develop --release` editable install used elsewhere in this doc — PyInstaller's static analysis can't see into an editable/`.pth` install) — `build_windows.ps1` handles this. `.github/workflows/release.yml` attaches the built zip to an already-existing `v*` GitHub Release (never creates one, matching this repo's manual `gh release create` pattern) on tag push. Full details, prerequisites, and known limitations (unsigned exe / SmartScreen, Windows-only) in [packaging/README.md](packaging/README.md).
+
+**Mono and tile-compressed FITS (2026-10-31).** `io_fits._image_hdu_index`/`_header_of` read the
+image from the first HDU with pixels and overlay that HDU's header on the primary's, so
+`.fits.fz` (Las Cumbres Observatory; discovery accepts `.fits.fz`/`.fit.fz`) loads. A 3-plane FITS
+cube loads as (H, W, 3) like every other loader's colour frame (it came back (3, H, W), which
+the frame store rejected). `io_fits.mono_reason(hdr)` marks a 2-D frame monochrome when
+`BAYERPAT`/`COLORTYP` is MONO/NONE/..., or when neither is present but `FILTER` is a name
+(`'rp'`): such a frame is replicated to 3 channels at load, the same pass-through as mono SER and
+XISF, instead of being debayered as RGGB (the unconditional fallback: it blurs the image and
+shifts the sky level). Origin writes `BAYERPAT='RGGB'` and an empty `FILTER`, Seestar
+`GRBG`; a headerless frame stays Bayer. The pipeline prints a notice when it took the filter
+route, since a colour camera whose software omits BAYERPAT but names a filter would lose its
+colour. `read_fits_be16` (the BITPIX 16 fast path) returns None for a mono header. Not tested:
+raw mono lights with dark/flat calibration (the LCO frames are already calibrated).
+`nn_denoise` averages its three outputs when the input planes are identical: LCO M51 stack,
+the network's channels differed by up to ~200 ADU on stars (false colour on a grey image).
+LCO M51 (0.74"/px, 14 frames over several nights, mono rp): star FWHM 4.12 -> 3.44 px, sky noise
+x0.08 with `--deconvolve nn`; no truth comparison yet (the stack has no WCS).

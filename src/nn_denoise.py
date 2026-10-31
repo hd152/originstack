@@ -307,5 +307,9 @@ def nn_denoise(img: np.ndarray, strength: float = 1.0, model_path: Optional[str]
         res = src - den
         for c in range(res.shape[2]):
             den[..., c] += ndi.gaussian_filter(res[..., c], restore_sigma, mode='reflect')
+    if src.shape[2] == 3 and np.array_equal(src[..., 0], src[..., 1]) and np.array_equal(src[..., 0], src[..., 2]):
+        # a monochrome stack (replicated planes): the network's three outputs differ (up to
+        # ~200 ADU on LCO M51 stars) and would put false colour on a grey image
+        den[...] = den.mean(axis=2, keepdims=True)
     out = src + np.float32(strength) * (den - src)
     return np.where(finite, out, img).astype(np.float32)

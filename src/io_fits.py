@@ -59,15 +59,44 @@ def _sky_stats(lum: np.ndarray, noise_scale: float = 1.0) -> Tuple[float, float]
     return med, sigma * float(noise_scale)
 
 
+_STRUCTURAL_KEYS = frozenset({
+    'XTENSION', 'BITPIX', 'NAXIS', 'NAXIS1', 'NAXIS2', 'NAXIS3', 'PCOUNT', 'GCOUNT', 'EXTEND',
+    'ZIMAGE', 'ZCMPTYPE', 'ZBITPIX', 'ZNAXIS', 'ZNAXIS1', 'ZNAXIS2', 'ZNAXIS3', 'ZTILE1',
+    'ZTILE2', 'ZTILE3', 'ZQUANTIZ', 'ZDITHER0', 'ZBLANK', 'TFIELDS', 'ZHECKSUM', 'ZDATASUM'})
+
+
+def _image_hdu_index(hd) -> int:
+    """Index of the HDU holding the image: the primary when it has pixels, else the first
+    image extension. Tile-compressed frames (``.fits.fz``, e.g. Las Cumbres Observatory's)
+    keep an empty primary header and the pixels and real header in extension 1."""
+    if int(hd[0].header.get('NAXIS', 0) or 0) >= 2:
+        return 0
+    for i in range(1, len(hd)):
+        h = hd[i].header
+        if int(h.get('NAXIS', 0) or 0) >= 2 or h.get('ZIMAGE'):
+            return i
+    return 0
+
+
+def _header_of(hd) -> dict:
+    """The image's header: the primary's, with an image extension's keywords (minus the
+    structural and compression ones) on top when the pixels live there."""
+    i = _image_hdu_index(hd)
+    out = dict(hd[0].header)
+    if i:
+        out.update({k: v for k, v in hd[i].header.items() if k not in _STRUCTURAL_KEYS})
+    return out
+
+
 def _read_fits_header(path: str) -> dict:
     """Read FITS header only, with memmap fallback on keyword-compression errors."""
     try:
         with fits.open(path, memmap=True) as hd:
-            return dict(hd[0].header)
+            return _header_of(hd)
     except Exception:
         try:
             with fits.open(path, memmap=False) as hd:
-                return dict(hd[0].header)
+                return _header_of(hd)
         except Exception:
             return {}
 
@@ -114,19 +143,56 @@ def load_frame(path: str) -> Tuple[np.ndarray, dict]:
     return load_fits(path)
 
 
+_MONO_PATTERNS = frozenset({'MONO', 'NONE', 'N/A', 'NA', 'MONOCHROME', 'GRAY', 'GREY'})
+
+
+def mono_reason(hdr) -> Optional[str]:
+    """Why a 2-D FITS frame is monochrome rather than a Bayer mosaic, or None when it is one.
+
+    ``'header'``: ``BAYERPAT`` (or ``COLORTYP``) says so (MONO, NONE, ...). ``'filter'``: no
+    pattern keyword at all but a filter name (``FILTER = 'rp'``), which is how capture programs
+    write a mono camera's frames; every colour camera this pipeline knows writes its pattern
+    (Origin ``RGGB``, Seestar ``GRBG``) and Origin's ``FILTER`` is empty. An unrecognised
+    pattern string is a Bayer pattern."""
+    bp = hdr.get('BAYERPAT', hdr.get('COLORTYP'))
+    bp = str(bp).strip().upper() if bp is not None else ''
+    if bp in _MONO_PATTERNS:
+        return 'header'
+    if bp:
+        return None
+    flt = str(hdr.get('FILTER') or '').strip().upper()
+    return 'filter' if flt and flt not in _MONO_PATTERNS else None
+
+
+def _pixels_of(hd) -> np.ndarray:
+    """Float32 pixels of the image HDU. A colour cube (FITS ``NAXIS3`` 3, numpy ``(3, H, W)``)
+    comes back ``(H, W, 3)`` like every other loader's colour frame, and a one-plane cube
+    ``(H, W, 3)`` by replication; a 2-D frame is returned as is (a Bayer mosaic)."""
+    data = hd[_image_hdu_index(hd)].data.astype(np.float32)
+    if data.ndim == 3 and data.shape[0] in (1, 3):
+        data = np.moveaxis(data, 0, -1)
+        if data.shape[2] == 1:
+            data = np.repeat(data, 3, axis=2)
+    return data
+
+
 def load_fits(path: str) -> Tuple[np.ndarray, dict]:
     """Load FITS file; retry without memmap if keyword compression is present."""
     try:
         with fits.open(path, memmap=True) as hd:
-            data = hd[0].data.astype(np.float32)
-            hdr = dict(hd[0].header)
+            data = _pixels_of(hd)
+            hdr = _header_of(hd)
+        if data.ndim == 2 and mono_reason(hdr):
+            data = np.repeat(data[:, :, None], 3, axis=2)      # pass-through, like mono SER / XISF
     except Exception as e:
         # Retry without memmap for files with BZERO/BSCALE/BLANK keywords or any memmap issue
         err_str = str(e).lower()
         if 'memmap' in err_str or 'bzero' in err_str or 'bscale' in err_str or 'blank' in err_str:
             with fits.open(path, memmap=False) as hd:
-                data = hd[0].data.astype(np.float32)
-                hdr = dict(hd[0].header)
+                data = _pixels_of(hd)
+                hdr = _header_of(hd)
+            if data.ndim == 2 and mono_reason(hdr):
+                data = np.repeat(data[:, :, None], 3, axis=2)
         else:
             raise
     return data, hdr
@@ -152,6 +218,8 @@ def read_fits_be16(path: str):
             off = hd.fileinfo(0)['datLoc']
             H, W = int(h['NAXIS2']), int(h['NAXIS1'])
             hdr = dict(h)
+            if mono_reason(hdr):        # not a mosaic: load_fits replicates it to 3 channels
+                return None
             bzero = float(h.get('BZERO', 0.0))
         raw = np.fromfile(path, dtype=np.uint16, count=H * W, offset=off)
         if raw.size != H * W:

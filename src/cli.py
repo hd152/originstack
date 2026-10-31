@@ -1121,7 +1121,7 @@ def _root_has_input_fits(directory: str) -> bool:
     from src.frame_discovery import classify_frame
     from src.io_fits import _read_fits_header
     for f in sorted(os.listdir(directory)):
-        if not f.lower().endswith(('.fit', '.fits')) or is_os_metadata(f):
+        if not f.lower().endswith(('.fit', '.fits', '.fits.fz', '.fit.fz')) or is_os_metadata(f):
             continue
         path = os.path.join(directory, f)
         if not os.path.isfile(path):

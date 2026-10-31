@@ -303,3 +303,15 @@ def test_nn_denoise_inside_range_or_unmeasured_is_unchanged(monkeypatch):
     np.testing.assert_array_equal(nd.nn_denoise(img, fwhm_range=(2.8, 5.2)), base)
     monkeypatch.setattr(nd, 'measure_star_fwhm', lambda img, max_stars=60: None)
     np.testing.assert_array_equal(nd.nn_denoise(img, fwhm_range=(2.8, 5.2)), base)
+
+
+def test_monochrome_input_stays_monochrome(monkeypatch):
+    monkeypatch.setattr(nd, 'load_weights', lambda path=None: _random_weights())
+    mono = _star_field(4.0)[..., :1].repeat(3, axis=2)
+    out = nd.nn_denoise(mono)
+    np.testing.assert_array_equal(out[..., 0], out[..., 1])
+    np.testing.assert_array_equal(out[..., 0], out[..., 2])
+    colour = mono.copy()
+    colour[..., 2] *= 1.3                                    # not identical planes: untouched logic
+    out = nd.nn_denoise(colour)
+    assert not np.array_equal(out[..., 0], out[..., 2])
