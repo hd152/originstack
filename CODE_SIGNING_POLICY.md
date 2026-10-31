@@ -43,7 +43,7 @@ self-update check's public releases API).
 
 ## Roles
 
-OriginStack is solo-maintained. [Tom / Hans Davenport](https://github.com/hd152) (one GitHub
+OriginStack is solo-maintained. [Tom Davenport](https://github.com/hd152) (one GitHub
 account, `hd152`) holds all three SignPath roles:
 
 - **Author** — commits directly without requiring review.
