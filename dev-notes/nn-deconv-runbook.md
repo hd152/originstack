@@ -827,3 +827,22 @@ resampling (FWHM 1.49 vs 1.43 faint, halo 1.0 vs 0.9%), hence the 2.3 px lower b
 -- the full network (blend 1.0) is not flux-preserving; check Origin before photometry runs
 after `--deconvolve nn`. Caveats: PS1 truth is gri-averaged on the S50 grid (its ~1.2 px width
 is partly pixel integration); M13 has no WCS, so no truth; no blend or Phase 4 in this run.
+
+**Flux conservation vs star width (2026-10-31).** Aperture flux (3 x FWHM radius, annulus
+background removed, same isolated unsaturated stars, luminance) of the network output / input,
+full network (blend 1.0), median per brightness bin (8-30 / 30-200 / >200 sigma):
+
+| stack | star FWHM px | 8-30 | 30-200 | >200 |
+|---|---|---|---|---|
+| Omega | 4.42 | 1.017 | 0.999 | 1.001 |
+| Orion | 5.08 | 1.003 | 0.996 | 1.003 |
+| Pleiades | 4.37 | 1.015 | 0.999 | 1.003 |
+| Sunflower | 3.56 | 0.983 | 0.976 | - |
+| Sculptor | 2.97 | 0.959 | 0.954 | - |
+| S50 M101 | 2.72 | 0.961 | 0.942 | 0.948 |
+| S50 M13 | 2.67 | 0.957 | 0.938 | 0.940 |
+
+Flux is kept to ~0.5% at FWHM >= 4.4 px and falls as stars get narrower, on Origin's own
+Sculptor (2.97 px) as much as on S50: it is a property of the network on near-undersampled
+stars, not of the camera. Photometry is unaffected (it reads the linear stack, never Phase 4
+output); only post-NN star brightness (e.g. colour of tight stars) is low by 2-6%.
