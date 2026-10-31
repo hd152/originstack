@@ -901,3 +901,24 @@ earlier flux and width checks did not include a star width in the ramp.) Verdict
 fix before #233 merges**: fade the mask weight with the ramp and keep the blur width fixed
 (`smask * ramp`, sigma `frac * fw`), then re-run this table; thresholds used: fwhm_ratio change
 > 0.02, faint_cnr > 3%, hue_err > 0.5 deg, ring > 10% count as moves beyond noise.
+
+**Phase 4 bench of the star-aware restore, after the weight-fade fix (2026-10-31).** Same method
+and thresholds as above on `a133a67` (the fade now scales the mask weight, blur width fixed at
+`frac * fw`); logs `C:\nn_work\bench_sr2\{bench.log,<stack>.json}`. 0 -> 0.4:
+
+| stack (FWHM px) | fwhm_ratio | colour_slope_lin | hue_err deg | faint_cnr | ring | sky_noise |
+|---|---|---|---|---|---|---|
+| Omega (4.42), Orion (5.08) | identical | identical | identical | identical | identical | identical |
+| **Pleiades (4.37)** | **0.730 -> 0.771** | 0.915 -> 0.918 | 12.92 -> 12.97 | 67.9 -> 66.1 (-2.7%) | 4.38 -> 4.87 (+11%) | 0.302 -> 0.303 |
+| Sculptor (2.97) | 0.499 -> 0.489 | 0.493 -> 0.624 | 3.73 -> 4.09 (+0.35) | 249 -> 246 (-1.2%) | 8.93 -> 5.06 (-43%) | unchanged |
+| Sunflower (3.56) | 0.474 -> 0.471 | 0.646 -> 0.738 | 4.38 -> 4.66 (+0.28) | 191.8 -> 191.3 | 7.37 -> 4.90 (-34%) | unchanged |
+
+The 0.730 -> 1.031 collapse is gone and Sculptor/Sunflower are unchanged (their ramp is 1.0 /
+0.73-1.0, same numbers as before). **Pleiades still moves past two thresholds, mildly:** fwhm_ratio
++0.041 (> 0.02) and ring +11% (> 10%); faint_cnr -2.7% and hue +0.05 deg are within noise. A
+4.37 px stack (ramp 0.04) should be unaffected: the weight is small but not negligible because the
+residual in a star core is large (the tight restore puts back a few % of it, unblurred relative
+to the 4 px one). Verdict: **the bug is fixed; #233 is acceptable to merge only if a mild
+Pleiades-class change is tolerated; otherwise narrow the fade** (e.g. `STAR_RESTORE_FWHM`
+(3.4, 4.0), or a squared ramp) so stars wider than ~4 px are bit-identical, then re-run this
+table (it costs Sunflower, 3.56 px, part of its gain: ramp 0.73 at (3.4, 4.0)).
