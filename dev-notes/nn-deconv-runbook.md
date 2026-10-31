@@ -846,3 +846,17 @@ Flux is kept to ~0.5% at FWHM >= 4.4 px and falls as stars get narrower, on Orig
 Sculptor (2.97 px) as much as on S50: it is a property of the network on near-undersampled
 stars, not of the camera. Photometry is unaffected (it reads the linear stack, never Phase 4
 output); only post-NN star brightness (e.g. colour of tight stars) is low by 2-6%.
+
+**Star-aware restore (2026-10-31).** The loss above is redistribution, not removal: the network
+alone keeps ~82% of a tight star's flux and the 4 px restore returns it, but into an 8-12 px
+halo (M13, 3 FWHM aperture 0.94, 12 px 1.01). `nn_denoise(star_restore_frac=0.4)` (config
+`nn_deconv_star_restore_frac`, `--deconvolve nn` only) restores near detected stars (full
+weight within 1 FWHM, fading to 3 FWHM) with a Gaussian of 0.4 x the stars' FWHM instead of 4
+px. Aperture flux out/in at 2 / 3 / 4.5 x FWHM on M13: 0.895 / 0.944 / 0.991 -> 1.00; Sculptor
+0.898 / 0.958 / 0.992 -> 1.00; star width unchanged (M13 1.55 -> 1.58, Sculptor 0.515 -> 0.512).
+Blur widths tried: 0.5 px (0.19 FWHM) gives the sharpening back (FWHM 2.17), a fixed 1 px did
+that on 4.4 px stars (Omega width ratio 0.74 -> 0.90), 0.4 x FWHM still cost Omega 0.74 ->
+0.82. Wide stars lose no flux, so the effect fades out between 3.6 and 4.4 px
+(`STAR_RESTORE_FWHM`): Omega/Orion/Pleiades are unchanged, Sunflower, Sculptor and both S50
+stacks are at 0.996-1.014 (was 0.94-0.98). Not run: the Phase 4 bench (ring, hue, faint_cnr)
+with it on; the mask only touches pixels within 3 FWHM of detections.

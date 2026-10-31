@@ -45,6 +45,7 @@ RESTORE_SIGMA = 4.0    # px; low-frequency restore of faint extended light (nn_d
 # (oversampled): ``nn_denoise(..., fwhm_range=...)`` resamples so the stars land inside.
 TRAIN_FWHM_RANGE = (2.3, 5.2)
 SCALE_MAX_UP = 2.5     # largest upsampling factor (cost grows with its square)
+STAR_RESTORE_FWHM = (3.6, 4.4)   # px: star-aware restore at full strength below the first, off above the second
 FIT_HALF = 8           # star cutout half-width (px) for the FWHM fit
 
 _weights_cache: Dict[str, Dict[str, np.ndarray]] = {}
@@ -253,6 +254,25 @@ def measure_star_fwhm(img: np.ndarray, max_stars: int = 60) -> Optional[float]:
     return float(np.median(out)) if len(out) >= 12 else None
 
 
+def star_mask(img: np.ndarray, fwhm: float) -> Optional[np.ndarray]:
+    """(H, W) float32 weight, 1 within ``fwhm`` of a detected star and fading to 0 at 3 x ``fwhm``,
+    or None when no stars are found. Marks where ``nn_denoise`` restores with a tight blur."""
+    from src.star_detect import detect_stars_matched_filter
+    lum = np.nan_to_num(np.asarray(img, np.float32).mean(axis=2))
+    try:
+        src = detect_stars_matched_filter(lum - np.float32(np.median(lum)))
+    except Exception:
+        return None
+    if src is None or len(src) == 0:
+        return None
+    h, w = lum.shape
+    pts = np.zeros((h, w), bool)
+    pts[np.clip(np.rint(np.asarray(src['ycentroid'])).astype(int), 0, h - 1),
+        np.clip(np.rint(np.asarray(src['xcentroid'])).astype(int), 0, w - 1)] = True
+    dist = ndi.distance_transform_edt(~pts)
+    return np.clip((3.0 * fwhm - dist) / fwhm, 0.0, 1.0).astype(np.float32)
+
+
 def scale_factor(fwhm: Optional[float], fwhm_range: Tuple[float, float]) -> float:
     """Resampling factor that brings ``fwhm`` into ``fwhm_range`` (the nearest bound), 1.0
     inside it, when unknown, or when it would need more than ``SCALE_MAX_UP`` upsampling."""
@@ -271,7 +291,8 @@ def _rescale(a: np.ndarray, shape: Tuple[int, int]) -> np.ndarray:
 
 def nn_denoise(img: np.ndarray, strength: float = 1.0, model_path: Optional[str] = None,
                restore_sigma: float = RESTORE_SIGMA,
-               fwhm_range: Optional[Tuple[float, float]] = None) -> np.ndarray:
+               fwhm_range: Optional[Tuple[float, float]] = None,
+               star_restore_frac: float = 0.0) -> np.ndarray:
     """Denoise a linear (H, W, 3) image with the bundled Noise2Noise U-Net.
 
     ``restore_sigma`` (px, 0 = off) adds back the Gaussian low-pass of what the network
@@ -285,15 +306,22 @@ def nn_denoise(img: np.ndarray, strength: float = 1.0, model_path: Optional[str]
     ``fwhm_range`` (px; ``TRAIN_FWHM_RANGE`` for the deconvolver) makes the step independent
     of pixel scale: when the stars' measured FWHM is outside it the image is resampled so
     they land on the nearest bound, run, and resampled back to the original grid. Inside
-    it (all the Origin sessions), or when no FWHM can be measured, nothing is resampled."""
+    it (all the Origin sessions), or when no FWHM can be measured, nothing is resampled.
+
+    ``star_restore_frac`` (0 = off) restores with a tighter blur, ``frac`` x the stars' FWHM,
+    within ~3 FWHM of detected stars. The 4 px restore moves a star's flux from its core into
+    an 8-12 px halo (aperture flux at 3 FWHM 0.94-0.96 of the input on 2.7-3 px stars, 1.00 at
+    12 px); a blur of ~0.4 FWHM keeps it in the aperture without giving the sharpening back.
+    A fixed 1 px did that on 2.6 px stars but undid it on 4.4 px ones (width ratio 0.74 ->
+    0.90), and 0.5 px (0.19 FWHM) undid it on 2.6 px ones, so it is a fraction of the width."""
     img = np.asarray(img, dtype=np.float32)
     if fwhm_range is not None:
         f = scale_factor(measure_star_fwhm(img), fwhm_range)
         if f != 1.0:
             shape = (max(8, int(round(img.shape[0] * f))), max(8, int(round(img.shape[1] * f))))
             safe = np.where(np.isfinite(img), img, 0.0).astype(np.float32)
-            out = _rescale(nn_denoise(_rescale(safe, shape), strength, model_path, restore_sigma),
-                           img.shape[:2])
+            out = _rescale(nn_denoise(_rescale(safe, shape), strength, model_path, restore_sigma,
+                                      star_restore_frac=star_restore_frac), img.shape[:2])
             return np.where(np.isfinite(img), out, img).astype(np.float32)
     w = load_weights(model_path)
     finite = np.isfinite(img)
@@ -305,7 +333,17 @@ def nn_denoise(img: np.ndarray, strength: float = 1.0, model_path: Optional[str]
     den = denoise_z(z, w) * sig + bg
     if restore_sigma > 0:
         res = src - den
+        fw = measure_star_fwhm(src) if star_restore_frac > 0 else None
+        # wide stars (>= ~4.4 px) lose no flux to the 4 px restore and would lose sharpness
+        # to a tight one (Omega width ratio 0.74 -> 0.82): fade the tight restore out
+        lo, hi = STAR_RESTORE_FWHM
+        frac = star_restore_frac * float(np.clip((hi - fw) / (hi - lo), 0.0, 1.0)) if fw else 0.0
+        smask = star_mask(src, fw) if frac > 0 else None
         for c in range(res.shape[2]):
-            den[..., c] += ndi.gaussian_filter(res[..., c], restore_sigma, mode='reflect')
+            if smask is None:
+                den[..., c] += ndi.gaussian_filter(res[..., c], restore_sigma, mode='reflect')
+            else:
+                den[..., c] += (ndi.gaussian_filter(res[..., c] * (1 - smask), restore_sigma, mode='reflect')
+                                + ndi.gaussian_filter(res[..., c] * smask, frac * fw, mode='reflect'))
     out = src + np.float32(strength) * (den - src)
     return np.where(finite, out, img).astype(np.float32)

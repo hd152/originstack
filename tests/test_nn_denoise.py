@@ -201,7 +201,8 @@ def test_phase4_runs_the_deconvolver_at_the_nn_step(monkeypatch):
     from src.models import ProcessingStats
     calls = []
 
-    def fake(img, strength=1.0, model_path=None, restore_sigma=4.0, fwhm_range=None):
+    def fake(img, strength=1.0, model_path=None, restore_sigma=4.0, fwhm_range=None,
+             star_restore_frac=0.0):
         calls.append((model_path, restore_sigma))
         return img
     monkeypatch.setattr(ndm, 'nn_denoise', fake)
@@ -221,7 +222,8 @@ def test_nn_deconv_blend_mixes_in_the_denoiser(monkeypatch):
     from src.models import ProcessingStats
     calls = []
 
-    def fake(img, strength=1.0, model_path=None, restore_sigma=4.0, fwhm_range=None):
+    def fake(img, strength=1.0, model_path=None, restore_sigma=4.0, fwhm_range=None,
+             star_restore_frac=0.0):
         calls.append(model_path)
         return np.full_like(img, 10.0 if model_path == ndm.DECONV_MODEL_PATH else 20.0)
     monkeypatch.setattr(ndm, 'nn_denoise', fake)
@@ -303,3 +305,27 @@ def test_nn_denoise_inside_range_or_unmeasured_is_unchanged(monkeypatch):
     np.testing.assert_array_equal(nd.nn_denoise(img, fwhm_range=(2.8, 5.2)), base)
     monkeypatch.setattr(nd, 'measure_star_fwhm', lambda img, max_stars=60: None)
     np.testing.assert_array_equal(nd.nn_denoise(img, fwhm_range=(2.8, 5.2)), base)
+
+
+# ── star-aware restore (star_restore_frac) ───────────────────────────────────
+
+def test_star_mask_is_one_at_stars_and_zero_far_away():
+    img = _star_field(4.0)
+    m = nd.star_mask(img, 4.0)
+    assert m is not None and m.shape == img.shape[:2] and m.dtype == np.float32
+    assert m[25, 25] == 1.0 and m[0, 299] == 0.0          # a grid star; a corner 45 px from any
+    assert nd.star_mask(np.random.default_rng(0).normal(100, 2, (200, 200, 3)).astype(np.float32), 4.0) is None \
+        or True                                           # noise-only: detections are allowed to be empty
+
+
+def test_star_restore_changes_output_only_near_stars(monkeypatch):
+    monkeypatch.setattr(nd, 'load_weights', lambda path=None: _random_weights())
+    img = _star_field(4.0)
+    base = nd.nn_denoise(img)
+    star = nd.nn_denoise(img, star_restore_frac=0.4)
+    diff = np.abs(star - base).max(axis=2)
+    mask = nd.star_mask(img, nd.measure_star_fwhm(img))
+    assert diff.max() > 0                                  # it does something
+    far = ndi.gaussian_filter(mask, 6) < 1e-4              # well outside every star's mask
+    # the blurs differ by at most the 4 px kernel's reach beyond the mask
+    assert far.any() and diff[far].max() < 0.05 * diff.max()

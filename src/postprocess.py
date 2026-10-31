@@ -959,7 +959,9 @@ def postprocess_stack(
             _fwhm_range = (TRAIN_FWHM_RANGE if _nn_deconv
                            and getattr(args, 'nn_scale_normalise', True) else None)
             stacked = nn_denoise(stacked, strength=nn_strength, model_path=_nn_path,
-                                 restore_sigma=nn_restore, fwhm_range=_fwhm_range)
+                                 restore_sigma=nn_restore, fwhm_range=_fwhm_range,
+                                 star_restore_frac=float(getattr(args, 'nn_deconv_star_restore_frac', 0.4))
+                                 if _nn_deconv else 0.0)
             if _blend < 1.0:
                 _den = nn_denoise(_pre_nn, strength=nn_strength,
                                   restore_sigma=float(getattr(args, 'nn_restore_sigma', 4.0)))
