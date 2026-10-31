@@ -41,9 +41,9 @@ MARGIN = 32            # context on each side of a tile; > the network's recepti
 LEAK = 0.1             # LeakyReLU slope
 RESTORE_SIGMA = 4.0    # px; low-frequency restore of faint extended light (nn_denoise)
 # Star FWHM (px, circular Gaussian fit) range of the Origin sessions the deconvolver was trained
-# on (2.9-5.1 px, a little margin added). Outside it the network sharpens too much (undersampled) or too little
+# on (2.9-5.1 px; the lower bound is lower: an S50 stack at 2.6 px sharpens fine unresampled). Outside it the network sharpens too much (undersampled) or too little
 # (oversampled): ``nn_denoise(..., fwhm_range=...)`` resamples so the stars land inside.
-TRAIN_FWHM_RANGE = (2.8, 5.2)
+TRAIN_FWHM_RANGE = (2.3, 5.2)
 SCALE_MAX_UP = 2.5     # largest upsampling factor (cost grows with its square)
 FIT_HALF = 8           # star cutout half-width (px) for the FWHM fit
 

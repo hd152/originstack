@@ -807,7 +807,7 @@ on the star width: FWHM out / in = 0.64 at 2.2 px (undersampled) ... 0.74 at 4.4
 8.4 px. `nn_denoise(..., fwhm_range=TRAIN_FWHM_RANGE)` (`--deconvolve nn`, config key
 `nn_scale_normalise`, default on) measures the stars' Gaussian FWHM (`measure_star_fwhm`;
 `quality.measure_fwhm` reads 7.4 px on a 4.4 px stack, so not that), and when it is outside
-(2.8, 5.2) px resamples (cubic spline) so the stars land on the nearest bound, runs, and
+(2.3, 5.2) px resamples (cubic spline) so the stars land on the nearest bound, runs, and
 resamples back. Inside the range -- every Origin session -- the output is bit-identical to
 before. Result on the same rescaled Omega: 0.68 / 0.67 / 0.74 / 0.81 / 0.79 at 2.2 / 3.0 / 4.4 /
 6.0 / 8.4 px (the round trip alone changes FWHM < 1%). Targeting the nearest bound rather than
@@ -815,3 +815,15 @@ the 4.4 px centre gives up some uniformity (0.74-0.82 centred) to leave Origin u
 Not skipped by `--deconvolve nn` blend: the blended denoiser is scale-tolerant and not resampled.
 Caveats: a rescaled Origin stack keeps Origin's PSF shape and has resampling-correlated noise;
 real other-camera stacks are still needed. Upsampling beyond 2.5x (FWHM < 1.1 px) is skipped.
+
+**Seestar S50 check (2026-10-31).** Two S50 stacks (M13 73 subs, M101 207 subs; 2.4"/px, 50 mm,
+star FWHM 2.6 px), the network alone on the linear stack, M101 against Pan-STARRS truth
+(`tools/fetch_ps1_truth.py`, 2 crops, 92 stars, same stars in every image): FWHM input -> output
+-> truth = 2.7 -> 1.5 -> 1.2 px (output/input 0.58; still 20-30% wider than truth, so not
+over-sharpened); the 2.5-5 px wing halo falls from 3.3% of the peak to 1.0-1.5% (truth 0.07%),
+no negative ring. Resampling by 1.08 to reach a 2.8 px lower bound was slightly worse than not
+resampling (FWHM 1.49 vs 1.43 faint, halo 1.0 vs 0.9%), hence the 2.3 px lower bound. Flux in a
+6 px aperture: faint stars (8-30 sigma) 1.01-1.02 of the input, mid/bright (30+ sigma) 0.91-0.94
+-- the full network (blend 1.0) is not flux-preserving; check Origin before photometry runs
+after `--deconvolve nn`. Caveats: PS1 truth is gri-averaged on the S50 grid (its ~1.2 px width
+is partly pixel integration); M13 has no WCS, so no truth; no blend or Phase 4 in this run.
