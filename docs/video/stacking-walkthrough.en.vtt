@@ -1,0 +1,106 @@
+WEBVTT
+
+00:00:00.000 --> 00:00:02.016
+This is one frame from the telescope.
+
+00:00:02.016 --> 00:00:04.739
+It's short, noisy, and the nebula is barely there.
+
+00:00:04.739 --> 00:00:08.988
+Stacking is how we turn hundreds of frames like this into a single deep image.
+
+00:00:08.988 --> 00:00:10.895
+OriginStack does it in four phases.
+
+00:00:10.895 --> 00:00:12.202
+Let's walk through them.
+
+00:00:12.702 --> 00:00:14.370
+Phase one prepares every frame.
+
+00:00:14.370 --> 00:00:17.653
+Each one is loaded and calibrated, then hot pixels are fixed.
+
+00:00:17.653 --> 00:00:20.882
+Hot pixels are sensor defects that show up as bright specks.
+
+00:00:20.882 --> 00:00:27.501
+The frame is then debayered, which turns the sensor's colour mosaic into a full colour image, and the white balance is set.
+
+00:00:27.501 --> 00:00:32.453
+While that happens, the program scores each frame for sharpness, star shape, and background.
+
+00:00:32.453 --> 00:00:38.318
+Frames that are blurred by wind, smeared by a passing cloud, or crossed by a satellite trail can be rejected.
+
+00:00:38.318 --> 00:00:40.740
+We want only good light going into the stack.
+
+00:00:41.240 --> 00:00:45.386
+The sky moves between frames, and the telescope's tracking is never perfect.
+
+00:00:45.386 --> 00:00:47.022
+Phase two lines everything up.
+
+00:00:47.022 --> 00:00:51.877
+It first finds a rough shift, then refines it to a fraction of a pixel by matching stars.
+
+00:00:51.877 --> 00:00:54.767
+If the field has rotated, it fits a rotation as well.
+
+00:00:54.767 --> 00:00:56.295
+It also checks its own work.
+
+00:00:56.295 --> 00:01:02.022
+Any frame whose stars don't line up well enough is dropped, rather than being allowed to blur the result.
+
+00:01:02.522 --> 00:01:04.500
+Now the aligned frames are combined.
+
+00:01:04.500 --> 00:01:08.290
+The signal from the target is the same in every frame, so it adds up.
+
+00:01:08.290 --> 00:01:10.597
+The noise is random, so it partly cancels.
+
+00:01:10.597 --> 00:01:15.926
+For each pixel, the program looks at its value across all the frames and throws out the outliers.
+
+00:01:15.926 --> 00:01:19.112
+That removes satellites, cosmic rays, and airplane lights.
+
+00:01:19.112 --> 00:01:26.088
+By default it also uses a proper coaddition, which weights each frame by how good it is, so sharp, clean frames count for more.
+
+00:01:26.088 --> 00:01:28.505
+Same sky, but now the faint detail is there.
+
+00:01:29.005 --> 00:01:32.209
+The stack is still linear data, so it looks dark and flat.
+
+00:01:32.209 --> 00:01:33.811
+Phase four brings it to life.
+
+00:01:33.811 --> 00:01:37.622
+It removes the sky glow gradient, reduces colour noise, and denoises.
+
+00:01:37.622 --> 00:01:41.157
+Stars can be tightened, and local contrast brings out structure.
+
+00:01:41.157 --> 00:01:45.023
+Finally the image is stretched, which lifts the faint parts into view.
+
+00:01:45.023 --> 00:01:53.142
+Every step can be switched off or tuned, and the program saves the untouched linear stack, so you can redo this phase later without stacking again.
+
+00:01:53.642 --> 00:01:57.232
+Hundreds of faint, noisy frames became one detailed image.
+
+00:01:57.232 --> 00:01:59.212
+Process, align, combine, finish.
+
+00:01:59.212 --> 00:02:00.636
+That's the whole stack.
+
+00:02:00.636 --> 00:02:01.874
+Thanks for watching.
