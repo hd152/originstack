@@ -967,7 +967,8 @@ def postprocess_stack(
                                        else 'nn_restore_sigma', 4.0))
             # nn_deconv_blend < 1 mixes in the nn denoiser's output: the deconvolver leaves
             # more sky noise than the denoiser, which costs faint contrast on galaxies.
-            _blend = float(np.clip(getattr(args, 'nn_deconv_blend', 1.0), 0.0, 1.0)) if _nn_deconv else 1.0
+            _blend_arg = getattr(args, 'nn_deconv_blend', None)
+            _blend = float(np.clip(_blend_arg if _blend_arg is not None else 0.75, 0.0, 1.0)) if _nn_deconv else 1.0
             _blend_msg = f", blend={_blend:.2f}" if _blend < 1.0 else ""
             safe_print(f"\n  Applying neural-network {'deconvolution' if _nn_deconv else 'denoising'} "
                        f"(strength={nn_strength:.2f}{_blend_msg})...")

@@ -1956,6 +1956,12 @@ def build_parser() -> argparse.ArgumentParser:
                         'nn: a network trained on Origin sessions that narrows stars by 8-18%% '
                         'and removes noise; it replaces the denoiser and chroma noise reduction. '
                         'PSF options (blind PSF, iterations, model) via --config.')
+    g_post.add_argument('--nn-deconv-blend', type=_unit_interval, default=None, metavar='FRAC',
+                   dest='nn_deconv_blend',
+                   help='With --deconvolve nn: the share (0-1) of the deconvolver output kept; '
+                        'the rest is the neural denoiser output. Lower values leave less sky noise '
+                        'and keep faint galaxy contrast, higher values sharpen more. '
+                        'Default: automatic (0.75; with --auto galaxies 0.35).')
     g_out.add_argument('--export', default=None, metavar='FMT[,FMT]',
                    help='Extra output formats alongside FITS: tiff (32-bit float), '
                         'xisf (PixInsight), png (the preview JPEG\'s image, lossless 8-bit), '
@@ -2972,7 +2978,6 @@ def build_parser() -> argparse.ArgumentParser:
         nn_deconv_restore_sigma=4.0,
         nn_deconv_star_restore_frac=0.4,  # restore blur near stars, x star FWHM (0 = the plain 4 px restore everywhere)
         nn_scale_normalise=True,  # --deconvolve nn: resample stars outside its trained FWHM range (other pixel scales)
-        nn_deconv_blend=0.75,    # share of --deconvolve nn kept, the rest the nn denoiser (--auto: galaxies 0.35)
         deconvolve=False,
         deconvolve_tv=False,
         deconvolve_svpsf=False,
