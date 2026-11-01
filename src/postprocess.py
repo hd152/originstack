@@ -771,6 +771,16 @@ class StepSnapshots:
         self.snaps: dict = {}    # name -> (image, starless-split stars layer or None, noise scale)
         self.resume: Optional[str] = None
 
+    def fork(self) -> 'StepSnapshots':
+        """A copy that shares the stored images (never changed in place: ``record`` swaps an
+        entry for a fresh copy, ``load`` returns copies) but has its own table, so a
+        comparison run can record and reset without touching this one."""
+        other = StepSnapshots(self.budget)
+        other.used = self.used
+        other.early = self.early
+        other.snaps = dict(self.snaps)
+        return other
+
     def reset(self) -> None:
         self.used = 0
         self.early = None

@@ -617,5 +617,14 @@
  "{name}: no preview was kept for this frame": "{name}: er is geen voorvertoning bewaard voor dit frame",
  "Camera: {name}. The learned sharpening was trained on Origin data: it runs after the star widths are rescaled, and --auto picks it only when stars can be measured.": "Camera: {name}. De aangeleerde verscherping is getraind op Origin-gegevens: ze draait na het herschalen van de sterbreedte en --auto kiest ze alleen als sterren meetbaar zijn.",
  "Copied the diagnostics to the clipboard. Home folders are shown as ~; check it before sharing.": "Diagnose naar het klembord gekopieerd. Persoonlijke mappen staan als ~; controleer voor het delen.",
- "Copy diagnostics (version, system, settings, log)": "Diagnose kopiëren (versie, systeem, instellingen, logboek)"
+ "Copy diagnostics (version, system, settings, log)": "Diagnose kopiëren (versie, systeem, instellingen, logboek)",
+ "Compare a step": "Een stap vergelijken",
+ "Before / after": "Voor / na",
+ "Before / after: {step}": "Voor / na: {step}",
+ "Comparing…": "Vergelijken…",
+ "Left: {step} off. Right: on. Drag the slider; wheel zooms, drag pans.": "Links: {step} uit. Rechts: aan. Sleep de schuif; scrollwiel zoomt, slepen verschuift.",
+ "Close": "Sluiten",
+ "Hold to show on": "Ingedrukt houden om aan te tonen",
+ "{step}: off | on": "{step}: uit | aan",
+ "Compare failed: {error}": "Vergelijken mislukt: {error}"
 }

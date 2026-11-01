@@ -617,5 +617,14 @@
  "{name}: no preview was kept for this frame": "{name}: nenhuma prévia foi mantida para este frame",
  "Camera: {name}. The learned sharpening was trained on Origin data: it runs after the star widths are rescaled, and --auto picks it only when stars can be measured.": "Câmera: {name}. A nitidez aprendida foi treinada com dados da Origin: ela roda após o reescalonamento da largura das estrelas, e o --auto só a escolhe quando as estrelas são mensuráveis.",
  "Copied the diagnostics to the clipboard. Home folders are shown as ~; check it before sharing.": "Diagnóstico copiado para a área de transferência. Pastas pessoais aparecem como ~; confira antes de compartilhar.",
- "Copy diagnostics (version, system, settings, log)": "Copiar diagnóstico (versão, sistema, configurações, registro)"
+ "Copy diagnostics (version, system, settings, log)": "Copiar diagnóstico (versão, sistema, configurações, registro)",
+ "Compare a step": "Comparar uma etapa",
+ "Before / after": "Antes / depois",
+ "Before / after: {step}": "Antes / depois: {step}",
+ "Comparing…": "Comparando…",
+ "Left: {step} off. Right: on. Drag the slider; wheel zooms, drag pans.": "Esquerda: {step} desligado. Direita: ligado. Arraste o controle; a roda dá zoom, arrastar move.",
+ "Close": "Fechar",
+ "Hold to show on": "Segure para ver ligado",
+ "{step}: off | on": "{step}: desligado | ligado",
+ "Compare failed: {error}": "Falha na comparação: {error}"
 }

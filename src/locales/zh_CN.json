@@ -617,5 +617,14 @@
  "{name}: no preview was kept for this frame": "{name}：未保留此帧的预览",
  "Camera: {name}. The learned sharpening was trained on Origin data: it runs after the star widths are rescaled, and --auto picks it only when stars can be measured.": "相机:{name}。学习式锐化是用 Origin 数据训练的:它在星点宽度重新缩放之后运行,--auto 仅在能测量星点时才选用它。",
  "Copied the diagnostics to the clipboard. Home folders are shown as ~; check it before sharing.": "诊断信息已复制到剪贴板。主文件夹显示为 ~;分享前请检查。",
- "Copy diagnostics (version, system, settings, log)": "复制诊断信息(版本、系统、设置、日志)"
+ "Copy diagnostics (version, system, settings, log)": "复制诊断信息(版本、系统、设置、日志)",
+ "Compare a step": "比较某一步骤",
+ "Before / after": "处理前 / 处理后",
+ "Before / after: {step}": "处理前 / 处理后：{step}",
+ "Comparing…": "正在比较…",
+ "Left: {step} off. Right: on. Drag the slider; wheel zooms, drag pans.": "左：{step} 关闭。右：开启。拖动滑块；滚轮缩放，拖动平移。",
+ "Close": "关闭",
+ "Hold to show on": "按住以显示开启效果",
+ "{step}: off | on": "{step}：关闭 | 开启",
+ "Compare failed: {error}": "比较失败：{error}"
 }

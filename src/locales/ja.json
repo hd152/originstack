@@ -617,5 +617,14 @@
  "{name}: no preview was kept for this frame": "{name}: このフレームのプレビューは保存されていません",
  "Camera: {name}. The learned sharpening was trained on Origin data: it runs after the star widths are rescaled, and --auto picks it only when stars can be measured.": "カメラ: {name}。学習型シャープニングは Origin のデータで学習されています。星の幅を再スケールした後に実行され、--auto は星を測定できる場合にのみ選びます。",
  "Copied the diagnostics to the clipboard. Home folders are shown as ~; check it before sharing.": "診断情報をクリップボードにコピーしました。ホームフォルダーは ~ と表示されます。共有する前に確認してください。",
- "Copy diagnostics (version, system, settings, log)": "診断情報をコピー(バージョン、システム、設定、ログ)"
+ "Copy diagnostics (version, system, settings, log)": "診断情報をコピー(バージョン、システム、設定、ログ)",
+ "Compare a step": "ステップを比較",
+ "Before / after": "前 / 後",
+ "Before / after: {step}": "前 / 後: {step}",
+ "Comparing…": "比較中…",
+ "Left: {step} off. Right: on. Drag the slider; wheel zooms, drag pans.": "左: {step} オフ。右: オン。スライダーをドラッグ。ホイールで拡大、ドラッグで移動。",
+ "Close": "閉じる",
+ "Hold to show on": "押している間オンを表示",
+ "{step}: off | on": "{step}: オフ | オン",
+ "Compare failed: {error}": "比較に失敗しました: {error}"
 }

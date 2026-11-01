@@ -47,6 +47,45 @@ def _decimate(rgb, max_dim: int):
     return a[:hb * f, :wb * f].reshape(hb, f, wb, f, a.shape[2]).mean(axis=(1, 3), dtype=np.float32)
 
 
+def compare_skip_sets(old_skip, step_id: str):
+    """For a before/after comparison of one Phase 4 step: ``(other_skip, on_now)`` -- the
+    skip list with ``step_id`` flipped, and whether the step is applied in the current
+    result. Pure; ``ValueError`` for a name that is not a toggleable step."""
+    from src.postprocess import PHASE4_TOGGLES
+    if step_id not in {i for i, _, _, _ in PHASE4_TOGGLES}:
+        raise ValueError(f'not a Phase 4 step: {step_id}')
+    old = set(old_skip or [])
+    on_now = step_id not in old
+    return sorted(old ^ {step_id}), on_now
+
+
+def compare_order(img_cur, img_other, on_now: bool):
+    """The pair as ``(off, on)`` whichever of the two is the current result."""
+    return (img_other, img_cur) if on_now else (img_cur, img_other)
+
+
+def compare_reduce(rgb, starless, max_dim: int):
+    """``rgb`` (and its starless layer, same shape) averaged down to at most ``max_dim``
+    px on the long side by the same integer factor."""
+    small = _decimate(rgb, max_dim)
+    if starless is not None:
+        starless = _decimate(starless, max_dim)
+        if starless.shape != small.shape:
+            starless = None
+    return small, starless
+
+
+def render_compare_jpeg(rgb, starless, kw: dict, max_dim: int = 1600) -> bytes:
+    """One side of a comparison: reduce, stretch with ``kw`` and encode a JPEG whose long
+    side is at most ``max_dim``. ``RuntimeError`` when the stretch backend is missing."""
+    from src.io_fits import preview_jpeg_from_uint8, render_preview_rgb_float, to_uint8
+    small, sl = compare_reduce(rgb, starless, max_dim)
+    img = render_preview_rgb_float(small, starless=sl, **kw)
+    if img is None:
+        raise RuntimeError(f"the {kw['stretch']} stretch is unavailable")
+    return preview_jpeg_from_uint8(to_uint8(img), max_dim=max_dim)
+
+
 def _slugify(text: str) -> str:
     s = re.sub(r'[^a-z0-9]+', '-', str(text).lower()).strip('-')
     return s or 'preview'
@@ -348,6 +387,58 @@ class UIEvents:
             fs.update(rgb=result, starless=starless, kw=kw)
             fs.pop('starless_img', None)
         return self.restretch(kw['stretch'], kw['color'])
+
+    def compare_postprocess_step(self, step_id: str, max_dim: int = 1600, cancel=None):
+        """Before/after of one Phase 4 step: ``(off_jpeg, on_jpeg)`` -- the finished run's
+        final image with ``step_id`` skipped and applied, each stretched like the final
+        preview and reduced to ``max_dim`` px. The current result is one side; the other
+        is a Phase 4 re-run resumed from the snapshots on a private copy of the settings
+        and the snapshot table, so the run's image, JPEG, side files and ``skip_step`` are
+        untouched (nothing is written; steps that write files or query the network are
+        switched off on the copy, as in the uncertainty runs). Slow (the re-run), so call
+        it off the GUI thread. ``cancel`` (a ``threading.Event``) set -> ``RunCancelled``
+        once the re-run returns (Phase 4 steps do not poll it). ``RuntimeError`` without a
+        finished run; ``ValueError`` for a step this run did not use."""
+        import copy
+        from src.models import RunCancelled
+        from src.postprocess import phase4_resume_step, phase4_toggles, postprocess_stack
+        from src.uncertainty import _QUIET_OFF
+        with self._lock:
+            sess, fs = self._pp_session, self._final_src
+        if sess is None or fs is None:
+            raise RuntimeError('no finished run to compare steps of')
+        args = sess['args']
+        if step_id not in {t['id'] for t in phase4_toggles(args)}:
+            raise ValueError(f'this run did not use the step {step_id}')
+        other_skip, on_now = compare_skip_sets(getattr(args, 'skip_step', None), step_id)
+        other = copy.copy(args)
+        for name in _QUIET_OFF:
+            if name != 'photometric_calibration' and hasattr(other, name):
+                setattr(other, name, False)
+        other._diagnostic_dir = None
+        other.skip_step = other_skip
+        other._cancel_event = cancel
+        snaps = sess['snaps'].fork()
+        resume = phase4_resume_step({step_id})
+        snaps.resume = None if resume == 'early' else resume
+        other._pp_snaps = snaps
+        result = postprocess_stack(sess['linear'].copy(), other, sess['final'], sess['stats'])
+        if cancel is not None and cancel.is_set():
+            raise RunCancelled()
+        starless = None
+        if getattr(other, 'layered_stretch', False) and getattr(other, 'stretch', 'ghs') == 'ghs':
+            from src.star_removal import starless_from_image
+            starless = starless_from_image(result)
+        with self._lock:
+            if self._final_src is not fs:
+                raise RuntimeError('a new run started')
+            kw_cur = dict(fs['kw'])
+            rgb_cur, sl_cur = fs['rgb'], fs['starless']
+        kw_other = self._stretch_kw(other)
+        kw_other['stretch'], kw_other['color'] = kw_cur['stretch'], kw_cur['color']
+        jpeg_cur = render_compare_jpeg(rgb_cur, sl_cur, kw_cur, max_dim)
+        jpeg_other = render_compare_jpeg(result, starless, kw_other, max_dim)
+        return compare_order(jpeg_cur, jpeg_other, on_now)
 
     def starless_view(self, on: bool) -> bytes:
         """Show the final image without its stars (``on``) or with them again, in the
