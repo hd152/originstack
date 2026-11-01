@@ -29,7 +29,7 @@ from src.frame_discovery import (
 )
 from src.gpu_context import get_gpu, reset_gpu
 from src.health_check import run_health_check
-from src.io_fits import make_master
+from src.io_fits import make_master, mono_reason
 from src.models import Config, ProcessingStats
 from src.pipeline import save_final_preview, stack_target
 from src.utils import (
@@ -696,9 +696,14 @@ def _build_masters(frames: dict, stats: "ProcessingStats | None" = None,
         n_flat = len(frames['flat'])
         sigma_f = max(1, 15 // max(1, int(np.sqrt(n_flat))))
         flat_raw = masters['flat'].astype(np.float32)
-        for r_off, c_off in [(0, 0), (0, 1), (1, 0), (1, 1)]:
-            ch = flat_raw[r_off::2, c_off::2]
-            flat_raw[r_off::2, c_off::2] = _gaussian_blur(ch, sigma_f)
+        _hdrs = [f.header for k in ('light', 'flat') for f in (frames.get(k) or [])[:1]]
+        if flat_raw.ndim == 2 and any(mono_reason(h) for h in _hdrs):
+            # a monochrome flat has no colour planes to smooth separately
+            flat_raw = _gaussian_blur(flat_raw, sigma_f)
+        else:
+            for r_off, c_off in [(0, 0), (0, 1), (1, 0), (1, 1)]:
+                ch = flat_raw[r_off::2, c_off::2]
+                flat_raw[r_off::2, c_off::2] = _gaussian_blur(ch, sigma_f)
         masters['flat'] = flat_raw
 
     masters['dark_exptime'] = None
@@ -1121,7 +1126,7 @@ def _root_has_input_fits(directory: str) -> bool:
     from src.frame_discovery import classify_frame
     from src.io_fits import _read_fits_header
     for f in sorted(os.listdir(directory)):
-        if not f.lower().endswith(('.fit', '.fits')) or is_os_metadata(f):
+        if not f.lower().endswith(('.fit', '.fits', '.fits.fz', '.fit.fz')) or is_os_metadata(f):
             continue
         path = os.path.join(directory, f)
         if not os.path.isfile(path):

@@ -40,7 +40,7 @@ def discover_frames(directory: str) -> Dict[str, List[FrameInfo]]:
             return False
         _ser_files = []
 
-    _all_exts = ('.fit', '.fits') + _raw_exts + _tiff_exts + _xisf_exts
+    _all_exts = ('.fit', '.fits', '.fits.fz', '.fit.fz') + _raw_exts + _tiff_exts + _xisf_exts
 
     files = sorted(
         os.path.join(directory, f)

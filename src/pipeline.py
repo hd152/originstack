@@ -877,6 +877,11 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
 
     # Probe first frame for dimensions
     first_data, first_hdr = load_frame(lights[0].path)
+    from src.io_fits import mono_reason
+    if mono_reason(first_hdr) == 'filter' and first_data.ndim == 3 and os.path.splitext(
+            lights[0].path)[1].lower() not in ('.ser', '.xisf', '.tif', '.tiff'):
+        safe_print(f"  Monochrome frames: no BAYERPAT, FILTER='{first_hdr.get('FILTER')}' "
+                   "(not debayered). For a colour camera set BAYERPAT in the FITS headers.")
     if first_data.ndim == 2:
         _probe_bayer = first_hdr.get('BAYERPAT',
                                      first_hdr.get('COLORTYP', args._session_bayer or 'RGGB'))
