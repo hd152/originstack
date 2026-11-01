@@ -107,7 +107,7 @@ the app: the `freeze_support()` regression). Logs go to `~/Library/Logs/OriginSt
 
 Needs a Python **with tkinter** (python.org and `actions/setup-python` builds include Tk; Homebrew's needs
 `brew install python-tk`), a Rust toolchain and the Xcode command-line tools. The release workflow builds on
-`macos-14` (arm64) and `macos-15-intel` (x86_64; GitHub retired `macos-13`). The minimum macOS the app runs on
+`macos-15` (arm64) and `macos-15-intel` (x86_64; GitHub retired `macos-13` and `macos-14`). The minimum macOS the app runs on
 is set by the wheels pip picks on the build machine (scipy's arm64 Accelerate wheels need macOS 14), not only by
 `MACOSX_DEPLOYMENT_TARGET` (11.0, which covers the Rust wheel). To try it without a release, run the "Release"
 workflow by hand from the Actions tab; both macOS jobs keep their zip as a workflow artifact.
