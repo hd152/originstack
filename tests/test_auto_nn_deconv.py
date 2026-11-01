@@ -1,5 +1,5 @@
-"""--auto picks the learned deconvolver (--deconvolve nn) on Origin data only: galaxies at their
-own blend, other targets where the wavelet denoiser would run."""
+"""--auto picks the learned deconvolver (--deconvolve nn): galaxies at their own blend, other targets
+where the wavelet denoiser would run. Off Origin it is tentative (guards in Phase 4)."""
 import pytest
 
 from src import auto_settings as a
@@ -48,15 +48,32 @@ def test_other_targets_only_where_the_wavelet_denoiser_would_run(model):
     assert args.deconvolve_nn is False
 
 
-# the Mark II's Origin678C and the other cameras the Origin platform drives were not in
-# the training data: 'starts with Origin' is not enough
+# Cameras the network was not trained on (the Mark II's Origin678C, Seestar, ASI...) get it too,
+# tentatively: the stack guards in Phase 4 (auto_settings.nn_stack_guard) can still take it back
 @pytest.mark.parametrize('camera', [None, {'model': 'IMX571', 'unit': None},
                                     {'model': 'Origin678C', 'unit': 'ab12', 'profiled': False},
                                     {'model': 'ASI294MC', 'unit': None}])
-def test_not_for_other_cameras(model, camera):
+def test_other_cameras_get_it_with_a_fallback(model, camera):
     args = _args(camera=camera)
-    assert a._apply_nn_deconvolution(args, GALAXY) == []
-    assert args.deconvolve_nn is False
+    before = (args.deconvolve_mode, args.deconvolve_nn, args.nn_deconv_blend, args.denoise_curvelet)
+    a._apply_nn_deconvolution(args, GALAXY, n_frames=50)
+    assert args.deconvolve_nn is True and args.nn_deconv_blend == a.NN_DECONV_GALAXY_BLEND
+    fb = args._auto_nn_fallback                      # what Phase 4 restores if a guard trips
+    assert (fb['deconvolve_mode'], fb['deconvolve_nn'], fb['nn_deconv_blend'], fb['denoise_curvelet']) == before
+
+
+def test_origin178_keeps_no_fallback(model):
+    args = _args()
+    a._apply_nn_deconvolution(args, GALAXY, n_frames=2)      # even a short session: unchanged rule
+    assert args.deconvolve_nn is True and not hasattr(args, '_auto_nn_fallback')
+
+
+def test_off_origin_needs_a_stack_of_frames(model):
+    args = _args(camera={'model': 'ASI294MC', 'unit': None})
+    assert a._apply_nn_deconvolution(args, GALAXY, n_frames=a.NN_OFFORIGIN_MIN_FRAMES - 1) == []
+    assert args.deconvolve_nn is False and not hasattr(args, '_auto_nn_fallback')
+    a._apply_nn_deconvolution(args, GALAXY, n_frames=a.NN_OFFORIGIN_MIN_FRAMES)
+    assert args.deconvolve_nn is True
 
 
 @pytest.mark.parametrize('flags', [['--denoiser', 'wavelet'], ['--deconvolve', 'rl'],
@@ -77,7 +94,7 @@ def test_not_without_the_model(monkeypatch):
 
 def test_runs_as_part_of_apply_auto_settings(model, monkeypatch):
     seen = []
-    monkeypatch.setattr(a, '_apply_nn_deconvolution', lambda args, weights: seen.append(weights) or [])
+    monkeypatch.setattr(a, '_apply_nn_deconvolution', lambda args, weights, n_frames=None: seen.append(weights) or [])
     monkeypatch.setattr(a, '_aggregate', lambda final: {})
     monkeypatch.setattr(a, '_compute_signals', lambda agg: {})
     monkeypatch.setattr(a, '_classify', lambda sig: 'galaxy')

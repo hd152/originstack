@@ -803,6 +803,26 @@ class StepSnapshots:
 
 
 
+def _apply_auto_nn_guard(stacked: np.ndarray, args: argparse.Namespace) -> None:
+    """--auto chose --deconvolve nn off Origin before any stack existed
+    (``auto_settings._apply_nn_deconvolution``): check the stack now and, when a guard trips,
+    put the settings --auto replaced back. Runs once per run."""
+    fb = getattr(args, '_auto_nn_fallback', None)
+    if not fb:
+        return
+    args._auto_nn_fallback = None
+    from src.auto_settings import nn_stack_guard
+    try:
+        reason = nn_stack_guard(stacked)
+    except Exception as exc:
+        reason = f"star measurement failed ({exc.__class__.__name__})"
+    if reason:
+        for attr, val in fb.items():
+            setattr(args, attr, val)
+        safe_print(f"  --auto: not using the neural-network deconvolver ({reason}); "
+                   "back to the default denoising")
+
+
 def postprocess_stack(
     stacked: np.ndarray,
     args: argparse.Namespace,
@@ -810,6 +830,7 @@ def postprocess_stack(
     stats: ProcessingStats,
 ) -> np.ndarray:
     """Apply all post-processing steps to the stacked image and return it."""
+    _apply_auto_nn_guard(stacked, args)
     skip_steps = set(getattr(args, 'skip_step', []) or [])
     _diag_dir = getattr(args, '_diagnostic_dir', None)
     _diag_counter = [1]

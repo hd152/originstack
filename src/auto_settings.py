@@ -893,7 +893,7 @@ def apply_auto_settings(
     changes: List[str] = []
     changes.extend(_apply_dynamic_settings(sig, weights, args))
     changes.extend(_apply_quality_settings(sig, args, target_type=target_type, weights=weights))
-    changes.extend(_apply_nn_deconvolution(args, weights))
+    changes.extend(_apply_nn_deconvolution(args, weights, agg.get('n_frames')))
     changes.extend(_apply_nn_denoiser(args, weights))
     changes.extend(_apply_free_diagnostics(args))
     changes.extend(_apply_comet_mode(args))
@@ -902,8 +902,9 @@ def apply_auto_settings(
     return target_type, label, sig, changes, weights
 
 
-# The learned deconvolver (--deconvolve nn) on Origin data. Origin only: it learned that
-# instrument's seeing blur and narrows ideal Gaussian stars by just 2-5%.
+# The learned deconvolver (--deconvolve nn). Trained on Origin data (it learned that
+# instrument's seeing blur and narrows ideal Gaussian stars by just 2-5%); other cameras take it
+# too since 2026-10-31, behind guards (below).
 # Galaxies (weight >= NN_DECONV_MIN_GALAXY_WEIGHT) since v3: the narrowest stars of default / RL /
 # --denoiser nn / --deconvolve nn on the five held-out targets (runbook, step 6).
 # Everything else where the wavelet denoiser would run since the survey-truth model (2026-10-25),
@@ -923,13 +924,108 @@ NN_DECONV_MIN_GALAXY_WEIGHT = 0.5
 NN_DECONV_GALAXY_BLEND = 0.35
 NN_DECONV_DEFAULT_BLEND = 0.75        # cli.py's default for an explicit --deconvolve nn
 NN_DECONV_OTHER_BLEND = 0.75          # nebulae, clusters, star fields
-# Cameras whose data the learned deconvolution was trained on. It learned that sensor's
-# sampling and the Origin's seeing blur; the Mark II's Origin678C (smaller pixels) and the
-# other cameras the Origin platform drives are not covered, so --auto leaves it off there.
+# Cameras whose data the learned deconvolution was trained on: --auto takes it without the
+# guards below. Other cameras (the Mark II's Origin678C, Seestar, ...) get it only past them.
 NN_TRAINED_CAMERAS = ('Origin178',)
 
 
-def _apply_nn_deconvolution(args, weights: Dict[str, float]) -> List[str]:
+# Off Origin, --auto also takes --deconvolve nn, behind guards (2026-10-31). Evidence (runbook,
+# "Other cameras"): Seestar S50 stacks (2.6 px stars, six targets plus IC1805 narrowband), an
+# LCO 0.4 m mono stack (4 px stars, 0.74"/px): no artefacts from the network, flux and linear
+# star colour kept, pixel scale handled by resampling outside nn_denoise.TRAIN_FWHM_RANGE.
+# The guards that need the stack are checked in Phase 4 (``nn_stack_guard``, called by
+# postprocess.postprocess_stack), because --auto runs before the stack exists: when one trips,
+# the settings --auto replaced are put back (``args._auto_nn_fallback``).
+NN_OFFORIGIN_MIN_FRAMES = 3           # a lone frame is not a stack: its noise is not what the net saw
+NN_MIN_STARS = 30                     # usable (fitted, isolated) stars to trust the width / shape
+NN_FWHM_LIMITS = (1.1, 14.0)          # px; below ~1.1 the resampler's 2.5x upsampling cap stops
+                                      # reaching the trained range, above ~14 stars are not stars
+NN_MAX_ELLIPTICITY = 0.35             # median 1 - b/a of the stars (see star_shape_stats)
+
+
+def star_shape_stats(img, max_stars: int = 80) -> Optional[dict]:
+    """``{'n', 'fwhm', 'ellipticity'}`` of the bright, isolated, unsaturated stars of an
+    (H, W, C) or (H, W) linear image, from 2-D elliptical Gaussian fits (``fwhm`` =
+    2.3548 sqrt(sx sy), ``ellipticity`` = 1 - min(s)/max(s)), or None when none could be fitted.
+    ``n`` is the number of fits kept."""
+    from scipy.optimize import least_squares
+
+    from src.star_detect import detect_stars_matched_filter
+    a = np.nan_to_num(np.asarray(img, np.float32))
+    lum = a.mean(axis=2) if a.ndim == 3 else a
+    lum = lum - np.float32(np.median(lum))
+    try:
+        src = detect_stars_matched_filter(lum)
+    except Exception:
+        return None
+    if src is None or len(src) < 8:
+        return None
+    src = src[np.argsort(-np.asarray(src['flux']))]
+    xs, ys = np.asarray(src['xcentroid'], float), np.asarray(src['ycentroid'], float)
+    half = 8
+    sat = np.percentile(lum, 99.99) * 0.6
+    d = (lum[::2, 4:] - lum[::2, :-4]).ravel()
+    min_amp = 8.0 * 1.4826 * float(np.median(np.abs(d - np.median(d)))) / np.sqrt(2.0)
+    yy, xx = np.mgrid[-half:half + 1, -half:half + 1]
+    h, w = lum.shape
+    fw, el = [], []
+    for i in range(min(len(xs), 800)):
+        xi, yi = int(round(xs[i])), int(round(ys[i]))
+        if not (half + 1 <= xi < w - half - 1 and half + 1 <= yi < h - half - 1):
+            continue
+        d2 = (xs - xs[i]) ** 2 + (ys - ys[i]) ** 2
+        d2[i] = np.inf
+        if d2.min() < 12 ** 2:
+            continue
+        cut = lum[yi - half:yi + half + 1, xi - half:xi + half + 1].astype(np.float64)
+        edge = np.concatenate([cut[0], cut[-1], cut[1:-1, 0], cut[1:-1, -1]])
+        bg0 = float(np.median(edge))
+        amp0 = float(cut.max()) - bg0
+        if amp0 <= min_amp or cut.max() >= sat:
+            continue
+
+        def resid(p):
+            amp, dx, dy, sx, sy, th, bg = p
+            c, s_ = np.cos(th), np.sin(th)
+            u = (xx - dx) * c + (yy - dy) * s_
+            v = -(xx - dx) * s_ + (yy - dy) * c
+            return (bg + amp * np.exp(-0.5 * ((u / sx) ** 2 + (v / sy) ** 2)) - cut).ravel()
+        try:
+            sol = least_squares(resid, [amp0, 0.0, 0.0, 1.8, 1.8, 0.0, bg0], max_nfev=80,
+                                bounds=([0, -3, -3, 0.5, 0.5, -np.pi, -np.inf],
+                                        [np.inf, 3, 3, 8.0, 8.0, np.pi, np.inf]))
+        except Exception:
+            continue
+        sx, sy = sol.x[3], sol.x[4]
+        if min(sx, sy) < 0.5 + 1e-3 or max(sx, sy) > 8.0 - 1e-3:
+            continue                       # ran into a bound: not a usable fit
+        fw.append(2.3548 * float(np.sqrt(sx * sy)))
+        el.append(1.0 - min(sx, sy) / max(sx, sy))
+        if len(fw) >= max_stars:
+            break
+    if not fw:
+        return None
+    return {'n': len(fw), 'fwhm': float(np.median(fw)), 'ellipticity': float(np.median(el))}
+
+
+def nn_stack_guard(img) -> Optional[str]:
+    """Why ``--deconvolve nn`` should not run on this linear stack, or None when it may: stars
+    could not be measured, too few usable ones, a width outside ``NN_FWHM_LIMITS``, or stars
+    too elliptical (the network is trained on round-ish PSFs; trailing or tilt is not seeing)."""
+    st = star_shape_stats(img)
+    if st is None:
+        return "no stars could be fitted"
+    if st['n'] < NN_MIN_STARS:
+        return f"only {st['n']} usable stars (need {NN_MIN_STARS})"
+    lo, hi = NN_FWHM_LIMITS
+    if not lo <= st['fwhm'] <= hi:
+        return f"star FWHM {st['fwhm']:.1f} px is outside {lo}-{hi} px"
+    if st['ellipticity'] > NN_MAX_ELLIPTICITY:
+        return f"stars are elliptical (median {st['ellipticity']:.2f} > {NN_MAX_ELLIPTICITY})"
+    return None
+
+
+def _apply_nn_deconvolution(args, weights: Dict[str, float], n_frames: Optional[int] = None) -> List[str]:
     changes: List[str] = []
     explicit = getattr(args, '_explicit_cli_dests', set())
     if {'denoiser', 'deconvolve_mode'} & explicit or getattr(args, 'deconvolve_nn', False):
@@ -937,11 +1033,15 @@ def _apply_nn_deconvolution(args, weights: Dict[str, float]) -> List[str]:
     galaxy = (weights or {}).get('galaxy', 0.0) >= NN_DECONV_MIN_GALAXY_WEIGHT
     if not galaxy and not getattr(args, 'denoise_curvelet', False):
         return changes                       # only where the wavelet denoiser would run
-    if str((getattr(args, '_camera', None) or {}).get('model', '')) not in NN_TRAINED_CAMERAS:
+    trained = str((getattr(args, '_camera', None) or {}).get('model', '')) in NN_TRAINED_CAMERAS
+    if not trained and n_frames is not None and n_frames < NN_OFFORIGIN_MIN_FRAMES:
         return changes
     from src.nn_denoise import DECONV_MODEL_PATH, model_available
     if not model_available(DECONV_MODEL_PATH):
         return changes
+    _attrs = ('deconvolve_mode', 'deconvolve_nn', 'deconvolve', 'nn_deconv_blend', 'denoise_curvelet',
+              'denoise_acdnr', 'denoise_bilateral', 'denoise_aniso', 'denoise_nn')
+    _before = {a: getattr(args, a, None) for a in _attrs}
     _set = _auto_setter(args, changes)
     _set('deconvolve_mode', 'nn')
     _set('deconvolve_nn', True)
@@ -950,6 +1050,8 @@ def _apply_nn_deconvolution(args, weights: Dict[str, float]) -> List[str]:
         _set('nn_deconv_blend', NN_DECONV_GALAXY_BLEND if galaxy else NN_DECONV_OTHER_BLEND)  # --config KEY=VALUE wins
     for attr in ('denoise_curvelet', 'denoise_acdnr', 'denoise_bilateral', 'denoise_aniso', 'denoise_nn'):
         _set(attr, False)                    # the network denoises as it sharpens
+    if not trained:
+        args._auto_nn_fallback = _before     # Phase 4 puts these back if a stack guard trips
     return changes
 
 
