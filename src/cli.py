@@ -2415,6 +2415,13 @@ def build_parser() -> argparse.ArgumentParser:
                    help='Write per-frame quality metrics CSV after Phase 1 '
                         '(columns: filename, snr, fwhm, star_count, quality_score, '
                         'accepted, rejection_reason)')
+    g_debug.add_argument('--frame-report', action='store_true',
+                   help='Write <output>_frames.csv and <output>_frames.json after '
+                        'registration: for every light, kept or rejected, which gate '
+                        'decided it and why (e.g. "score 12.0 < 30.0"), notes for kept '
+                        'frames far off the session median (FWHM, stars, background, '
+                        'ellipticity), and the key metrics. Changes no result. With -v '
+                        'also prints the count per reason.')
     g_debug.add_argument('--export-frames-dir', default=None, metavar='PATH',
                    help='Directory to write a stretched JPEG for every accepted frame after Phase 1')
     # originvision (the bundled defect/quality/category classifier) was removed

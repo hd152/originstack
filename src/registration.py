@@ -2023,6 +2023,11 @@ def run_registration_phase(
                 f"removing {n_res_failed} frame(s)"
             )
             keep_mask = [p for p in res_passed]
+            for f, k, rms in zip(final, keep_mask, residuals):   # for --frame-report
+                if not k and f.metrics is not None:
+                    f.metrics['phase2_drop'] = (
+                        f"registration residual {rms:.2f} px RMS > "
+                        f"{(_rel[0] if _rel is not None else max_residual_px):.2f} px")
             final = [f for f, k in zip(final, keep_mask) if k]
             final_indices = [i for i, k in zip(final_indices, keep_mask) if k]
             shifts = [s for s, k in zip(shifts, keep_mask) if k]
@@ -2044,6 +2049,10 @@ def run_registration_phase(
                            f"~{_ts['median_matches']} stars each)")
                 _thr = float(getattr(args, 'transparency_min', 0.0) or 0.0)
                 _keep = transparency_keep_mask(_ts['values'], _thr)
+                for _f, _k, _v in zip(final, _keep, _ts['values']):
+                    if not _k and _f.metrics is not None:   # for --frame-report
+                        _f.metrics['phase2_drop'] = (
+                            f"transparency {float(_v):.2f} < --transparency-min {_thr:g}")
                 if not all(_keep):
                     safe_print(f"  Transparency gate (--transparency-min {_thr:g}): "
                                f"removing {sum(1 for k in _keep if not k)} frame(s)")

@@ -760,6 +760,7 @@ python originstack.py -d <dir> -o <output.fits> [options]
 | `--quality-sweep [--apply]` | Recursively flag poor lights across a collection (dry-run by default) |
 | `--keep-checkpoint` | Save raw pre-post-processing stack for re-processing |
 | `--quality-report PATH` | Write per-frame quality metrics to CSV |
+| `--frame-report` | Write `<output>_frames.csv` / `.json`: per light, kept or rejected, the gate and plain reason, notes for outliers, key metrics (changes no result) |
 | `--dry-run` | Discover frames, show parameters, estimate resources — no processing |
 | `--health-check` | Analyse calibration and frames without stacking |
 | `--debug KIND[,..]` | Debug artefacts: registration, diagnostic, intermediates, masks |

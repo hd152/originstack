@@ -474,6 +474,8 @@ python originstack.py combine --mode sho --ha Ha.fits --oiii OIII.fits --sii SII
         <dd><p>Write a full DEBUG-level log to this file in addition to console output.</p></dd></div>
       <div id="opt-quality-report"><dt><code>--quality-report</code> <var>PATH</var></dt>
         <dd><p>Write per-frame quality metrics CSV after Phase 1 (columns: filename, snr, fwhm, star_count, quality_score, accepted, rejection_reason)</p></dd></div>
+      <div id="opt-frame-report"><dt><code>--frame-report</code></dt>
+        <dd><p>Write &lt;output&gt;_frames.csv and &lt;output&gt;_frames.json after registration: for every light, kept or rejected, which gate decided it and why (e.g. &quot;score 12.0 &lt; 30.0&quot;), notes for kept frames far off the session median (FWHM, stars, background, ellipticity), and the key metrics. Changes no result. With -v also prints the count per reason.</p></dd></div>
       <div id="opt-export-frames-dir"><dt><code>--export-frames-dir</code> <var>PATH</var></dt>
         <dd><p>Directory to write a stretched JPEG for every accepted frame after Phase 1</p></dd></div>
     </dl>
