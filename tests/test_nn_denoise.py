@@ -321,10 +321,11 @@ def test_star_mask_is_one_at_stars_and_zero_far_away():
 def test_star_restore_changes_output_only_near_stars(monkeypatch):
     monkeypatch.setattr(nd, 'load_weights', lambda path=None: _random_weights())
     img = _star_field(4.0)
+    monkeypatch.setattr(nd, 'measure_star_fwhm', lambda im, max_stars=60: 3.0)   # inside the full-strength range
     base = nd.nn_denoise(img)
     star = nd.nn_denoise(img, star_restore_frac=0.4)
     diff = np.abs(star - base).max(axis=2)
-    mask = nd.star_mask(img, nd.measure_star_fwhm(img))
+    mask = nd.star_mask(img, 3.0)
     assert diff.max() > 0                                  # it does something
     far = ndi.gaussian_filter(mask, 6) < 1e-4              # well outside every star's mask
     # the blurs differ by at most the 4 px kernel's reach beyond the mask
@@ -332,20 +333,21 @@ def test_star_restore_changes_output_only_near_stars(monkeypatch):
 
 
 def test_star_restore_fades_by_weight_not_blur_width(monkeypatch):
-    """Near the top of the fade-out the tight restore must be a weak version of the real one,
-    not a ~0 px blur (which gave the input back: Pleiades 4.37 px, fwhm_ratio 0.73 -> 1.03)."""
+    """Inside the fade-out the tight restore is a weaker version of the real one, not a ~0 px
+    blur (which gave the input back: Pleiades 4.37 px, fwhm_ratio 0.73 -> 1.03), and past it
+    (>= 4.0 px: Pleiades, Omega, Orion) the output is the plain restore, bit for bit."""
     monkeypatch.setattr(nd, 'load_weights', lambda path=None: _random_weights())
     img = _star_field(4.0)
-    monkeypatch.setattr(nd, 'measure_star_fwhm', lambda im, max_stars=60: 4.37)
     base = nd.nn_denoise(img)
+    monkeypatch.setattr(nd, 'measure_star_fwhm', lambda im, max_stars=60: 3.95)
     near_top = nd.nn_denoise(img, star_restore_frac=0.4)
     monkeypatch.setattr(nd, 'measure_star_fwhm', lambda im, max_stars=60: 3.0)
     full = nd.nn_denoise(img, star_restore_frac=0.4)
-    d_top = np.abs(near_top - base).max()
-    d_full = np.abs(full - base).max()
-    assert d_full > 0 and d_top < 0.2 * d_full             # ramp 0.04: nearly the plain restore
-    monkeypatch.setattr(nd, 'measure_star_fwhm', lambda im, max_stars=60: 4.5)
-    np.testing.assert_array_equal(nd.nn_denoise(img, star_restore_frac=0.4), base)   # past the ramp: off
+    d_top, d_full = np.abs(near_top - base).max(), np.abs(full - base).max()
+    assert d_full > 0 and 0 < d_top < 0.5 * d_full         # ramp 0.125
+    for fw in (4.0, 4.37, 5.1):
+        monkeypatch.setattr(nd, 'measure_star_fwhm', lambda im, max_stars=60, fw=fw: fw)
+        np.testing.assert_array_equal(nd.nn_denoise(img, star_restore_frac=0.4), base)
 
 
 def test_monochrome_input_stays_monochrome(monkeypatch):
