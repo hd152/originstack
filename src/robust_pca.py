@@ -281,7 +281,7 @@ def robust_pca_master(frames: List[FrameInfo], shape: Tuple[int, ...],
     skipped = 0
     for f in frames:
         try:
-            data, _ = load_frame(f.path)
+            data, _ = load_frame(f.path, replicate_mono=False)
         except Exception:
             continue
         if data.shape != shape:
