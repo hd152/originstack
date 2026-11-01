@@ -946,3 +946,21 @@ residual. `STAR_RESTORE_FWHM` is now (3.6, 4.0) px (was 3.6-4.4), so Omega, Orio
 (4.3-4.9 px in the linear stack) are bit-identical to restore-off (checked on 1000x1400 crops);
 Sunflower (3.5 px) and Sculptor (2.9 px) are at full strength, i.e. their rows in the tables
 above stand. The flux loss it repairs is already gone by ~4 px (Omega 4.42: 1.00).
+
+**Phase 4 bench of the star-aware restore, after the fade was narrowed (2026-10-31).** Same
+method and thresholds as above on `d8b9355` (`STAR_RESTORE_FWHM` (3.6, 4.0)); logs
+`C:\nn_work\bench_sr3\{bench.log,<stack>.json}`. 0 -> 0.4 (absolute values differ a little from
+the earlier tables because main moved since `a133a67`, e.g. Pleiades faint_cnr 77 here, 68 there;
+compare the pairs, not the tables):
+
+| stack (FWHM px) | fwhm_ratio | colour_slope_lin | hue_err deg | faint_cnr | ring | sky_noise |
+|---|---|---|---|---|---|---|
+| Omega (4.42), Orion (5.08), **Pleiades (4.37)** | identical | identical | identical | identical | identical | identical |
+| Sculptor (2.97) | 0.499 -> 0.489 | 0.493 -> 0.624 | 3.72 -> 4.08 (+0.36) | 251.6 -> 248.2 (-1.3%) | 11.29 -> 5.67 (-50%) | unchanged |
+| Sunflower (3.56) | 0.474 -> 0.471 | 0.646 -> 0.737 | 4.35 -> 4.60 (+0.25) | 195.9 -> 195.4 (-0.3%) | 7.96 -> 4.94 (-38%) | unchanged |
+
+Omega, Orion and Pleiades are identical to restore-off in every metric (the Pleiades regression
+is gone); Sculptor and Sunflower keep the gain of the first table (more linear star colour, about
+half the bright halo, width unchanged) at the same small costs (hue +0.25-0.36 deg, faint contrast
+-0.3 / -1.3%). No metric beyond the thresholds (fwhm_ratio 0.02, faint_cnr 3%, hue 0.5 deg, ring
+10% worse). Verdict: **#233's fade is fine as is; nothing left to fix.**
