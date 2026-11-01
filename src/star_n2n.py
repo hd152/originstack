@@ -77,6 +77,12 @@ SAT_FEATHER = 0.5             # the core fill is blended into the data over r..(
 SPIKE_RADIAL_PX = 21          # spikes: median along the radius over this many px (drops stars, noise)...
 SPIKE_ANGLE_DEG = 30.0        # ...minus the median over this wide an angle (keeps what is narrow in angle)
 SPIKE_FLOOR = 0.5             # soft threshold on the spike model (sky sigma): noise is not subtracted
+CORE_R = 12                   # px; residual cores: a donor's core is searched and refilled within this radius...
+CORE_RING = 5                 # ...against the ring this wide just outside it (median level, MAD noise)
+CORE_GATE = 8.0               # a star has a residual core when its 1.5 px-smoothed luminance peak is this many ring sigmas up
+CORE_K = 3.0                  # pixels more than this many ring sigmas above the ring are the core (grown by CORE_GROW px)
+CORE_GROW = 1
+CORE_FILL_SIGMA = 3.0         # px; normalised-convolution fill of the core from the pixels around it
 
 def sky_level_z(bg: np.ndarray, sigma: np.ndarray) -> np.ndarray:
     """Sky level B per channel in noise units (median background / sigma); the photon-noise
@@ -392,6 +398,80 @@ def guard_holes(x: np.ndarray, field: 'StarField', floor_sigma: float = GUARD_SI
     return out
 
 
+def remove_residual_cores(x: np.ndarray, field: 'StarField', seed: int = 0) -> np.ndarray:
+    """Refill the small core the network leaves at its brightest unsaturated stars.
+
+    The (1 + alpha) / alpha extrapolation under-removes the very brightest stars (Orion:
+    ``real_left`` of the top flux tertile 0.20, single stars 0.5-1.1; their halos reach past
+    the copies the network trained on). The leftover is a lopsided crescent of the PSF core, so
+    a radial profile subtraction is wrong (it digs a hole where the star's true centre is, and
+    the Pleiades' ``hole`` went to -1.8); the clipped pixels have to be replaced.
+
+    Per donor: level and noise of the ``CORE_RING`` px ring outside ``CORE_R`` (median, MAD).
+    A star has a core only if the 1.5 px-smoothed luminance peak inside ``CORE_R`` is
+    ``CORE_GATE`` ring sigmas above the ring (faint stars' tails are noise, which this would
+    otherwise bias to a deficit: faint ``real_left`` -0.2..-0.3 without the gate). Pixels more
+    than ``CORE_K`` sigma above the ring in any channel, grown ``CORE_GROW`` px, are replaced
+    by normalised convolution from the pixels around them (not below the ring's level: the
+    network's over-subtracted annulus would otherwise pull the core into a dip) plus the ring's noise, like
+    ``fill_saturated``'s core, so the texture stays. Negative pixels (an inverted core) are
+    left to ``guard_holes``."""
+    out = x.copy()
+    h, w, c = x.shape
+    rng = np.random.default_rng(seed)
+    for y, xc, q in zip(field.donor_y, field.donor_x, field.donor_r):
+        rm = min(int(q), CORE_R)
+        R = rm + CORE_RING + 2 * int(CORE_FILL_SIGMA)
+        y0, y1, x0, x1 = max(0, y - R), min(h, y + R + 1), max(0, xc - R), min(w, xc + R + 1)
+        cut = out[y0:y1, x0:x1]
+        yy, xx = np.mgrid[y0 - y:y1 - y, x0 - xc:x1 - xc]
+        rr = np.hypot(yy, xx)
+        ring = (rr > rm) & (rr <= rm + CORE_RING)
+        if ring.sum() < 8:
+            continue
+        inside = rr <= rm
+        bg = np.median(cut[ring], axis=0)
+        sg = 1.4826 * np.median(np.abs(cut[ring] - bg), axis=0) + 1e-3
+        sm = ndi.gaussian_filter((cut - bg).mean(-1), 1.5, mode='nearest')
+        rl = sm[ring]
+        sl = 1.4826 * np.median(np.abs(rl - np.median(rl))) + 1e-3
+        if (sm - np.median(rl))[inside].max() / sl < CORE_GATE:
+            continue
+        hot = ((cut - bg) / sg > CORE_K).any(-1) & inside
+        mask = ndi.binary_dilation(hot, iterations=CORE_GROW) & inside
+        keep = (~mask).astype(np.float32)
+        den = np.maximum(ndi.gaussian_filter(keep, CORE_FILL_SIGMA, mode='nearest'), 1e-6)
+        noise = _ring_noise(cut - bg, ring, rng)
+        for k in range(c):
+            v = cut[..., k]
+            fill = ndi.gaussian_filter(v * keep, CORE_FILL_SIGMA, mode='nearest') / den
+            v[mask] = (np.maximum(fill, bg[k]) + noise[..., k])[mask]
+    return out
+
+
+def _ring_noise(res: np.ndarray, ring: np.ndarray, rng: np.random.Generator) -> np.ndarray:
+    """Noise with the ring's statistics, shaped like ``res`` (h, w, C): per-channel sigma (MAD),
+    the channels' correlation, and the lag-1 pixel correlation (debayer, warp). Independent
+    white noise per channel showed as a speckled colour disc in the grey, smooth surroundings."""
+    h, w, c = res.shape
+    r = res[ring]
+    sg = 1.4826 * np.median(np.abs(r - np.median(r, axis=0)), axis=0) + 1e-3
+    pair = ring[:, :-1] & ring[:, 1:]
+    a, b = res[:, :-1][pair] / sg, res[:, 1:][pair] / sg
+    rho = float(np.clip(np.mean(a * b), 0.0, 0.9))
+    sp = 1.0 / (2.0 * np.sqrt(-np.log(rho))) if rho > 0.05 else 0.0
+    cor = np.corrcoef((r / sg).T) if len(r) > 2 and c > 1 else np.eye(c)
+    try:
+        chol = np.linalg.cholesky(np.nan_to_num(cor) + 1e-3 * np.eye(c))
+    except np.linalg.LinAlgError:
+        chol = np.eye(c)
+    n = rng.standard_normal((h, w, c)).astype(np.float32)
+    if sp > 0:
+        n = ndi.gaussian_filter(n, (sp, sp, 0), mode='nearest')
+        n /= np.float32(max(n.std(), 1e-6))
+    return ((n @ chol.T.astype(np.float32)) * sg.astype(np.float32)).astype(np.float32)
+
+
 def constrain_star_layer(z: np.ndarray, x: np.ndarray, field: 'StarField') -> np.ndarray:
     """Hold the star layer ``z - x`` (noise units) to what stars can be.
 
@@ -606,14 +686,17 @@ def _ring_level(out: np.ndarray, y: int, x: int, r_in: int = 45, r_out: int = 60
 
 
 def starless_z(z: np.ndarray, w, alpha: float = 1.0, field: Optional['StarField'] = None,
-               tta: int = 2, seed: int = 0, guard: bool = True, saturated: bool = True) -> np.ndarray:
+               tta: int = 2, seed: int = 0, guard: bool = True, saturated: bool = True,
+               cores: bool = True) -> np.ndarray:
     """Noisier2Noise estimate of the starless sky from noise-unit data z (H, W, C):
     ``z - (1 + alpha) / alpha * (z - f)`` with f the trained network's output. The network
     was trained with a sky-noise disc on every star (``StarField.real_discs``); with a
     ``field`` (built on z), f is its mean over ``tta`` inputs ``z + discs`` with independent
     discs, and the known discs stay out of the formula's z. ``guard`` then holds the star
     layer to what stars can be (``constrain_star_layer``) and floors the star footprints
-    (``guard_holes``); ``saturated`` fills the saturated stars (``fill_saturated``)."""
+    (``guard_holes``); ``cores`` refills the cores left at the brightest stars
+    (``remove_residual_cores``, with ``guard``); ``saturated`` fills the saturated stars
+    (``fill_saturated``)."""
     if field is None or tta <= 0 or not field.ok:
         f = nd.denoise_z(z, w)
     else:
@@ -625,6 +708,8 @@ def starless_z(z: np.ndarray, w, alpha: float = 1.0, field: Optional['StarField'
     x = (z - np.float32((1.0 + alpha) / alpha) * (z - f)).astype(np.float32)
     if guard and field is not None and field.ok:
         x = guard_holes(constrain_star_layer(z, x, field), field)
+        if cores:
+            x = guard_holes(remove_residual_cores(x, field, seed), field)
     if saturated and field is not None and field.ok and field.saturated.any():
         x = fill_saturated(x, z, field, seed)
     return x
