@@ -565,6 +565,8 @@ python originstack.py -d lights/ --health-check
 
 Analyses calibration quality (bias noise, dark thermal current, flat vignetting) and reports any ISO or dimension mismatches — without actually stacking anything.
 
+A calibration master larger than the lights is cropped to them when that is safe (same binning, an even offset from `XORGSUBF`/`YORGSUBF` or a small symmetric centred difference); a binning mismatch or unknown offset still disables that master, with the reason in the log. Lights in one folder that differ in binning, frame size, gain/ISO or camera are stacked as separate groups (`<output>_<filter>_<setting>.fits`) instead of mixed; a homogeneous folder is unchanged.
+
 ### Reuse a run's settings
 
 Every run saves its effective settings next to the output as `<output>_config.toml` (including what `--auto` chose):
