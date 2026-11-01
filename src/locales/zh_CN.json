@@ -614,5 +614,8 @@
  "Copied the problem report to the clipboard. Check it, then paste it into an email or a forum post (Cloudy Nights, the GitHub Discussions page).": "问题报告已复制到剪贴板。请检查后粘贴到邮件或论坛帖子中（Cloudy Nights、GitHub Discussions 页面）。",
  "Result not right? Report it": "结果不对？报告问题",
  "Report a problem (top right) opens a GitHub issue or copies the details, with the log, for an email or a forum post.": "右上角的“报告问题”可打开 GitHub Issue，或复制包含日志的详细信息用于邮件或论坛帖子。",
- "{name}: no preview was kept for this frame": "{name}：未保留此帧的预览"
+ "{name}: no preview was kept for this frame": "{name}：未保留此帧的预览",
+ "Camera: {name}. The learned sharpening was trained on Origin data: it runs after the star widths are rescaled, and --auto picks it only when stars can be measured.": "相机:{name}。学习式锐化是用 Origin 数据训练的:它在星点宽度重新缩放之后运行,--auto 仅在能测量星点时才选用它。",
+ "Copied the diagnostics to the clipboard. Home folders are shown as ~; check it before sharing.": "诊断信息已复制到剪贴板。主文件夹显示为 ~;分享前请检查。",
+ "Copy diagnostics (version, system, settings, log)": "复制诊断信息(版本、系统、设置、日志)"
 }

@@ -513,3 +513,72 @@ def problem_report_text(log_text: str = '', error: Optional[str] = None) -> str:
     note = f'(Copied from OriginStack. Bug reports: {ISSUES_URL})'
     return (f'OriginStack problem report {title}'.rstrip() + '\n\n'
             + _report_body(head, lines, note))
+
+
+_OPTIONAL_DEPS = ('astro_native', 'cupy', 'rawpy', 'tifffile', 'PIL', 'psutil', 'tqdm')
+
+
+def _gpu_summary() -> str:
+    """CuPy and a CUDA device, without raising (no GPU is the usual case)."""
+    import importlib.util
+    if importlib.util.find_spec('cupy') is None:
+        return 'cupy not installed'
+    try:
+        import cupy
+        n = int(cupy.cuda.runtime.getDeviceCount())
+        if n < 1:
+            return 'cupy installed, no CUDA device'
+        name = cupy.cuda.runtime.getDeviceProperties(0)['name']
+        name = name.decode(errors='replace') if isinstance(name, bytes) else str(name)
+        return f'cupy installed, {n} CUDA device(s): {name}'
+    except Exception as exc:
+        return f'cupy installed, CUDA unavailable ({type(exc).__name__})'
+
+
+def diagnostics_text(settings: Optional[Dict[str, Any]] = None, log_text: str = '',
+                     n_lines: int = 60) -> str:
+    """Plain text for the clipboard: version, OS/Python, native and GPU status, which
+    optional packages import, the form settings changed from their defaults (as
+    ``key = value`` config lines) and the tail of the log. The home folder is
+    written ``~`` throughout."""
+    import importlib.util
+    import platform
+    import sys
+
+    from src.utils import native_status, read_version
+    deps = [f"{m}={'yes' if importlib.util.find_spec(m) is not None else 'no'}"
+            for m in _OPTIONAL_DEPS]
+    out = [f"OriginStack {read_version()}" + (' (packaged app)' if getattr(sys, 'frozen', False) else ''),
+           f'{platform.platform()}, Python {platform.python_version()}',
+           native_status(), f'GPU: {_gpu_summary()}', 'Optional packages: ' + ', '.join(deps),
+           '', 'Settings changed from the defaults:']
+    items = [(k, v) for k, v in sorted((settings or {}).items()) if v not in (None, '')]
+    out += [f'{k} = "{v}"' if isinstance(v, str) else f'{k} = {v}' for k, v in items] or ['(none)']
+    lines = [ln.rstrip() for ln in (log_text or '').splitlines() if ln.strip()][-n_lines:]
+    out += ['', f'Log (last {len(lines)} lines):', *lines]
+    return _redact_home('\n'.join(out))
+
+
+def unprofiled_camera(lights) -> Optional[str]:
+    """Name of the camera of a folder whose lights come from a camera other than a
+    profiled one (the Origin178); None for a profiled camera or no readable header."""
+    from src.camera_profile import identify, profile_for
+    if not lights:
+        return None
+    hdr = getattr(lights[0], 'header', None)
+    if hdr is None:
+        return None
+    cam = identify(hdr)
+    if cam is not None:
+        try:
+            shape = (int(hdr.get('NAXIS2')), int(hdr.get('NAXIS1')))
+        except Exception:
+            shape = None
+        if profile_for(cam, shape) is not None:
+            return None
+        name = cam.label
+    else:
+        name = str(hdr.get('INSTRUME') or '').strip()
+        if not name:
+            return None
+    return name

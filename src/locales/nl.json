@@ -614,5 +614,8 @@
  "Copied the problem report to the clipboard. Check it, then paste it into an email or a forum post (Cloudy Nights, the GitHub Discussions page).": "Het probleemrapport is naar het klembord gekopieerd. Controleer het en plak het in een e-mail of forumbericht (Cloudy Nights, de GitHub Discussions-pagina).",
  "Result not right? Report it": "Resultaat niet goed? Meld het",
  "Report a problem (top right) opens a GitHub issue or copies the details, with the log, for an email or a forum post.": "Probleem melden (rechtsboven) opent een GitHub-issue of kopieert de details, met het logboek, voor een e-mail of forumbericht.",
- "{name}: no preview was kept for this frame": "{name}: er is geen voorvertoning bewaard voor dit frame"
+ "{name}: no preview was kept for this frame": "{name}: er is geen voorvertoning bewaard voor dit frame",
+ "Camera: {name}. The learned sharpening was trained on Origin data: it runs after the star widths are rescaled, and --auto picks it only when stars can be measured.": "Camera: {name}. De aangeleerde verscherping is getraind op Origin-gegevens: ze draait na het herschalen van de sterbreedte en --auto kiest ze alleen als sterren meetbaar zijn.",
+ "Copied the diagnostics to the clipboard. Home folders are shown as ~; check it before sharing.": "Diagnose naar het klembord gekopieerd. Persoonlijke mappen staan als ~; controleer voor het delen.",
+ "Copy diagnostics (version, system, settings, log)": "Diagnose kopiëren (versie, systeem, instellingen, logboek)"
 }
