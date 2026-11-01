@@ -758,7 +758,37 @@ def _build_masters(frames: dict, stats: "ProcessingStats | None" = None,
     if stats is not None:
         stats.calibration_time = time.time() - _build_start
 
+    _drop_mismatched_masters(masters, frames)
     return masters
+
+
+def _drop_mismatched_masters(masters: dict, frames: dict) -> list:
+    """Disable (set to None) bias/dark/flat masters whose shape differs from the lights.
+
+    Phase 1 skips a mismatched master per frame without a word, so this is the one
+    place it is reported: once per master kind per call, in the parent process (never
+    in pool workers). The first light's ``NAXIS1``/``NAXIS2`` give the light shape.
+    Returns the names of the masters that were disabled.
+    """
+    lights = frames.get('light') or []
+    if not lights:
+        return []
+    hdr = lights[0].header
+    light_h, light_w = hdr.get('NAXIS2'), hdr.get('NAXIS1')
+    if not (light_h and light_w):
+        return []
+    dropped = []
+    for cal_name in ('bias', 'dark', 'flat'):
+        cal = masters.get(cal_name)
+        if cal is None:
+            continue
+        if cal.shape[0] != light_h or cal.shape[1] != light_w:
+            safe_print(f"  ⚠ WARNING: {cal_name} master ignored: its dimensions "
+                       f"{cal.shape[1]}×{cal.shape[0]} don't match the lights "
+                       f"{light_w}×{light_h} — disabling {cal_name} calibration")
+            masters[cal_name] = None
+            dropped.append(cal_name)
+    return dropped
 
 
 def _run_combined_sessions(subdirs: list, output: str, args: argparse.Namespace) -> None:
@@ -1286,20 +1316,7 @@ def process_directory(directory: str, output: str, args: argparse.Namespace):
         # Create master calibration frames
         masters = _build_masters(frames, stats, args)
 
-        # Validate calibration frame dimensions match light frames
-        if frames['light']:
-            first_hdr = frames['light'][0].header
-            light_h = first_hdr.get('NAXIS2')
-            light_w = first_hdr.get('NAXIS1')
-            if light_h and light_w:
-                for cal_name in ('bias', 'dark', 'flat'):
-                    cal = masters.get(cal_name)
-                    if cal is not None:
-                        cal_shape = cal.shape
-                        if cal_shape[0] != light_h or cal_shape[1] != light_w:
-                            safe_print(f"  ⚠ WARNING: {cal_name} dimensions {cal_shape[1]}×{cal_shape[0]} "
-                                       f"don't match lights {light_w}×{light_h} — disabling {cal_name} calibration")
-                            masters[cal_name] = None
+        # (master dimensions are validated against the lights inside _build_masters)
 
         # --- Calibration frame analysis ---
         if frames['dark'] or frames['flat'] or frames['bias']:
