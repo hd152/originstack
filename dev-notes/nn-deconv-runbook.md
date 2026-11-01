@@ -964,3 +964,21 @@ is gone); Sculptor and Sunflower keep the gain of the first table (more linear s
 half the bright halo, width unchanged) at the same small costs (hue +0.25-0.36 deg, faint contrast
 -0.3 / -1.3%). No metric beyond the thresholds (fwhm_ratio 0.02, faint_cnr 3%, hue 0.5 deg, ring
 10% worse). Verdict: **#233's fade is fine as is; nothing left to fix.**
+
+**Star-aware restore at the frame edge (2026-11-01).** The matched-filter detector ignores
+`max(cell // 2, 2 * ceil(3 * 5.5 / 2.3548))` = 32 px at the edge, so `star_mask` missed stars there
+(Sculptor y,x = 1,1723; Sunflower 332,2954; Orion 9,1503: mask weight 0, plain 4 px restore).
+`star_mask` now runs the detector a second and third time on the image padded by border + 8 px
+(reflect, then edge) and adds only detections whose centre is inside the frame and inside that
+border; the detector is unchanged. Why two pads: reflection merges a star 2-5 px from the edge with
+its mirror image into one elongated blob that the roundness cut rejects (synthetic star at x=3: not
+found), replication misses 0-1 px; zero padding found 20x more "stars" in Sculptor's band (382 vs
+17: sky step at the edge). Checks on the held-out stacks: the three known misses now have weight 1;
+the mask differs from the old one only within ~60 px of an edge (0 changed pixels beyond; the
+first-pass detections are untouched); mirror images land outside the frame and are dropped.
+Added band detections 14-33 per stack. Cost: +1.4 s per `star_mask` on Sculptor (1876x2946).
+Omega, Orion and Pleiades (ramp 0) never call `star_mask`, so they stay bit-identical to
+restore-off. Flux kept in the 3 FWHM aperture on 4-edge-strip crops (9 Sculptor, 8 Sunflower edge
+stars): median 0.999 -> 0.999 and 1.011 -> 1.012; bright edge stars are ~1.00 either way, so the
+measurable gain is small (the faint ones are noise-limited); the point is consistency with the
+interior (same restore everywhere), not a large flux change.

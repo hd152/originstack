@@ -318,6 +318,26 @@ def test_star_mask_is_one_at_stars_and_zero_far_away():
         or True                                           # noise-only: detections are allowed to be empty
 
 
+@pytest.mark.parametrize('x', [1, 3, 5, 8, 12])
+def test_star_mask_covers_stars_in_the_detector_border(x):
+    """The detector ignores ~32 px at the frame edge; the padded second passes find a star
+    there (weight 1, at any distance: reflection alone misses 2-5 px, replication 0-1 px),
+    the interior mask stays bit-identical, and no mirror image appears inside the frame."""
+    img = _star_field(3.0)
+    base = nd.star_mask(img, 3.0)
+    yy, xx = np.mgrid[:300, :300]
+    sig = 3.0 / 2.3548
+    edge = img.copy()
+    for (y0, x0) in [(150, x), (x, 200), (299 - x, 100)]:
+        edge += (900.0 * np.exp(-((yy - y0) ** 2 + (xx - x0) ** 2) / (2 * sig ** 2)))[..., None].astype(np.float32)
+    m = nd.star_mask(edge, 3.0)
+    assert m[150, x] == 1.0 and m[x, 200] == 1.0 and m[299 - x, 100] == 1.0
+    assert base[150, x] < 1.0                               # the first pass alone missed it
+    inner = (slice(60, 240), slice(60, 240))
+    np.testing.assert_array_equal(m[inner], base[inner])    # interior untouched
+    assert m[150, 3 * 3 + x + 2:][:5].max() == 0.0   # nothing mirrored/duplicated beyond the star's own ramp
+
+
 def test_star_restore_changes_output_only_near_stars(monkeypatch):
     monkeypatch.setattr(nd, 'load_weights', lambda path=None: _random_weights())
     img = _star_field(4.0)
