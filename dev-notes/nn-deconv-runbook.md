@@ -902,6 +902,23 @@ fix before #233 merges**: fade the mask weight with the ramp and keep the blur w
 (`smask * ramp`, sigma `frac * fw`), then re-run this table; thresholds used: fwhm_ratio change
 > 0.02, faint_cnr > 3%, hue_err > 0.5 deg, ring > 10% count as moves beyond noise.
 
+**`--auto` off Origin (2026-10-31).** `--auto` now picks `--deconvolve nn` on other cameras too
+(`auto_settings._apply_nn_deconvolution`): same rules (galaxy weight >= 0.5 at blend 0.35, else
+where the wavelet denoiser would run at 0.75), plus >= 3 accepted frames. `--auto` runs before
+the stack exists, so the stack guards run first thing in Phase 4 (`postprocess._apply_auto_nn_guard`
+-> `auto_settings.nn_stack_guard`) and, when one trips, put back the settings `--auto` replaced
+(`args._auto_nn_fallback`) with one log line: no stars fitted; fewer than 30 usable (bright,
+isolated, unsaturated, 2-D Gaussian fits); median FWHM outside 1.1-14 px (below ~1.1 the
+resampler's 2.5x upsampling cap stops reaching the trained range); median ellipticity
+(1 - b/a) above 0.35. Measured on the 13 evidence stacks (5 Origin, 7 S50, LCO mono) the
+medians run 0.06-0.26 (worst NGC7000 0.257, Omega 0.254; star FWHM 2.7-5.0 px; all 80 fits
+kept), so none is blocked and 0.35 leaves ~35% margin over the worst good one; no real trailed
+stack was available, only synthetic ones (ratio 0.5 -> 0.50, blocked). Origin178 is unchanged
+and unguarded. End to end: S50 M101 (Galaxy) and IC 1396A (Emission Nebula) take it at 0.35 /
+0.75 and look as the `--deconvolve nn` runs above (M101 slightly softer than 0.75, no
+artefacts, the saturated-star moat is gone with #235); the synthetic CI session (15 stars) is
+blocked with "only 15 usable stars (need 30)" and falls back to the default denoising.
+
 **Phase 4 bench of the star-aware restore, after the weight-fade fix (2026-10-31).** Same method
 and thresholds as above on `a133a67` (the fade now scales the mask weight, blur width fixed at
 `frac * fw`); logs `C:\nn_work\bench_sr2\{bench.log,<stack>.json}`. 0 -> 0.4:
