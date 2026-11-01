@@ -17,18 +17,14 @@ pip install maturin && (cd ext/astro_native && maturin develop --release)
 ### Run tests
 ```bash
 pytest -q
-# Full suite, parallel (pytest-xdist, in requirements-dev.txt): 2262 tests in ~90 s on
-# the 8-core laptop. Tests never reach the network (tests/conftest.py _no_network):
-# with SIMBAD unreachable, its lookup cost every pipeline test a 21 s connect timeout
-# and the suite took 448 s
+# Full suite, parallel (pytest-xdist): ~4.5 min on the 8-core laptop. Tests never reach the
+# network (tests/conftest.py _no_network)
 pytest -q -n auto
 # Run a single test
 pytest tests/test_core.py::test_calculate_shift_recovery -v
 ```
-`-n auto` is not the default (no `addopts` in `pyproject.toml`) -- deliberately: xdist runs each
-test in a forked worker process, which breaks `--pdb`/`breakpoint()` interactive debugging (a
-worker's stdin isn't wired up for it) and interleaves `-s` print output across workers. CI uses
-`-n auto` on both jobs (`.github/workflows/ci.yml`) where that tradeoff doesn't apply.
+`-n auto` is deliberately not the default: xdist workers break `--pdb`/`breakpoint()` and
+interleave `-s` output. CI uses it on both jobs.
 
 ### Lint
 ```bash
@@ -69,10 +65,9 @@ python originstack.py -d lights/ -o stacked.fits --debug registration
 ```
 
 ### Working in parallel sessions
-Several agent sessions (Claude, Copilot) share this machine, and a branch switch in the shared
-`C:\source\originstack` checkout moves every session's working tree with it: on 2026-10-19 one
-session's commits landed on another's branch, and another's uncommitted experiment files were
-committed and merged inside an unrelated PR (#139, removed again in #140). So:
+Several agent sessions share this machine, and a branch switch in the shared
+`C:\source\originstack` checkout moves every session's working tree (commits and uncommitted
+files from different sessions have landed in the wrong PR before). So:
 - Do multi-step work in your own worktree from the start, and remove it when done:
   ```bash
   git fetch origin && git worktree add -b <branch> ../originstack-<topic> origin/main
@@ -132,11 +127,11 @@ committed and merged inside an unrelated PR (#139, removed again in #140). So:
 | `background.py` | Mesh/DBE background (DBE and `--bg-method wavelet` share `_patch_background_extraction`; only the surface fit differs), sky residual, edge bands, `gaussian_filter_ds`, `gaussian_blur_spatial` |
 | `denoising.py` | Directional wavelet (`--denoiser wavelet`, `--wavelet-protect`; `curvelet` alias), ACDNR, bilateral, aniso, `shrink_stars` (the star-reduction step), multiscale local contrast, chroma NR |
 | `wavelet.py` | Native-backed `wavedec2`/`waverec2` |
-| `nn_denoise.py` | `--denoiser nn`: Noise2Noise U-Net trained on real sessions' quarter-stacks (`tools/gen_n2n_pairs.py`, `tools/train_nn_denoise.py --inject`; weights `src/data/nn_denoise.npz`), numpy forward pass on native `nn_conv3x3`; input normalised to noise units; low-frequency restore (`nn_restore_sigma`, 4 px) returns faint extended light a min-MSE denoiser flattens; skips chroma NR (`nn_chroma_nr`); sets `args._preview_noise_scale` so the preview's thresholds use the pre-denoise noise and its black point the noise left. Score with `tools/eval_nn_denoise.py` (error vs an independent half-stack, no ground truth). `--deconvolve nn` runs the same network with `src/data/nn_deconv.npz` (v4: Pan-STARRS survey truth, `tools/fetch_ps1_truth.py` + `tools/gen_survey_pairs.py`, scored by `tools/eval_ps1_truth.py`; fine-tuned from v3, trained on seeing pairs) at the same step, restore `nn_deconv_restore_sigma` 4 px (without it faint sources lose up to 2/3 of their flux), then mixes in the nn denoiser's output (`nn_deconv_blend`, share kept: 0.75, `--auto` galaxies 0.35; alone it leaves more sky noise and costs galaxies faint contrast); it turns the denoisers off and marks them explicit so presets/`--auto` cannot re-enable them. `--auto` chooses it itself when neither `--denoiser` nor `--deconvolve` was given (`auto_settings._apply_nn_deconvolution`): galaxies (blend weight >= 0.5) at 0.35, other targets where the wavelet denoiser would run at 0.75. Off Origin (Seestar etc.) it needs >= 3 frames and is tentative: `args._auto_nn_fallback` holds the replaced settings and Phase 4 (`postprocess._apply_auto_nn_guard`, first line of `postprocess_stack`) restores them, with one log line, if `auto_settings.nn_stack_guard` trips on the stack (no stars / < 30 usable / star FWHM outside 1.1-14 px / median ellipticity > 0.35; `star_shape_stats`). Origin178 stays unguarded. `--denoiser nn` with `nn_chroma_nr` (`_apply_nn_denoiser`) is only the fallback without the deconvolver's weights. Score star colour on the linear output too (`bench_phase4` `*_lin`): the per-channel stretch whitens sharper cores, so JPEG colour alone misleads. Results and checks (`tools/eval_nn_deconv.py`, `tools/eval_nn_faint.py`): [nn-deconv-runbook](dev-notes/nn-deconv-runbook.md) |
+| `nn_denoise.py` | `--denoiser nn`: Noise2Noise U-Net on native `nn_conv3x3` (weights `src/data/nn_denoise.npz`), input in noise units, low-frequency restore (`nn_restore_sigma` 4 px), sets `args._preview_noise_scale`. `--deconvolve nn`: same network, `src/data/nn_deconv.npz` (Pan-STARRS truth), restore `nn_deconv_restore_sigma`, then mixed with the nn denoiser (`nn_deconv_blend`: 0.75, `--auto` galaxies 0.35); turns the other denoisers off and marks them explicit. Stars outside the trained width (`TRAIN_FWHM_RANGE`) are resampled first (`measure_star_fwhm`, `nn_scale_normalise`); narrow stars get a star-aware restore (`nn_deconv_star_restore_frac`, faded out 3.6-4.0 px). `--auto` picks it (`auto_settings._apply_nn_deconvolution`); off Origin it is tentative and `postprocess._apply_auto_nn_guard` reverts it when `nn_stack_guard` trips (no stars / <30 usable / FWHM outside 1.1-14 px / ellipticity >0.35). Score star colour on the linear output (`bench_phase4` `*_lin`). Detail, tools and results: [module-notes](dev-notes/module-notes.md#detail-moved-out-of-claudemd), [nn-deconv-runbook](dev-notes/nn-deconv-runbook.md) |
 | `psf_deconvolution.py` | PSF estimation; RL / RL-SV / TV / sparse FISTA (`--deconvolve`) |
 | `sky_model.py` | EXPERIMENTAL physical sky model (`--bg-method physical`); `remove_physical_sky_with_reason` declines on narrow fields -> DBE |
 | `star_removal.py` / `star_repair.py` | `--remove-stars` (opt-in), `--starless-process`, `--layered-stretch`; saturated-core repair (`--repair-stars`) |
-| `star_n2n.py` | `--remove-stars-method nn` (EXPERIMENTAL): Noisier2Noise star removal on the linear stack (the `nn_denoise` U-Net, weights `src/data/nn_starless.npz`); injected training stars are copies of the image's own stars with noise discs on real ones; inference adds the discs (tta; sources restricted to structure-free sky), holds the star layer to stars (`constrain_star_layer`, colour per radius from the star's own profile), floors holes (`guard_holes`), subtracts saturated stars' halos (`fill_saturated`). Train with `tools/gen_starless_bank.py` + `tools/train_nn_denoise.py`, score with `tools/eval_star_n2n.py` (`--method inpaint` for the old remover), colour blobs with `tools/diag_star_blobs.py`; [star-n2n runbook](dev-notes/star-n2n-runbook.md) |
+| `star_n2n.py` | `--remove-stars-method nn` (EXPERIMENTAL): Noisier2Noise star removal on the linear stack (weights `src/data/nn_starless.npz`); post steps `constrain_star_layer`, `guard_holes`, `remove_residual_cores`, `fill_saturated`. Train/score tools and results: [star-n2n runbook](dev-notes/star-n2n-runbook.md) |
 | `source_separation.py` / `exposure_fusion.py` | NMF star/nebula split (`--nmf-separate`); Mertens fusion (`--hdr-blend-mode fusion`) |
 | `atmospheric_dispersion.py` | EXPERIMENTAL dispersion correction (`--fix-atmospheric-dispersion`) |
 | `uncertainty.py` | Monte Carlo Phase 4 uncertainty (`--uncertainty-propagate`), confidence map, `--error-aware-stretch` |
@@ -144,7 +139,7 @@ committed and merged inside an unrelated PR (#139, removed again in #140). So:
 | `channel_combine.py` | `combine` subcommand: LRGB/SHO/HOO, SCNR, `--continuum` subtraction |
 | `difference_imaging.py` / `transient_triage.py` | ZOGY subtraction + detection (`--transient-detect REF.fits`); CNN triage (`--transient-triage`; numpy forward pass reading the bundled ONNX, native tract kernel in a `triage`-feature build) |
 | `photometry_core.py` | `aperture_photometry_batch`, WCS helpers (`_celestial_wcs`, `_pixel_coords`, `_field_centre_and_radius`) shared by photometry, colour calibration, annotation, mosaic |
-| `camera_profile.py` | Camera identified from the FITS `CAMERA` keyword (`Origin178-<unit>`); shipped per-model constants in `src/data/camera_profiles/<model>.json`: raw gain per ISO (Origin178: 0.0165 / 0.0064 e-/ADU at ISO 200 / 500; header `EGAIN` is ~4.5x high), checked on two of the session's own lights before photometry uses it (`resolve_camera` -> `args._camera`, `verify_gain`); colour slopes vs Gaia BP-RP, used by the solar colour fit only with 6-14 stars. Measurements and the not-shipped CFA prior / per-unit library in [camera-profile](dev-notes/camera-profile.md); `tools/measure_camera_profile.py` re-measures |
+| `camera_profile.py` | Camera from the FITS `CAMERA` keyword; per-model constants in `src/data/camera_profiles/<model>.json` (raw gain per ISO, colour slopes), gain checked on two of the session's lights before photometry (`resolve_camera` -> `args._camera`, `verify_gain`). Details: [camera-profile](dev-notes/camera-profile.md) |
 | `photometry.py` / `photometry_timeseries.py` / `lightcurve_analysis.py` / `gain_ptc.py` | `--photometry`; `--photometry-timeseries`; `--lightcurve-analysis`; PTC gain from bias/flat pairs |
 | `observing_geometry.py` | Alt/az, airmass, parallactic angle (closed-form fallbacks, no IERS needed) |
 | `plate_solve.py` / `local_solve.py` | `--plate-solve` backend dispatch; built-in Gaia-tile solver |
@@ -190,7 +185,7 @@ committed and merged inside an unrelated PR (#139, removed again in #140). So:
 - Preview JPEGs take their settings from `io_fits.preview_stretch_kw(args)` (the run's main preview via `pipeline.save_final_preview`); hand-built kwargs drifted: the live/stream/mosaic/comet/annotated previews left out `color` and rendered `preserve` after the default became `channel`.
 
 **Streaming memory**
-- Never hold all frames in memory unless `frame_store` decided they fit (available RAM minus 20% of total minus worker reserve). Output must be bit-identical across RAM/disk placement (`tests/test_frame_store.py`). Shared-memory arrays are opened in workers with `track=False`. A combine over a disk-backed aligned stack goes through `stacking._combine_in_bands` (one contiguous read per frame per row band, progress, Cancel; the kernel must be per-pixel so the result is bit-identical): one native call over a 60 GB memmap ran 5.5 min silent and paged the machine (849 frames). Long per-frame loops report through `ui_events.progress` and check `args._cancel_event`; an `except Exception` fallback around them must re-raise `RunCancelled`. `frame_store` refuses an array the temp disk cannot hold (`FrameStoreSpaceError`) -- the sparse file would otherwise fail only when written.
+- Never hold all frames in memory unless `frame_store` decided they fit (available RAM minus 20% of total minus worker reserve). Output must be bit-identical across RAM/disk placement (`tests/test_frame_store.py`). Shared-memory arrays are opened in workers with `track=False`. A combine over a disk-backed aligned stack goes through `stacking._combine_in_bands` (per-pixel kernel, so bit-identical): one native call over a 60 GB memmap ran silent for minutes and paged the machine. Long per-frame loops report through `ui_events.progress` and check `args._cancel_event`; an `except Exception` fallback around them must re-raise `RunCancelled`. `frame_store` refuses an array the temp disk cannot hold (`FrameStoreSpaceError`) -- the sparse file would otherwise fail only when written.
 
 **Native (Rust) kernels** ([ext/astro_native/](ext/astro_native/), details in [dev-notes/native-kernels.md](dev-notes/native-kernels.md))
 - Layout: one module per domain under `ext/astro_native/src/` (`combine`, `warp`, `filters`, `hotpix`, `rcd`, ...; the list is in the `lib.rs` doc comment). Items are `pub(crate)` and re-exported from `lib.rs`, each module starts with `use crate::*;`, and a new `#[pyfunction]` is registered in the `#[pymodule]` at the bottom of `lib.rs`. Shared helpers: `stats` (`median_inplace`, `select_middle`, `median_f64`, `median_f32_as_f64`, `sigma_clipped_median_f32`: add order statistics there, not as a local copy), `parallel::par_rows` (one task per output row), `avx2_twin!` (run-time AVX2 dispatcher over a portable body; hand-written intrinsic twins keep multiply and add separate). Every `unsafe` carries a `// SAFETY:` comment, every `unsafe fn` a `# Safety` doc.
@@ -227,8 +222,8 @@ committed and merged inside an unrelated PR (#139, removed again in #140). So:
 - Registration RANSAC is seeded (`_RANSAC_SEED`) so two identical runs are bit-identical. Session reports use the frame *centre's* displacement, not the transform's corner translation.
 - A flat's `DATE-OBS` is `'0-00-00T00:00:00'`; take light headers from `discover_frames`. A FITS `TIMEZONE` is validated as `+/-HHMM` before use.
 - Mono SER/XISF are replicated to 3 channels at load; a mono TIFF is ambiguous and treated as Bayer unless a `.json` sidecar gives `bayerPattern`.
-- `--use-gpu` on a 4 GB GTX 1650 Ti (2026-10, Sunflower): 344-368 s against 90-100 s CPU-only, until two fixes; now 92-93 s with a bit-identical linear stack. (1) The session CA probe debayers in the main process, which returned a cupy array; `np.ascontiguousarray` raised inside a bare `except`, so every worker measured CA per frame (3.3 s/frame) -- `_measure_session_ca` now calls `to_host`. (2) Phase 3 used cupy's order-3 spline warp with VRAM-capped workers (7, 0.8 frames/s vs 16 at ~10); the native Lanczos-3 warp now wins whenever it can run, the GPU only for elastic fields or without the native module. Phase 1 goes to the CPU pool unless VRAM allows `os.cpu_count()` GPU workers (`args._phase1_gpu`). Opt-in still: no gain measured either.
-- Comet mode (`registration.run_comet_registration_phase`) finds the comet by its motion against the stars (early-minus-late star-aligned averages, high-passed, middle 70% of the field; `_comet_motion_track`) and keeps each frame's star rotation (`_comet_frame_transform`); the brightest-blob search locked onto a bright star on SWAN. The `_comet_blended` composite subtracts the comet's modelled smear (masked comet convolved with its track) from the star stack, floored at the sky (outlier rejection removes part of a moving comet), and adds the comet once (`stacking.blend_comet_star_stacks`); the old Gaussian paste gave a fast comet two heads.
+- `--use-gpu` stays opt-in: no gain measured on a 4 GB card; the native Lanczos-3 warp beats the GPU warp whenever it can run, and Phase 1 uses the CPU pool unless VRAM allows `os.cpu_count()` GPU workers (`args._phase1_gpu`). Any array from the GPU path must go through `to_host` before numpy-only calls (a bare `except` hid this once). History: [module-notes](dev-notes/module-notes.md#detail-moved-out-of-claudemd).
+- Comet mode (`registration.run_comet_registration_phase`) finds the comet by its motion against the stars and keeps each frame's star rotation; `_comet_blended` subtracts the comet's modelled smear from the star stack and adds the comet once (`stacking.blend_comet_star_stacks`). Detail: [module-notes](dev-notes/module-notes.md#detail-moved-out-of-claudemd).
 - Cancel is cooperative (`args._cancel_event`, checked between Phase 1 frames and between targets); pools are shut down with `cancel_futures=True`.
 
 ### Tried and reverted — don't retry blind
