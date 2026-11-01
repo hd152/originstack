@@ -83,6 +83,7 @@ CORE_GATE = 8.0               # a star has a residual core when its 1.5 px-smoot
 CORE_K = 3.0                  # pixels more than this many ring sigmas above the ring are the core (grown by CORE_GROW px)
 CORE_GROW = 1
 CORE_FILL_SIGMA = 3.0         # px; normalised-convolution fill of the core from the pixels around it
+MONO_BLUR_SIGMA = 0.6         # px; mono input is blurred to the noise correlation the network was trained on (starless_z)
 
 def sky_level_z(bg: np.ndarray, sigma: np.ndarray) -> np.ndarray:
     """Sky level B per channel in noise units (median background / sigma); the photon-noise
@@ -685,6 +686,24 @@ def _ring_level(out: np.ndarray, y: int, x: int, r_in: int = 45, r_out: int = 60
     return float(np.median(out[y0:y1, x0:x1].mean(axis=2)[ring]))
 
 
+def is_grey(z: np.ndarray) -> bool:
+    """True when every channel is the same image (a mono stack replicated to 3 channels)."""
+    return z.ndim == 3 and z.shape[2] > 1 and all(np.array_equal(z[..., 0], z[..., c]) for c in range(1, z.shape[2]))
+
+
+def _blur(a: np.ndarray, sigma: float) -> np.ndarray:
+    return ndi.gaussian_filter(a, (sigma, sigma, 0)).astype(np.float32)
+
+
+def _blur_gain(z: np.ndarray, zg: np.ndarray) -> np.float32:
+    """Sky-noise sigma of the blurred image / of the plain one (MAD of the residual to a 9 px
+    box mean, so stars and nebulae do not count)."""
+    def mad(a):
+        d = a[..., 0] - ndi.uniform_filter(a[..., 0], 9)
+        return 1.4826 * np.median(np.abs(d - np.median(d)))
+    return np.float32(mad(zg) / mad(z))
+
+
 def starless_z(z: np.ndarray, w, alpha: float = 1.0, field: Optional['StarField'] = None,
                tta: int = 2, seed: int = 0, guard: bool = True, saturated: bool = True,
                cores: bool = True) -> np.ndarray:
@@ -697,21 +716,34 @@ def starless_z(z: np.ndarray, w, alpha: float = 1.0, field: Optional['StarField'
     (``guard_holes``); ``cores`` refills the cores left at the brightest stars
     (``remove_residual_cores``, with ``guard``); ``saturated`` fills the saturated stars
     (``fill_saturated``)."""
+    mono = MONO_BLUR_SIGMA > 0 and is_grey(z)
+    if mono:
+        zg = _blur(z, MONO_BLUR_SIGMA)
+        k = _blur_gain(z, zg)
+        net = lambda a: nd.denoise_z(_blur(a, MONO_BLUR_SIGMA) / k, w) * k   # noqa: E731
+        base = zg
+    else:
+        net = lambda a: nd.denoise_z(a, w)   # noqa: E731
+        base = z
     if field is None or tta <= 0 or not field.ok:
-        f = nd.denoise_z(z, w)
+        f = net(z)
     else:
         rng = np.random.default_rng(seed)
         f = np.zeros_like(z)
         for _ in range(tta):
-            f += nd.denoise_z(z + field.real_discs(rng), w)
+            f += net(z + field.real_discs(rng))
         f /= np.float32(tta)
-    x = (z - np.float32((1.0 + alpha) / alpha) * (z - f)).astype(np.float32)
+    x = (base - np.float32((1.0 + alpha) / alpha) * (base - f)).astype(np.float32)
+    if mono:
+        x = (x + (z - zg)).astype(np.float32)
     if guard and field is not None and field.ok:
         x = guard_holes(constrain_star_layer(z, x, field), field)
         if cores:
             x = guard_holes(remove_residual_cores(x, field, seed), field)
     if saturated and field is not None and field.ok and field.saturated.any():
         x = fill_saturated(x, z, field, seed)
+    if mono:   # the fills' per-channel noise and colour fades are chroma a mono image cannot have
+        x = np.repeat(x[..., :1], x.shape[-1], axis=-1)
     return x
 
 
