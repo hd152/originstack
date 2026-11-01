@@ -21,6 +21,7 @@ from src.cleanup import deregister as _cleanup_deregister
 from src.cleanup import register as _cleanup_register
 from src.debayer import build_hot_pixel_map
 from src.frame_discovery import (
+    differing_settings,
     discover_frames,
     group_lights_by_filter,
     is_os_metadata,
@@ -762,12 +763,82 @@ def _build_masters(frames: dict, stats: "ProcessingStats | None" = None,
     return masters
 
 
-def _drop_mismatched_masters(masters: dict, frames: dict) -> list:
-    """Disable (set to None) bias/dark/flat masters whose shape differs from the lights.
+_MASTER_CROP_MAX_DIFF = 128   # px per axis: beyond this a centred guess is not "small"
 
-    Phase 1 skips a mismatched master per frame without a word, so this is the one
-    place it is reported: once per master kind per call, in the parent process (never
-    in pool workers). The first light's ``NAXIS1``/``NAXIS2`` give the light shape.
+
+def _origin_of(hdr) -> tuple:
+    """``(x, y)`` sensor origin from XORGSUBF/YORGSUBF, or None when absent/invalid."""
+    try:
+        x, y = hdr.get('XORGSUBF'), hdr.get('YORGSUBF')
+        if x is None or y is None:
+            return None
+        return int(round(float(x))), int(round(float(y)))
+    except (TypeError, ValueError):
+        return None
+
+
+def _bin_of(hdr):
+    try:
+        x, y = hdr.get('XBINNING'), hdr.get('YBINNING')
+        if x is None and y is None:
+            return None
+        return int(x or y), int(y or x)
+    except (TypeError, ValueError):
+        return None
+
+
+def _plan_master_crop(cal_shape, light_hw, light_hdr, cal_hdr):
+    """Decide how to fit a larger master to the lights.
+
+    Returns ``(y0, x0, how)`` for a safe crop, or ``(None, None, reason)`` when the
+    master cannot be used (``reason`` completes "... because ..."). Conservative:
+    same binning, the lights strictly inside the master, and an even offset (keeps
+    the Bayer phase) that is either given by XORGSUBF/YORGSUBF or a small,
+    symmetric centred difference.
+    """
+    mh, mw = cal_shape[0], cal_shape[1]
+    lh, lw = light_hw
+    lb, cb = _bin_of(light_hdr), _bin_of(cal_hdr) if cal_hdr is not None else None
+    if lb and cb and lb != cb:
+        return None, None, (f"binning differs (master {cb[0]}x{cb[1]}, "
+                            f"lights {lb[0]}x{lb[1]})")
+    if mh % lh == 0 and mw % lw == 0 and mh // lh == mw // lw and mh > lh:
+        return None, None, (f"the master is exactly {mh // lh}x the lights' size, which "
+                            f"looks like a binning mismatch, not a crop")
+    if lh % mh == 0 and lw % mw == 0 and lh // mh == lw // mw and lh > mh:
+        return None, None, (f"the lights are exactly {lh // mh}x the master's size, which "
+                            f"looks like a binning mismatch")
+    if mh < lh or mw < lw:
+        return None, None, "the master is smaller than the lights"
+    lo = _origin_of(light_hdr)
+    if lo is not None:
+        co = _origin_of(cal_hdr) if cal_hdr is not None else None
+        co = co or (0, 0)
+        x0, y0 = lo[0] - co[0], lo[1] - co[1]
+        how = f"header offset ({x0}, {y0})"
+    else:
+        dh, dw = mh - lh, mw - lw
+        if dh % 2 or dw % 2 or dh > _MASTER_CROP_MAX_DIFF or dw > _MASTER_CROP_MAX_DIFF:
+            return None, None, ("the size difference is not small and symmetric and "
+                                "the lights carry no XORGSUBF/YORGSUBF offset")
+        x0, y0 = dw // 2, dh // 2
+        how = f"centred ({x0}, {y0})"
+    if x0 < 0 or y0 < 0 or y0 + lh > mh or x0 + lw > mw:
+        return None, None, "the lights' offset falls outside the master"
+    if x0 % 2 or y0 % 2:
+        return None, None, "the crop offset is odd, which would shift the Bayer phase"
+    return y0, x0, how
+
+
+def _drop_mismatched_masters(masters: dict, frames: dict) -> list:
+    """Fit or disable bias/dark/flat masters whose shape differs from the lights.
+
+    A larger master that the lights sit inside is cropped when that is safe (see
+    ``_plan_master_crop``); anything else (binning mismatch, smaller master,
+    unknown offset) is disabled (set to None) with the reason. Phase 1 skips a
+    mismatched master per frame without a word, so this is the one place it is
+    reported: once per master kind per call, in the parent process (never in pool
+    workers). The first light's ``NAXIS1``/``NAXIS2`` give the light shape.
     Returns the names of the masters that were disabled.
     """
     lights = frames.get('light') or []
@@ -783,9 +854,18 @@ def _drop_mismatched_masters(masters: dict, frames: dict) -> list:
         if cal is None:
             continue
         if cal.shape[0] != light_h or cal.shape[1] != light_w:
+            cal_frames = frames.get(cal_name) or []
+            cal_hdr = cal_frames[0].header if cal_frames else None
+            y0, x0, how = _plan_master_crop(cal.shape, (light_h, light_w), hdr, cal_hdr)
+            if y0 is not None:
+                masters[cal_name] = np.ascontiguousarray(
+                    cal[y0:y0 + light_h, x0:x0 + light_w])
+                safe_print(f"  {cal_name} master {cal.shape[1]}×{cal.shape[0]} cropped to the "
+                           f"lights' {light_w}×{light_h} ({how})")
+                continue
             safe_print(f"  ⚠ WARNING: {cal_name} master ignored: its dimensions "
                        f"{cal.shape[1]}×{cal.shape[0]} don't match the lights "
-                       f"{light_w}×{light_h} — disabling {cal_name} calibration")
+                       f"{light_w}×{light_h} ({how}) — disabling {cal_name} calibration")
             masters[cal_name] = None
             dropped.append(cal_name)
     return dropped
@@ -843,6 +923,11 @@ def _run_combined_sessions(subdirs: list, output: str, args: argparse.Namespace)
 
     n_lights = len(combined['light'])
     n_sessions = len(subdirs)
+    _mixed = differing_settings(combined['light'])
+    if _mixed:
+        safe_print(f"  ⚠ WARNING: pooled lights differ in {', '.join(_mixed)} -- they cannot "
+                   f"be stacked together; use --hierarchical to stack each session "
+                   f"separately")
     safe_print(f"  Pooled {n_lights} lights from {n_sessions} sessions "
               f"({len(combined['dark'])} darks, {len(combined['flat'])} flats, "
               f"{len(combined['bias'])} bias)")
@@ -1269,6 +1354,10 @@ def process_directory(directory: str, output: str, args: argparse.Namespace):
         # together: each gets its own masters (flat matching already keys off
         # FILTER) and its own output file.
         filter_groups = group_lights_by_filter(frames['light'])
+        _mixed = differing_settings(frames['light'])
+        if _mixed:
+            safe_print(f"  ⚠ Lights differ in {', '.join(_mixed)} -- they cannot be "
+                       f"stacked together, so each combination is stacked separately")
         if len(filter_groups) > 1:
             safe_print(f"  Mode: Split by filter ({len(filter_groups)} filters: "
                        f"{', '.join(sorted(filter_groups))}) -- stacking each separately")

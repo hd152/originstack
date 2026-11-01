@@ -333,6 +333,49 @@ def _sanitize_filter_tag(name: str) -> str:
     return tag or 'unfiltered'
 
 
+def _setting_labels(f: FrameInfo) -> Dict[str, str]:
+    """Per-light values of the settings that make two lights non-stackable
+    together (binning, frame shape, gain/ISO, camera); absent ones are omitted."""
+    h = f.header
+    out: Dict[str, str] = {}
+    xb, yb = h.get('XBINNING'), h.get('YBINNING')
+    if xb not in (None, '') or yb not in (None, ''):
+        try:
+            out['binning'] = f"bin{int(xb or yb)}x{int(yb or xb)}"
+        except (TypeError, ValueError):
+            pass
+    w, hh = h.get('NAXIS1'), h.get('NAXIS2')
+    if w and hh:
+        out['shape'] = f"{w}x{hh}"
+    g = _frame_iso(f)
+    if g not in (None, ''):
+        try:
+            out['gain'] = f"g{round(float(g), 3):g}"
+        except (TypeError, ValueError):
+            out['gain'] = 'g' + _sanitize_filter_tag(str(g))
+    cam = h.get('CAMERA') or h.get('INSTRUME')
+    if cam and str(cam).strip():
+        out['camera'] = _sanitize_filter_tag(str(cam))
+    return out
+
+
+def differing_settings(lights: List[FrameInfo]) -> List[str]:
+    """Names of the settings (binning/shape/gain/camera) that vary across *lights*.
+
+    A setting counts only when every light carries it: a frame without the
+    header is not guessed to differ. Homogeneous input returns ``[]``.
+    """
+    labels = [_setting_labels(f) for f in lights]
+    if len(labels) < 2:
+        return []
+    out = []
+    for key in ('binning', 'shape', 'gain', 'camera'):
+        vals = [lab.get(key) for lab in labels]
+        if all(v is not None for v in vals) and len(set(vals)) > 1:
+            out.append(key)
+    return out
+
+
 def group_lights_by_filter(lights: List[FrameInfo]) -> Dict[str, List[FrameInfo]]:
     """Group light frames by their own FITS FILTER header value.
 
@@ -346,11 +389,20 @@ def group_lights_by_filter(lights: List[FrameInfo]) -> Dict[str, List[FrameInfo]
     single 'unfiltered' group. Callers should check ``len(groups) > 1``
     before treating this as a real split -- a single-filter (or all-header-
     less) session returns one group and should stack normally.
+
+    Lights that also differ in binning, frame shape, gain/ISO or camera
+    (``differing_settings``) cannot be stacked together either: the tag gets a
+    suffix naming only the settings that vary (``clear_bin1x1``). A homogeneous
+    folder keeps the plain filter tags.
     """
+    keys = differing_settings(lights)
     groups: Dict[str, List[FrameInfo]] = {}
     for f in lights:
         raw = (f.header.get('FILTER') or '').strip()
         tag = _sanitize_filter_tag(raw) if raw else 'unfiltered'
+        if keys:
+            lab = _setting_labels(f)
+            tag = '_'.join([tag] + [lab[k] for k in keys])
         groups.setdefault(tag, []).append(f)
     return groups
 
