@@ -296,4 +296,49 @@ them). The synthetic test's bright-star share also depends on the disc draw (0.2
 between seeds on that small image); it now averages four.
 
 Still open: the brightest unsaturated stars keep a small core (real_left bright up to 0.20 on
-Orion); the network under-removes them. A training change, not inference.
+Orion); the network under-removes them. (Fixed at inference, next section.)
+
+## Residual cores of the brightest unsaturated stars (2026-11-01): inference fix
+
+`remove_residual_cores` (after `guard_holes`, `starless_z(cores=True)`, `eval_star_n2n.py
+--no-cores` scores without it). The leftover at a bright donor is a lopsided crescent of the
+PSF core (single stars keep 0.5-1.1 of their flux on Orion, the median of the top tertile
+0.20), a few px across, brighter than the sky by hundreds of sigma.
+
+Tried, scored on a cached starless output (`real_left` bright / `hole`):
+- **Radial excess profile** over the ring outside the footprint (centroid of the excess,
+  monotone, soft-thresholded): bright 0.00-0.04 on all five, but the Pleiades' hole -0.29 ->
+  -1.8 (Sunflower -1.1 -> -1.8). The residual is off-centre, so a radial subtraction digs a
+  hole at the star's true centre; the guard floors it at -2.
+- **Gaussian-smoothed positive excess** (sigma 1-1.5 px): same failure, the smoothed crescent
+  is subtracted from the dark centre too (holes -1 to -2.1 on four stacks).
+- **Replace the hot pixels** (kept): per donor, ring = 5 px outside min(footprint, 12 px);
+  pixels > 3 ring sigma above it in any channel, grown 1 px, are refilled by normalised
+  convolution (sigma 3) + noise with the ring's per-channel sigma, channel correlation and
+  lag-1 correlation (`_ring_noise`; independent white noise per channel gave a speckled colour
+  disc in grey, smooth surroundings). Only stars whose 1.5 px-smoothed luminance peak is >= 8
+  ring sigma up (the gate): without it faint stars' noise tails are replaced too and faint
+  `real_left` goes to -0.2..-0.3, `faint_kept` 0.86-0.92.
+- Not built: a second network pass on the footprints (the first pass's residual is what
+  the extrapolation left; the gate-and-fill reaches 0 without a model run) and a spike /
+  reflection-ring model for saturated stars (needs the optics' orientation per star, not
+  cheap; they stay).
+
+The fill is floored at the ring's level: the network's over-subtracted annulus around a core
+(dips of -1 to -5 sigma) otherwise pulled the filled core into a dip (Pleiades hole -1.19,
+Sunflower -1.08).
+
+`eval_star_n2n.py --tta 2`, before (`--no-cores`) -> after:
+
+| stack | real_left faint / mid / bright | inject_left faint / mid / bright | hole | blobs > 8 |
+|---|---|---|---|---|
+| Omega | 0.07 / 0.09 / 0.06 -> 0.05 / 0.06 / 0.00 | 0.10 / 0.00 / -0.02 -> 0.10 / 0.01 / -0.03 | -0.17 -> -0.42 | 6 -> 2 |
+| Orion | 0.04 / 0.14 / 0.20 -> 0.03 / 0.09 / 0.02 | 0.15 / 0.03 / 0.06 -> 0.15 / 0.04 / 0.00 | +0.06 -> -0.27 | 10 -> 10 |
+| Pleiades | -0.04 / 0.10 / 0.05 -> -0.04 / 0.07 / 0.00 | -0.03 / -0.11 / -0.02 -> -0.01 / -0.10 / -0.02 | -0.29 -> -0.70 | 5 -> 1 |
+| Sculptor | -0.08 / 0.10 / 0.12 -> -0.09 / 0.02 / 0.00 | 0.01 / -0.05 / 0.02 -> 0.01 / -0.07 / -0.01 | -0.20 -> -0.36 | 0 -> 0 |
+| Sunflower | -0.13 / 0.05 / 0.03 -> -0.14 / 0.02 / -0.01 | -0.16 / 0.03 / -0.02 -> -0.16 / 0.03 / -0.02 | -1.11 -> -0.66 | 1 -> 0 |
+
+faint_kept 0.93-0.96 (was 0.93-0.95), sky_shift <= 0.012, fill_noise 0.92-1.08, sat_left <= 0.008:
+all as before. Crops (input / network / after, brightest donors): the refilled cores read as sky. One thing to watch: a star sitting
+in a saturated star's bright halo (Orion) leaves a slightly lumpy patch of about 25 px. Saturated
+stars' diffraction spikes and reflection rings are still not removed.

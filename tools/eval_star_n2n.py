@@ -44,6 +44,8 @@ sys.path.insert(0, ROOT)
 from src import nn_denoise as nd  # noqa: E402
 from src import star_n2n as sn  # noqa: E402
 
+NO_CORES = False   # --no-cores: score without the residual-core step
+
 
 def load_stack(path: str) -> np.ndarray:
     """Linear stack as (H, W, 3) float32: a FITS cube (3, H, W) or an (H, W, 3) .npy."""
@@ -193,7 +195,7 @@ def evaluate(path: str, w, alpha: float, test_alpha: float, seed: int, crops: st
             # clean image's field, injected test stars had no footprint, and the star-layer
             # constraint (outside footprints: undetected faint stars only) kept them
             return sn.starless_z(zz, w, alpha, field if zz is z else sn.StarField(zz, B), tta,
-                                 guard=post, saturated=post)
+                                 guard=post, saturated=post, cores=post and not NO_CORES)
     o0 = remover(z)
     res = {"stack": os.path.basename(path), "method": method, "donors": field.n_donors,
            "stamps": int(len(field.stamps)), "saturated": int(field.saturated.sum())}
@@ -248,9 +250,12 @@ def main() -> None:
                     help="nn: the Noisier2Noise model; inpaint: the existing --remove-stars")
     ap.add_argument("--tta", type=int, default=2,
                     help="disc realisations averaged per output (starless_z; 0 = plain forward pass)")
+    ap.add_argument("--no-cores", action="store_true", help="skip remove_residual_cores (the before column)")
     ap.add_argument("--json")
     ap.add_argument("--crops", default="")
     args = ap.parse_args()
+    global NO_CORES
+    NO_CORES = args.no_cores
     w = nd.load_weights(args.model) if args.method == "nn" else None
     rows = []
     for p in args.stacks:

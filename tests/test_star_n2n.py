@@ -380,3 +380,38 @@ def test_disc_sources_avoid_structured_sky():
     f = sn.StarField(z, B)
     assert f.ok and len(f._sky_x) > 0
     assert np.mean(f._sky_x > 420) < 0.05
+
+
+def test_residual_core_is_refilled_off_centre_and_faint_stars_are_left(field_and_z):
+    """A lopsided positive crescent left at a donor (what the network leaves at the brightest
+    stars) goes back to the sky level with its noise; a noise-level bump (a faint star's tail)
+    does not trigger the gate; negatives and everything off the donors stay as they are."""
+    field, z, _ = field_and_z
+    rng = np.random.default_rng(5)
+    x = rng.standard_normal(z.shape).astype(np.float32)
+    (y0, x0), (y1, x1) = (field.donor_y[0], field.donor_x[0]), (field.donor_y[1], field.donor_x[1])
+    x[y0 - 2:y0 + 3, x0 - 4:x0 - 1] += 150.0                 # crescent left of the centre
+    x[y0, x0 + 1] = -40.0                                    # an inverted pixel, not a core
+    x[y1, x1] += 2.0                                         # a faint star's tail
+    out = sn.remove_residual_cores(x, field)
+    assert x[y0 - 2:y0 + 3, x0 - 4:x0 - 1].mean() > 100
+    assert abs(out[y0 - 2:y0 + 3, x0 - 4:x0 - 1].mean()) < 3  # the crescent is sky again...
+    assert out[y0 - 2:y0 + 3, x0 - 4:x0 - 1].std() > 0.5      # ...with noise, not a flat fill
+    assert out[y0, x0 + 1, 0] == x[y0, x0 + 1, 0]            # negatives are guard_holes' business
+    np.testing.assert_array_equal(out[y1 - 3:y1 + 4, x1 - 3:x1 + 4], x[y1 - 3:y1 + 4, x1 - 3:x1 + 4])
+    star = np.zeros(z.shape[:2], bool)
+    star[field.donor_y, field.donor_x] = True
+    far = ~ndi.binary_dilation(star, iterations=sn.CORE_R + sn.CORE_RING + 8)
+    np.testing.assert_array_equal(out[far], x[far])
+
+
+def test_starless_z_cores_switch(field_and_z, monkeypatch):
+    field, z, _ = field_and_z
+    calls = []
+    monkeypatch.setattr(sn, 'remove_residual_cores', lambda x, f, seed=0: calls.append(1) or x)
+    monkeypatch.setattr(sn.nd, 'denoise_z', lambda zz, w: zz * 0.5)
+    sn.starless_z(z, None, field=field, tta=1, saturated=False)
+    assert calls == [1]
+    sn.starless_z(z, None, field=field, tta=1, saturated=False, cores=False)
+    sn.starless_z(z, None, field=field, tta=1, saturated=False, guard=False)
+    assert calls == [1]
