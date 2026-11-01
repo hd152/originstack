@@ -228,27 +228,27 @@ files from different sessions have landed in the wrong PR before). So:
 
 ### Tried and reverted — don't retry blind
 Details in the linked notes.
-- Fused native `compute_quality_metrics`/`validate_image_data` stats via one sort: slower than numpy's partitioning ([native-kernels](dev-notes/native-kernels.md)).
+- Fused native `compute_quality_metrics`/`validate_image_data` stats via one sort: slower than numpy ([native-kernels](dev-notes/native-kernels.md)).
 - Sort-based MAD sigma-clip / sort-once u32 keys for patch-weighted combine: 13-45% slower than quickselect.
 - Windowed selection predicted from the neighbour pixel; radix-histogram median: no faster.
-- Native rustfft `rfft2_batch` for proper coadd; Moffat closed-form spectrum; batched/AVX2 coadd accumulate; `FILE_ATTRIBUTE_TEMPORARY`; Phase 1 arrays in RAM; file writes instead of memmap slot assignment.
-- Phase 1 write-behind (a writer thread per worker) and reused per-worker output slots: no gain, Phase 1 is CPU/memory-throughput bound on 8 cores; more workers than physical cores is slower ([native-kernels](dev-notes/native-kernels.md)).
-- Pre-touching frame-store pages from a parent thread: a worker still faults every page in its own view (60-99 vs 68-72 ms per 75 MB slot; floor 10 ms) ([pipeline-notes](dev-notes/pipeline-notes.md)).
+- Native rustfft `rfft2_batch` for proper coadd; Moffat closed-form spectrum; batched/AVX2 coadd accumulate; `FILE_ATTRIBUTE_TEMPORARY`; Phase 1 arrays in RAM ([native-kernels](dev-notes/native-kernels.md)).
+- Phase 1 write-behind / reused output slots (no gain, CPU/memory bound; more workers than physical cores is slower) ([native-kernels](dev-notes/native-kernels.md)).
+- Pre-touching frame-store pages from a parent thread: workers still fault their own views ([pipeline-notes](dev-notes/pipeline-notes.md)).
 - Measuring proper-coadd PSFs inside the alignment loop (GIL contention).
 - Subsampled sigma-clipped medians for CFA equalisation (period-4 structure biases them).
 - RCD per-Bayer-site stages (stops vectorising); RCD strips without a buffer pool.
-- `--cfa-drizzle` as a default; kernel-regression (Handheld Multi-Frame Super-Resolution) merge of the Bayer samples: stars 8-45% wider and 1.3-2.9x noisier than RCD + proper coadd at matched width; demosaic-free luminance ([siril-comparison](dev-notes/siril-comparison.md)); ubercal flat from stars, single- and multi-night -- unconstrained on the 13 local sessions (<= 0.4 deg rotation per session, <= 0.5 deg between nights); untested on strongly rotating data such as the Lagoon set ([native-kernels](dev-notes/native-kernels.md)).
+- `--cfa-drizzle` as a default; kernel-regression merge of Bayer samples (stars wider and noisier than RCD + proper coadd); demosaic-free luminance; ubercal flat from stars (unconstrained on the local sessions) ([siril-comparison](dev-notes/siril-comparison.md), [native-kernels](dev-notes/native-kernels.md)).
 - Per-frame lacosmic as a noise reducer (it was smoothing; fixed noise model now) ([siril-comparison](dev-notes/siril-comparison.md)).
 - Proper coadd outside the core in `--full-field` (normalised convolution, per-tile, MTF filter, Wiener) ([module-notes](dev-notes/module-notes.md)).
 - Widening `--use-gpu` coverage (fewer VRAM-bound workers); GPU stays opt-in.
 - Removed denoisers NLM, BM3D, MMT, non-adaptive wavelet + Noise2Self calibration ([module-notes](dev-notes/module-notes.md)).
 - Physical sky model on ~1 deg fields (declines by design).
 - Starless-layer deconvolution and separate-layer stretch.
-- AVX2 lanes for the Lanczos-3 warp row (one `[f64; 4]` lane per channel under `avx2_twin!`): bit-identical, no faster (probably the fixed-order dependent add chains, not lane width; interleaving two output pixels is untried) ([native-kernels](dev-notes/native-kernels.md)).
+- AVX2 lanes for the Lanczos-3 warp row: bit-identical, no faster ([native-kernels](dev-notes/native-kernels.md)).
 - Camera-wide CFA equalisation prior: 2x2 green offsets vary 5-15 ADU between sessions, 0.4 ADU within one ([camera-profile](dev-notes/camera-profile.md)).
-- Per-unit bad-pixel / vignetting library: the session dark already holds the recurring bad pixels; a leave-one-out vignetting map gains 0-5% after a quadratic ([camera-profile](dev-notes/camera-profile.md)).
-- Sharper learned deconvolution from more of the same data: a stricter seeing cut (top 10% is 3% narrower than top 30%), cross-night pairs (x1) and a 2-4x wider U-Net all land on v3's width-noise curve when compared at equal noise (`tools/eval_nn_matched_noise.py`); run-to-run spread ~1.5% ([nn-deconv-runbook](dev-notes/nn-deconv-runbook.md)).
-- `--flat-from-lights` under `--auto` for sessions without flats: the target leaks into the low-rank flat unless it moves by more than its own size; removed ~95% of M31's disk on an S50 Pro ([module-notes](dev-notes/module-notes.md)).
+- Per-unit bad-pixel / vignetting library: the session dark already holds the bad pixels; vignetting gains 0-5% ([camera-profile](dev-notes/camera-profile.md)).
+- Sharper learned deconvolution from more of the same data (stricter seeing cut, cross-night pairs, wider U-Net): all land on v3's width-noise curve at equal noise ([nn-deconv-runbook](dev-notes/nn-deconv-runbook.md)).
+- `--flat-from-lights` under `--auto` without flats: the target leaks into the flat (removed ~95% of M31's disk) ([module-notes](dev-notes/module-notes.md)).
 - Variance-vs-signal slope for raw Origin gain: the stepped raw values make it quantisation-dominated; use the two-point ratio (`camera_profile.raw_pair_gain`).
 
 ### Native (Rust) build

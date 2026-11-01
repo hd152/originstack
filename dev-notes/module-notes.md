@@ -100,3 +100,17 @@ Full text of entries trimmed from CLAUDE.md (2026-11), unchanged.
 ### Comet mode
 
 - Comet mode (`registration.run_comet_registration_phase`) finds the comet by its motion against the stars (early-minus-late star-aligned averages, high-passed, middle 70% of the field; `_comet_motion_track`) and keeps each frame's star rotation (`_comet_frame_transform`); the brightest-blob search locked onto a bright star on SWAN. The `_comet_blended` composite subtracts the comet's modelled smear (masked comet convolved with its track) from the star stack, floored at the sky (outlier rejection removes part of a moving comet), and adds the comet once (`stacking.blend_comet_star_stacks`); the old Gaussian paste gave a fast comet two heads.
+
+### Tried and reverted: full entries
+
+Full text of the entries shortened in CLAUDE.md (2026-11).
+
+- Native rustfft `rfft2_batch` for proper coadd; Moffat closed-form spectrum; batched/AVX2 coadd accumulate; `FILE_ATTRIBUTE_TEMPORARY`; Phase 1 arrays in RAM; file writes instead of memmap slot assignment.
+- Phase 1 write-behind (a writer thread per worker) and reused per-worker output slots: no gain, Phase 1 is CPU/memory-throughput bound on 8 cores; more workers than physical cores is slower ([native-kernels](dev-notes/native-kernels.md)).
+- Pre-touching frame-store pages from a parent thread: a worker still faults every page in its own view (60-99 vs 68-72 ms per 75 MB slot; floor 10 ms) ([pipeline-notes](dev-notes/pipeline-notes.md)).
+- `--cfa-drizzle` as a default; kernel-regression (Handheld Multi-Frame Super-Resolution) merge of the Bayer samples: stars 8-45% wider and 1.3-2.9x noisier than RCD + proper coadd at matched width; demosaic-free luminance ([siril-comparison](dev-notes/siril-comparison.md)); ubercal flat from stars, single- and multi-night -- unconstrained on the 13 local sessions (<= 0.4 deg rotation per session, <= 0.5 deg between nights); untested on strongly rotating data such as the Lagoon set ([native-kernels](dev-notes/native-kernels.md)).
+- AVX2 lanes for the Lanczos-3 warp row (one `[f64; 4]` lane per channel under `avx2_twin!`): bit-identical, no faster (probably the fixed-order dependent add chains, not lane width; interleaving two output pixels is untried) ([native-kernels](dev-notes/native-kernels.md)).
+- Per-unit bad-pixel / vignetting library: the session dark already holds the recurring bad pixels; a leave-one-out vignetting map gains 0-5% after a quadratic ([camera-profile](dev-notes/camera-profile.md)).
+- Sharper learned deconvolution from more of the same data: a stricter seeing cut (top 10% is 3% narrower than top 30%), cross-night pairs (x1) and a 2-4x wider U-Net all land on v3's width-noise curve when compared at equal noise (`tools/eval_nn_matched_noise.py`); run-to-run spread ~1.5% ([nn-deconv-runbook](dev-notes/nn-deconv-runbook.md)).
+- `--flat-from-lights` under `--auto` for sessions without flats: the target leaks into the low-rank flat unless it moves by more than its own size; removed ~95% of M31's disk on an S50 Pro ([module-notes](dev-notes/module-notes.md)).
+- Fused native `compute_quality_metrics`/`validate_image_data` stats via one sort: slower than numpy's partitioning ([native-kernels](dev-notes/native-kernels.md)).
