@@ -138,6 +138,26 @@ desktop shortcut) and an uninstaller. The release workflow builds it after the P
 it silently on the runner, runs `verify_build.ps1` against the *installed* exe, and only then attaches it
 to the release next to the zip.
 
+## Microsoft Store (MSIX)
+
+`packaginguild_msix.ps1` wraps a PyInstaller onedir build (`dist\OriginStack\`, or a release zip's
+contents via `-DistDir`) in `dist\OriginStack-<VERSION>-x64.msix` with `makeappx.exe` from the Windows SDK
+(`winget install Microsoft.WindowsSDK.10.0.26100`). Tile images are pre-rendered from `icon.ico` in
+`packaging\msix\Assets` (Pillow; re-render if the icon changes). The package declares the
+`runFullTrust` capability (a normal desktop app) and version `<VERSION>.0` (the Store reserves the
+fourth part).
+
+- **For the Store:** reserve the name in Partner Center, copy *Product identity* (`Package/Identity/Name`
+  and `Publisher`) into `-IdentityName` / `-Publisher` (and the publisher display name), build **without**
+  `-TestSign` and upload the `.msix`; the Store signs it.
+- **To try it locally:** `-TestSign` signs with a self-signed certificate and writes `dist\OriginStack-test.cer`;
+  trust it from an elevated prompt (`Import-Certificate -FilePath dist\OriginStack-test.cer
+  -CertStoreLocation Cert:\LocalMachine\TrustedPeople`), then open the `.msix`. Remove it afterwards.
+  A test-signed package is not for distribution.
+- An MSIX install folder is read-only: check that the app writes only to user folders (settings, caches,
+  temp) when installed from the package, and run the Windows App Certification Kit before submitting.
+  Neither check has been done yet.
+
 ## Code signing (SignPath Foundation)
 
 `release.yml` signs `OriginStack.exe` (then re-zips) and the installer through
