@@ -318,7 +318,7 @@ Eight built-in presets set a group of parameters at once (any flag you pass stil
 
 *Using the downloaded app? Skip this section: the installer already has everything.*
 
-Requires Python 3.10+ (CI tests 3.11 and 3.12; the optional native extension targets the CPython 3.10 ABI).
+Requires Python 3.12+ (the version the installers ship and CI tests; older versions may work but are untested. The optional native extension targets the CPython 3.10 ABI).
 
 ```bash
 # 1. Clone the repo
