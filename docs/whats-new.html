@@ -40,6 +40,22 @@
 </header>
 
 <main>
+<section id="v2-20">
+  <div class="wrap">
+    <h2>2.20 <small class="when">1 November 2026</small></h2>
+    <div class="releases">
+      <article id="v2-20-0"><h3>2.20.0 <span>1 Nov</span></h3>
+        <ul>
+          <li><strong>The learned sharpening works on other cameras.</strong> It measures the stars in your stack and rescales to the size it was trained on, so a different pixel size no longer matters. Checked on Seestar S50 and Las Cumbres Observatory stacks. Monochrome and tile-compressed FITS now load, and the automatic settings choose it when they can measure the stars.</li>
+          <li><strong>Compare any finishing step before and after.</strong> A <em>Before / after</em> button in the post-processing panel opens a slider window with zoom and pan.</li>
+          <li><strong>See why each frame was kept or rejected.</strong> <code>--frame-report</code> writes a table with a plain reason for every frame.</li>
+          <li><strong>Mixed folders and odd calibration frames.</strong> A larger dark or flat is cropped to fit when that is safe, and lights shot with different binning, size or gain are stacked separately instead of mixed.</li>
+          <li>Star removal (experimental) takes out the cores of the brightest stars and works on monochrome stacks. The app can copy a diagnostics report, remembers your folders, and says when your camera is not an Origin. <code>--nn-deconv-blend</code> sets the sharpening strength.</li>
+        </ul>
+      </article>
+    </div>
+  </div>
+</section>
 <section id="v2-19">
   <div class="wrap">
     <h2>2.19 <small class="when">30 October 2026</small></h2>
