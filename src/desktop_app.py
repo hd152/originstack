@@ -1760,6 +1760,19 @@ class App:
         ttk.Checkbutton(self.pp_bar, text=_('Show without stars (also saves a _starless JPEG)'),
                         variable=self.pp_starless_var,
                         command=self._on_starless_toggled).pack(anchor='w', padx=6)
+        cmp_row = ttk.Frame(self.pp_bar)
+        cmp_row.pack(fill='x', padx=6, pady=(2, 0))
+        ttk.Label(cmp_row, text=_('Compare a step')).pack(side='left')
+        self.cmp_step_var = tk.StringVar()
+        self.cmp_combo = ttk.Combobox(cmp_row, textvariable=self.cmp_step_var, state='readonly',
+                                      width=34)
+        self.cmp_combo.pack(side='left', padx=(4, 8))
+        self.cmp_btn = ttk.Button(cmp_row, text=_('Before / after'), command=self._on_compare_step)
+        self.cmp_btn.pack(side='left')
+        self._cmp_ids: Dict[str, str] = {}             # shown label -> step id
+        self._cmp_win: Optional[Any] = None
+        self._cmp_cancel: Optional[threading.Event] = None
+        self._cmp_results: queue.Queue = queue.Queue()
         self.pp_status_var = tk.StringVar()
         ttk.Label(self.pp_bar, textvariable=self.pp_status_var,
                   style='Dim.TLabel').pack(anchor='w', padx=6, pady=(0, 2))
@@ -2004,6 +2017,89 @@ class App:
             slot = next((s for s in self._named_cache if s['slug'] == slug), None)
             self.preview.load_slot(data, slug, slot['caption'] if slot else slug)
 
+    # ── before / after of one Phase 4 step ─────────────────────────────
+
+    def _close_compare(self) -> None:
+        """Close the comparison window; a re-run still going is told to stop and its result
+        is dropped."""
+        if self._cmp_cancel is not None:
+            self._cmp_cancel.set()
+        win, self._cmp_win = self._cmp_win, None
+        if win is not None:
+            try:
+                win.destroy()
+            except tk.TclError:
+                pass
+
+    def _on_compare_step(self) -> None:
+        """Open a window comparing the final image with the picked step off and on (the
+        other side is a Phase 4 re-run from the step snapshots, reduced in size; the run's
+        files are not touched)."""
+        step_id = self._cmp_ids.get(self.cmp_step_var.get())
+        if step_id is None or self._pp_busy or self.rm.is_running():
+            return
+        label = self.cmp_step_var.get()
+        self._close_compare()
+        cancel = threading.Event()
+        self._cmp_cancel = cancel
+        win = tk.Toplevel(self.root)
+        self._cmp_win = win
+        win.title(_('Before / after: {step}', step=label))
+        win.configure(background=_WELL)
+        win.geometry('1100x760')
+        view = PreviewCanvas(win)
+        view.pack(fill='both', expand=True, padx=12, pady=(12, 4))
+        view.caption_var.set(_('Comparing…'))
+        wipe = ttk.Scale(win, from_=0, to=1, orient='horizontal',
+                         command=lambda v: view.set_wipe(float(v)))
+        wipe.set(0.5)
+        wipe.pack(fill='x', padx=12)
+        row = ttk.Frame(win)
+        row.pack(fill='x', padx=12, pady=(2, 10))
+        ttk.Label(row, text=_('Left: {step} off. Right: on. Drag the slider; wheel zooms, '
+                              'drag pans.', step=label), style='Dim.TLabel').pack(side='left')
+        ttk.Button(row, text=_('Close'), command=self._close_compare).pack(side='right')
+        flip = ttk.Button(row, text=_('Hold to show on'))
+        flip.pack(side='right', padx=8)
+        flip.bind('<ButtonPress-1>', lambda _e: view.set_wipe(0.0))
+        flip.bind('<ButtonRelease-1>', lambda _e: view.set_wipe(float(wipe.get())))
+        win.bind('<Escape>', lambda _e: self._close_compare())
+        win.protocol('WM_DELETE_WINDOW', self._close_compare)
+        self._pp_busy = True
+        self.cmp_btn.state(['disabled'])
+        self.pp_status_var.set(_('Comparing…'))
+
+        def _bg() -> None:
+            try:
+                off, on = self.ui.compare_postprocess_step(step_id, cancel=cancel)
+                self._cmp_results.put((cancel, 'ok', (off, on, view, label)))
+            except Exception as e:
+                self._cmp_results.put((cancel, 'error', str(e)))
+        threading.Thread(target=_bg, daemon=True).start()
+        self.root.after(self.POLL_MS, self._poll_compare)
+
+    def _poll_compare(self) -> None:
+        try:
+            cancel, status, value = self._cmp_results.get_nowait()
+        except queue.Empty:
+            self.root.after(self.POLL_MS, self._poll_compare)
+            return
+        self._pp_busy = False
+        self.cmp_btn.state(['!disabled'])
+        self.pp_status_var.set('')
+        if not cancel.is_set() and self._cmp_win is not None:
+            if status == 'ok':
+                off, on, view, label = value
+                view.load_slot(off, 'compare_off', _('{step}: off | on', step=label))
+                view.set_compare_slot(on, 'compare_on')
+                view.set_compare(True)
+            else:
+                self._close_compare()
+                self.pp_status_var.set(_('Compare failed: {error}', error=value))
+        if self._pp_pending:
+            self._pp_pending = False
+            self._run_pp()
+
     def _on_compare_toggled(self) -> None:
         self.preview.set_compare(self.compare_var.get())
         self.wipe_scale.pack(fill='x', padx=4, pady=(0, 4)) if self.compare_var.get() \
@@ -2069,6 +2165,9 @@ class App:
             ttk.Checkbutton(self.pp_boxes, text=_(_PP_STEP_LABELS.get(st['id'], st['label'])),
                             variable=var).grid(row=n // cols, column=n % cols, sticky='w',
                                                padx=(0, 12))
+        self._cmp_ids = {_(_PP_STEP_LABELS.get(st['id'], st['label'])): st['id'] for st in steps}
+        self.cmp_combo.configure(values=list(self._cmp_ids))
+        self.cmp_step_var.set(next(iter(self._cmp_ids), ''))
         self.pp_status_var.set('')
         self.pp_bar.pack(fill='x', padx=4, pady=(0, 4), before=self.preview)
 

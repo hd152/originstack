@@ -241,3 +241,114 @@ def test_starless_view_needs_a_finished_image_and_stars():
     ui.remember_final_preview(np.full((64, 64, 3), 500.0, np.float32), 'x.jpg')
     with pytest.raises(RuntimeError, match='no usable star'):
         ui.starless_view(True)
+
+
+# ── before / after of one step (UIEvents.compare_postprocess_step) ────────────
+
+def test_compare_skip_sets_and_order():
+    from src.ui_events import compare_order, compare_skip_sets
+    assert compare_skip_sets([], 'scnr') == (['scnr'], True)
+    assert compare_skip_sets(['scnr', 'bilateral'], 'scnr') == (['bilateral'], False)
+    with pytest.raises(ValueError):
+        compare_skip_sets([], 'no_such_step')
+    assert compare_order('cur', 'oth', True) == ('oth', 'cur')
+    assert compare_order('cur', 'oth', False) == ('cur', 'oth')
+
+
+def test_compare_reduce_caps_the_long_side_and_drops_a_mismatched_starless():
+    from src.ui_events import compare_reduce
+    rgb = np.zeros((300, 500, 3), np.float32)
+    small, sl = compare_reduce(rgb, rgb.copy(), 128)
+    assert max(small.shape[:2]) <= 128 and sl.shape == small.shape
+    assert compare_reduce(rgb, np.zeros((10, 10, 3), np.float32), 128)[1] is None
+    assert compare_reduce(rgb, None, 1000)[0].shape == rgb.shape
+
+
+def test_compare_step_leaves_the_run_untouched_and_matches_full_runs(tmp_path):
+    import io
+
+    from PIL import Image
+    ui, img, path = _ui_with_run(tmp_path)
+    sess = ui._pp_session
+    skip_before = list(sess['args'].skip_step)
+    pp_snaps_before = getattr(sess['args'], '_pp_snaps', None)
+    final_before = ui._final_src['rgb'].copy()
+    snaps_before = set(sess['snaps'].snaps)
+    jpeg_before = open(path, 'rb').read()
+    mtimes = {p.name: p.stat().st_mtime_ns for p in tmp_path.iterdir()}
+    off, on = ui.compare_postprocess_step('scnr', max_dim=96)
+    for data in (off, on):
+        assert max(Image.open(io.BytesIO(data)).size) <= 96
+    assert off != on
+    # nothing of the run changed, nothing was written
+    assert sess['args'].skip_step == skip_before and getattr(sess['args'], '_pp_snaps', None) is pp_snaps_before
+    assert np.array_equal(ui._final_src['rgb'], final_before)
+    assert set(sess['snaps'].snaps) == snaps_before and sess['snaps'].resume is None
+    assert open(path, 'rb').read() == jpeg_before
+    assert {p.name: p.stat().st_mtime_ns for p in tmp_path.iterdir()} == mtimes
+    # the "off" side is what a full run without the step renders
+    from src.ui_events import render_compare_jpeg
+    ref = _run(img, _args(['scnr']))
+    kw = dict(ui._final_src['kw'])
+    assert off == render_compare_jpeg(ref, None, kw, 96)
+    # with the step already off, the sides swap
+    ui.rerun_postprocess(['scnr'])
+    off2, on2 = ui.compare_postprocess_step('scnr', max_dim=96)
+    assert (off2, on2) == (off, on)
+    # an early step too (redoes the background block on a private copy)
+    ui.compare_postprocess_step('background', max_dim=96)
+    assert ui._pp_session['args'].skip_step == ['scnr']
+
+
+def test_compare_step_errors_and_cancel(tmp_path):
+    import threading
+
+    from src.models import RunCancelled
+    from src.ui_events import UIEvents
+    empty = UIEvents()
+    empty.attach()
+    with pytest.raises(RuntimeError):
+        empty.compare_postprocess_step('scnr')
+    ui, _, _ = _ui_with_run(tmp_path)
+    with pytest.raises(ValueError):
+        ui.compare_postprocess_step('nn')            # not used by this run
+    ev = threading.Event()
+    ev.set()
+    with pytest.raises(RunCancelled):
+        ui.compare_postprocess_step('scnr', max_dim=96, cancel=ev)
+    assert ui._pp_session['snaps'].resume is None
+
+
+def test_desktop_compare_window_shows_both_sides(tmp_path, monkeypatch):
+    pytest.importorskip('tkinter')
+    import tkinter as tk
+    try:
+        root = tk.Tk()
+    except tk.TclError:
+        pytest.skip('no display available for a real Tk root')
+    try:
+        from src import desktop_app
+        monkeypatch.setattr('src.utils.should_check_for_update', lambda: False)
+        app = desktop_app.App(root)
+        ui, _, _ = _ui_with_run(tmp_path)
+        app.ui = ui
+        snap = ui.snapshot()
+        snap['run_status'] = 'ok'
+        app._sync_pp_bar(snap)
+        assert app._cmp_ids
+        app.cmp_step_var.set([k for k, v in app._cmp_ids.items() if v == 'scnr'][0])
+        app._on_compare_step()
+        assert app._cmp_win is not None and app._pp_busy
+        import time
+        for _ in range(600):
+            root.update()
+            if not app._pp_busy:
+                break
+            time.sleep(0.1)
+        assert not app._pp_busy
+        win = app._cmp_win
+        assert win is not None
+        app._close_compare()
+        assert app._cmp_win is None
+    finally:
+        root.destroy()
