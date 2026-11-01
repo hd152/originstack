@@ -75,8 +75,7 @@ cube FITS. It is verified on Origin, Seestar S50 and LCO mono only.
 
 - Photometry is calibrated for Origin; extend gain/PTC to other cameras via the profile work
   above. **data**, M.
-- AAVSO-style export of the time series (the folder `C:\nn_work\aavso` suggests a start).
-  **code**, M.
+- AAVSO-style export of the photometry time series. **code**, M.
 - Transient detection against a catalogue (Gaia / Minor Planet Center) to cut false positives
   before the CNN triage. **code**, M.
 - Astrometric report for asteroid / comet sessions (MPC 80-column). **code**, M.
