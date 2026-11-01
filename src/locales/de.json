@@ -614,5 +614,8 @@
  "Copied the problem report to the clipboard. Check it, then paste it into an email or a forum post (Cloudy Nights, the GitHub Discussions page).": "Der Problembericht wurde in die Zwischenablage kopiert. Prüfen Sie ihn und fügen Sie ihn dann in eine E-Mail oder einen Forenbeitrag ein (Cloudy Nights, die GitHub-Discussions-Seite).",
  "Result not right? Report it": "Ergebnis nicht in Ordnung? Melden",
  "Report a problem (top right) opens a GitHub issue or copies the details, with the log, for an email or a forum post.": "„Problem melden“ (oben rechts) öffnet ein GitHub-Issue oder kopiert die Details samt Protokoll für eine E-Mail oder einen Forenbeitrag.",
- "{name}: no preview was kept for this frame": "{name}: Für dieses Frame wurde keine Vorschau gespeichert"
+ "{name}: no preview was kept for this frame": "{name}: Für dieses Frame wurde keine Vorschau gespeichert",
+ "Camera: {name}. The learned sharpening was trained on Origin data: it runs after the star widths are rescaled, and --auto picks it only when stars can be measured.": "Kamera: {name}. Die gelernte Schärfung wurde mit Origin-Daten trainiert: Sie läuft nach der Skalierung der Sternbreiten, und --auto wählt sie nur, wenn Sterne messbar sind.",
+ "Copied the diagnostics to the clipboard. Home folders are shown as ~; check it before sharing.": "Diagnose in die Zwischenablage kopiert. Home-Ordner erscheinen als ~; vor dem Teilen prüfen.",
+ "Copy diagnostics (version, system, settings, log)": "Diagnose kopieren (Version, System, Einstellungen, Protokoll)"
 }

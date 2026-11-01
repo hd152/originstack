@@ -636,6 +636,7 @@ class SetupForm(ttk.Frame):
         # for every field built (common fields have group None).
         self._fields: Dict[str, Dict[str, Any]] = {}
         self.dir_count_var = tk.StringVar(value='')
+        self.camera_var = tk.StringVar(value='')
         all_fields = {f['dest']: f for fields in self.schema.values() for f in fields}
 
         common_frame = ttk.Frame(self)
@@ -648,6 +649,12 @@ class SetupForm(ttk.Frame):
                 row += self._build_field(common_frame, row, field, group=None)
             if dest == 'temp_dir':
                 goal_row, row = row, row + 1  # the target cards and run mode go here
+            if dest == 'directory':
+                self._camera_label = ttk.Label(common_frame, textvariable=self.camera_var,
+                                               style='Dim.TLabel', wraplength=520, justify='left')
+                self._camera_label.grid(row=row, column=0, columnspan=4, sticky='w', padx=4)
+                self._camera_label.grid_remove()
+                row += 1
 
         bar = ttk.Frame(self)
         bar.pack(fill='x', pady=(10, 0))
@@ -1009,11 +1016,38 @@ class SetupForm(ttk.Frame):
         if path:
             var.set(path)
 
+    def _show_camera_note(self, text: Optional[str]) -> None:
+        self.camera_var.set(text or '')
+        label = getattr(self, '_camera_label', None)
+        if label is not None:
+            label.grid() if text else label.grid_remove()
+
+    def _remember_folders(self) -> None:
+        from src.desktop_control import save_app_setting
+        for dest in ('directory', 'output'):
+            var = self.vars.get(dest)
+            value = var.get().strip() if var is not None else ''
+            if dest == 'output' and value.lower().endswith(('.fits', '.fit')):
+                value = os.path.dirname(value)      # the folder, so the next stack never overwrites this one
+            if value:
+                save_app_setting(f'last_{dest}', value)
+
+    def restore_folders(self) -> None:
+        """Put back the folders of the last run, where the user has typed nothing yet."""
+        from src.desktop_control import load_app_setting
+        for dest in ('directory', 'output'):
+            var = self.vars.get(dest)
+            saved = load_app_setting(f'last_{dest}', '')
+            if var is not None and not var.get() and isinstance(saved, str) and saved:
+                if os.path.isdir(saved):
+                    var.set(saved)
+
     def _rescan_directory(self) -> None:
         directory = self.vars['directory'].get().strip()
         self._data_summary = ''
         self._frame_counts = {}
         self.inferred = (None, None, None)
+        self._show_camera_note(None)
         if not directory or not os.path.isdir(directory):
             self.dir_count_var.set('')
             self.goal.set_suggestion(None, None)
@@ -1046,6 +1080,12 @@ class SetupForm(ttk.Frame):
                 if ttype == 'unknown':
                     ttype = None
                 self.inferred = (name, ttype, src)
+                from src.desktop_control import unprofiled_camera
+                cam_name = unprofiled_camera(lights)
+                self._show_camera_note(_(
+                    'Camera: {name}. The learned sharpening was trained on Origin data: it '
+                    'runs after the star widths are rescaled, and --auto picks it only when '
+                    'stars can be measured.', name=cam_name) if cam_name else None)
                 if name:
                     text += f'  ·  {name}' + (f', {_from_source(src)}' if _from_source(src) else '')
             self.dir_count_var.set(text)
@@ -1510,6 +1550,8 @@ class App:
         menu.add_command(label=_('Open a GitHub issue…'), command=self._report_problem)
         menu.add_command(label=_('Copy report (for an email or forum post)'),
                          command=self._copy_problem_report)
+        menu.add_command(label=_('Copy diagnostics (version, system, settings, log)'),
+                         command=self._copy_diagnostics)
         try:
             menu.tk_popup(event.x_root, event.y_root)
         finally:
@@ -1532,6 +1574,14 @@ class App:
                                    'paste it into an email or a forum post (Cloudy Nights, the '
                                    'GitHub Discussions page).'))
 
+    def _copy_diagnostics(self) -> None:
+        from src.desktop_control import diagnostics_text
+        self.root.clipboard_clear()
+        self.root.clipboard_append(diagnostics_text(self.form.read_form(),
+                                                    self.log_text.get('1.0', 'end')))
+        self.diagnostics_var.set(_('Copied the diagnostics to the clipboard. Home folders are '
+                                   'shown as ~; check it before sharing.'))
+
     def _open_support(self) -> None:
         from src.desktop_control import SUPPORT_URL
         webbrowser.open(SUPPORT_URL)
@@ -1551,6 +1601,7 @@ class App:
                               on_change=self._on_form_change)
         self.form.pack(fill='both', expand=True, padx=(0, 6))
         from src.desktop_control import load_app_setting
+        self.form.restore_folders()
         _tv = self.form.vars.get('temp_dir')
         if _tv is not None and not _tv.get():
             _tv.set(load_app_setting('temp_dir', '') or '')
@@ -1796,6 +1847,7 @@ class App:
         # remembered for the next launch: a big session's temp files need a roomy drive
         from src.desktop_control import save_app_setting
         save_app_setting('temp_dir', str(form.get('temp_dir') or '').strip())
+        self.form._remember_folders()
         form = with_export_checkboxes(form, self.form.vars['export'].get()
                                       if 'export' in self.form.vars else '',
                                       {f: v.get() for f, v in self.export_vars.items()})
