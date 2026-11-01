@@ -108,7 +108,7 @@ def test_runs_as_part_of_apply_auto_settings(model, monkeypatch):
 
 def test_galaxies_get_the_galaxy_blend(model):
     args = _args()
-    assert args.nn_deconv_blend == a.NN_DECONV_DEFAULT_BLEND      # cli.py's default matches
+    assert args.nn_deconv_blend is None                           # automatic
     a._apply_nn_deconvolution(args, GALAXY)
     assert args.nn_deconv_blend == a.NN_DECONV_GALAXY_BLEND
 
@@ -118,3 +118,31 @@ def test_a_configured_blend_wins(model):
     args.nn_deconv_blend = 0.5                  # e.g. from --config
     a._apply_nn_deconvolution(args, GALAXY)
     assert args.nn_deconv_blend == 0.5
+
+
+def test_nn_deconv_blend_flag_default_is_automatic_and_validated(model):
+    assert _args().nn_deconv_blend is None
+    assert _args('--nn-deconv-blend', '0.6').nn_deconv_blend == 0.6
+    for bad in ('1.5', '-0.1', 'x'):
+        with pytest.raises(SystemExit):
+            _args('--nn-deconv-blend', bad)
+
+
+def test_an_explicit_blend_flag_beats_auto_even_at_the_old_default(model):
+    for value in (0.75, 0.5):
+        args = _args('--nn-deconv-blend', str(value))
+        a._apply_nn_deconvolution(args, GALAXY)
+        assert args.nn_deconv_blend == value
+
+
+def test_blend_flag_in_form_schema_and_saved_config_roundtrip(model, tmp_path):
+    from src.cli import save_effective_config
+    from src.desktop_control import get_form_schema
+    fields = [f for g in get_form_schema().values() for f in g]
+    assert any(f['dest'] == 'nn_deconv_blend' and f['default'] is None for f in fields)
+    args = _args('--nn-deconv-blend', '0.4')
+    out = str(tmp_path / 's.fits')
+    save_effective_config(args, out)
+    assert 'nn_deconv_blend = 0.4' in (tmp_path / 's_config.toml').read_text()
+    save_effective_config(_args(), out)
+    assert 'nn_deconv_blend' not in (tmp_path / 's_config.toml').read_text()

@@ -259,16 +259,44 @@ def star_mask(img: np.ndarray, fwhm: float) -> Optional[np.ndarray]:
     or None when no stars are found. Marks where ``nn_denoise`` restores with a tight blur."""
     from src.star_detect import detect_stars_matched_filter
     lum = np.nan_to_num(np.asarray(img, np.float32).mean(axis=2))
-    try:
-        src = detect_stars_matched_filter(lum - np.float32(np.median(lum)))
-    except Exception:
-        return None
-    if src is None or len(src) == 0:
-        return None
+    lum = lum - np.float32(np.median(lum))
     h, w = lum.shape
     pts = np.zeros((h, w), bool)
-    pts[np.clip(np.rint(np.asarray(src['ycentroid'])).astype(int), 0, h - 1),
-        np.clip(np.rint(np.asarray(src['xcentroid'])).astype(int), 0, w - 1)] = True
+
+    def _mark(src, off=0, band=0):
+        if src is None or len(src) == 0:
+            return
+        y = np.rint(np.asarray(src['ycentroid'])).astype(int) - off
+        x = np.rint(np.asarray(src['xcentroid'])).astype(int) - off
+        if band:       # padded pass: only stars inside the frame and the detector's border
+            keep = (y >= 0) & (y < h) & (x >= 0) & (x < w)
+            keep &= (np.minimum(y, h - 1 - y) < band) | (np.minimum(x, w - 1 - x) < band)
+            y, x = y[keep], x[keep]
+        pts[np.clip(y, 0, h - 1), np.clip(x, 0, w - 1)] = True
+
+    try:
+        _mark(detect_stars_matched_filter(lum))
+    except Exception:
+        return None
+    # The detector ignores a border of max(cell // 2, 2 * ceil(3 * 5.5 / 2.3548)) px (its
+    # default fwhm), so stars there got the plain 4 px restore. Padded second passes find
+    # them; only detections inside the frame and that border are added, so the interior (and
+    # every first-pass detection) is unchanged. Reflection misses stars 2-5 px from the edge
+    # (the star and its mirror image merge into one elongated blob the roundness cut rejects)
+    # and replication misses those at 0-1 px, so both run; zero padding found 20x more
+    # "stars" on Sculptor (382 vs 17 in the band: a sky step at the edge). Mirror images land
+    # outside the frame and are dropped.
+    cell = max(8, min(64, min(h, w) // 8))
+    border = max(cell // 2, 2 * int(np.ceil(3.0 * 5.5 / 2.3548)))
+    pad = border + 8
+    if min(h, w) > pad + 1:
+        for mode in ('reflect', 'edge'):
+            try:
+                _mark(detect_stars_matched_filter(np.pad(lum, pad, mode=mode)), pad, border)
+            except Exception:
+                pass
+    if not pts.any():
+        return None
     dist = ndi.distance_transform_edt(~pts)
     return np.clip((3.0 * fwhm - dist) / fwhm, 0.0, 1.0).astype(np.float32)
 
