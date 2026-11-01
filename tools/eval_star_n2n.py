@@ -217,6 +217,8 @@ def evaluate(path: str, w, alpha: float, test_alpha: float, seed: int, crops: st
     star_mask[field.det_y, field.det_x] = True
     star_mask = ndi.binary_dilation(star_mask, iterations=sn.STAMP_R)
     g, gy, gx = faint_discs(z.shape, star_mask, rng)
+    if sn.is_grey(z):   # a mono stack has no colour to its faint sources either
+        g = np.repeat(g.mean(-1, keepdims=True), g.shape[-1], -1).astype(np.float32)
     o2 = remover(z + g)
     gin = sn.aperture_flux(g, gy, gx).mean(1)
     gout = sn.aperture_flux(o2 - o0, gy, gx).mean(1)

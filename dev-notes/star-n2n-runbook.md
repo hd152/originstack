@@ -342,3 +342,33 @@ faint_kept 0.93-0.96 (was 0.93-0.95), sky_shift <= 0.012, fill_noise 0.92-1.08, 
 all as before. Crops (input / network / after, brightest donors): the refilled cores read as sky. One thing to watch: a star sitting
 in a saturated star's bright halo (Orion) leaves a slightly lumpy patch of about 25 px. Saturated
 stars' diffraction spikes and reflection rings are still not removed.
+
+## Mono input (2026-11-01): inference fix, no retraining
+
+LCO M51 (`C:\nn_work\lco\m51_rp3.fits`, mono replicated to 3 channels, 4.1 px stars) scored
+faint_kept 0.59-0.63, hole -1.5, fill_noise 1.18 against 0.93-0.96 on Origin/S50 stacks, with
+faint-looking dark blotches in the galaxy arms and colour fringes in the output.
+
+Isolated on a 1300 px crop (raw network keep of added discs, ideal 0.96 as on Sunflower):
+- Not disc size (scales 2-8 px all 0.76-0.79; Sunflower 0.96-0.97), not chroma of the test
+  discs (grey discs 0.75), not the noise-unit normalisation (MAD 1.0 after it).
+- **Noise correlation.** LCO noise is whiter than debayered Origin noise (lag-1 difference MAD
+  0.91 vs 0.69-0.75). Blurring the input 0.5 / 0.8 px: raw keep 0.89 / 0.965. Adding independent
+  noise per channel also helps (0.86-0.94) but the noise leaks into the output (sky_mad 0.5-1).
+- Also an eval artefact: `faint_discs` carried colour, so on a mono stack the disc run was not
+  grey and took another code path than the disc-free run; the eval now makes them grey for
+  grey input.
+
+Fix (`starless_z`, only when every channel is identical, `is_grey`): the network sees the input
+blurred by `MONO_BLUR_SIGMA` = 0.6 px (noise rescaled to unit by `_blur_gain`, discs blurred
+with it), the formula runs on the blurred z, and the input's high-pass (z - blurred z) is added
+back; the result is replicated from channel 0 (the fills' per-channel noise made chroma on a
+mono image). Colour stacks take the old path unchanged (bit-identical output on Sunflower and
+Orion crops).
+
+`eval_star_n2n.py --tta 2`, LCO M51 full stack, before -> after: faint_kept 0.59 -> 0.92,
+hole -1.54 -> -0.30, fill_noise 1.19 -> 0.94, sky_shift -0.027 -> +0.015, sky_mad 0.108 ->
+0.037, real_left 0.01 -> 0.01 (faint/mid/bright -0.01 / 0.03 / 0.00), inject_left all -0.07 ->
+-0.08, sat_left 0.0006. Crops: arms kept, no dark blotches or fringes; the bright cores of M51
+and its companion keep a small speckled patch. sigma 0.5 gives faint_kept 0.90 / hole -1.7,
+0.7 gives 0.92 / -0.41 but real_left faint 0.11.

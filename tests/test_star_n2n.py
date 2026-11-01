@@ -415,3 +415,18 @@ def test_starless_z_cores_switch(field_and_z, monkeypatch):
     sn.starless_z(z, None, field=field, tta=1, saturated=False, cores=False)
     sn.starless_z(z, None, field=field, tta=1, saturated=False, guard=False)
     assert calls == [1]
+
+
+def test_mono_input_goes_through_the_blurred_path_and_stays_grey(tmp_path):
+    img = _synthetic(seed=3)
+    grey = np.repeat(img[..., :1], 3, axis=-1)
+    assert sn.is_grey(grey) and not sn.is_grey(img)
+    path = _zero_out_weights(tmp_path / 'zero.npz')
+    out, _ = sn.remove_stars_nn(grey, model_path=path, alpha=1.0, tta=0, guard=False, saturated=False)
+    assert np.array_equal(out[..., 0], out[..., 2])
+    # identity network: the blur's high-pass is added back, so the input comes out again
+    np.testing.assert_allclose(out, grey, atol=1e-3 * float(np.abs(grey).max()))
+    z, _, _, _ = sn.normalise_image(grey)
+    zg = sn._blur(z, sn.MONO_BLUR_SIGMA)
+    assert 0.3 < float(sn._blur_gain(z, zg)) < 1.0   # blurring lowers the white-noise sigma
+    nd._weights_cache.pop(path, None)
