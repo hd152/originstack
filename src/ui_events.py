@@ -400,6 +400,7 @@ class UIEvents:
         once the re-run returns (Phase 4 steps do not poll it). ``RuntimeError`` without a
         finished run; ``ValueError`` for a step this run did not use."""
         import copy
+
         from src.models import RunCancelled
         from src.postprocess import phase4_resume_step, phase4_toggles, postprocess_stack
         from src.uncertainty import _QUIET_OFF
