@@ -83,6 +83,7 @@ class UIEvents:
                          'started': None, 'eta': None},
             'log': [],
             'frames': [],              # recent per-frame metric rows
+            'frame_report': [],        # --frame-report: kept/rejected verdict per light
             'summary': None,
             'done': False,
             'run_status': 'idle',      # 'idle' | 'running' | 'ok' | 'error'
@@ -179,6 +180,14 @@ class UIEvents:
             rows.append(row)
             if len(rows) > _MAX_FRAME_ROWS:
                 del rows[:len(rows) - _MAX_FRAME_ROWS]
+            self._bump()
+
+    def frame_report(self, rows: list) -> None:
+        """Publish the per-frame kept/rejected table (``src/frame_report.py``)."""
+        if not self.active:
+            return
+        with self._lock:
+            self._state['frame_report'] = [dict(r) for r in rows]
             self._bump()
 
     @staticmethod
@@ -434,6 +443,7 @@ class UIEvents:
         with self._lock:
             self._state['log'] = []
             self._state['frames'] = []
+            self._state['frame_report'] = []
             self._state['summary'] = None
             self._state['done'] = False
             self._state['phase'] = 0

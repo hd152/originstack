@@ -1211,6 +1211,10 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                                 dither_info=dither_info, stats=stats,
                                 fingerprint=_ckpt_fp)
 
+            if getattr(args, 'frame_report', False):
+                from src.frame_report import emit_frame_report
+                emit_frame_report(lights, rejected_reasons, final, args, output_path)
+
             # Resolve 'auto' and legacy --winsorize shorthand
             if args.stack_method == 'auto':
                 if len(final) < 8:
