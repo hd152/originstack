@@ -6,6 +6,51 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+## [2.20.0] - 2026-11-01
+
+The learned deconvolver now works on other cameras: it rescales to the star width it was trained
+on, reads monochrome and tile-compressed FITS, and `--auto` picks it when it can measure the stars.
+The desktop app compares any Phase 4 step before and after, and there is a per-frame report of why
+each frame was kept or rejected.
+
+### Added
+- **Learned deconvolver on other cameras.** `--deconvolve nn` measures the star width in your
+  stack and, when it is outside the 2.3-5.2 px it was trained on, resamples the image to the
+  nearest bound, runs the network and resamples back, so a different pixel scale no longer
+  matters (checked on Seestar S50 and Las Cumbres Observatory stacks, against Pan-STARRS). Narrow
+  stars (under about 4 px) keep their flux through a star-aware restore. Stacks in the trained
+  range, such as Origin, are unchanged. `--auto` now chooses it off Origin too (at least 3
+  accepted frames), and Phase 4 puts the previous settings back, with one log line, when the
+  stack has no fitted star, fewer than 30 usable stars, a median width outside 1.1-14 px or a
+  median ellipticity above 0.35.
+- **Monochrome, tile-compressed and cube FITS.** Mono FITS (header says no Bayer pattern, or has a
+  filter) is calibrated on its single plane and replicated to three channels, as mono SER/XISF
+  already were; `.fits.fz` frames (Las Cumbres) and 3-plane FITS cubes load.
+- **`--nn-deconv-blend FRAC`** sets how much of the deconvolver is kept against the learned
+  denoiser (default automatic: 0.75, galaxies 0.35 under `--auto`). An explicit value now wins
+  over `--auto`, including 0.75.
+- **`--frame-report`** writes `<stem>_frames.csv` and `.json`: each light's verdict, the stage that
+  decided it, a plain reason ("registration residual 4.93 px RMS > 1.50 px") and its metrics.
+- **Calibration masters and mixed folders.** A larger master is cropped to the lights when the
+  binning matches and the offset is known; other mismatches are dropped with a warning that says
+  why, on every path (it was silent on some). Lights that differ in binning, frame size, gain/ISO
+  or camera are split into separate stacks instead of mixed.
+- **Desktop app:** a before/after window for any Phase 4 step (wipe slider, zoom, pan, hold to show
+  "on"); a Copy diagnostics entry in the report-a-problem menu; the last input and output folders
+  are remembered; a note under the light frames field when the camera is not an Origin.
+- **Star removal (`--remove-stars-method nn`, experimental):** refills the cores left at the
+  brightest unsaturated stars (bright-star leftover 0.20 -> 0.02 on Orion), and handles mono
+  stacks (Las Cumbres M51 kept 0.92 of its faint structure, was 0.59).
+
+### Fixed
+- Local contrast no longer leaves a dark ring round saturated stars.
+- Stars within about 30 px of the frame edge now get the same star-aware restore as the rest.
+
+### Changed
+- Heavy scipy and astropy modules load on first use, and CI gates clippy and a new lint rule.
+- Python 3.12 or newer is the supported version (the installers ship 3.12, CI tests 3.12).
+- `astro_native` 0.63.2: constants only, no behaviour change.
+
 ## [2.19.0] - 2026-10-30
 
 The desktop app can switch Phase 4 steps off and on after a run, lets you pick any frame in the
