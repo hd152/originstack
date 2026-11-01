@@ -922,7 +922,7 @@ NN_DECONV_MIN_GALAXY_WEIGHT = 0.5
 # noise -4% / -7%, Gaia colour agreement within 0.02 (dev-notes/nn-deconv-runbook.md,
 # "Survey truth").
 NN_DECONV_GALAXY_BLEND = 0.35
-NN_DECONV_DEFAULT_BLEND = 0.75        # cli.py's default for an explicit --deconvolve nn
+NN_DECONV_DEFAULT_BLEND = 0.75        # used for an explicit --deconvolve nn when --nn-deconv-blend is unset
 NN_DECONV_OTHER_BLEND = 0.75          # nebulae, clusters, star fields
 # Cameras whose data the learned deconvolution was trained on: --auto takes it without the
 # guards below. Other cameras (the Mark II's Origin678C, Seestar, ...) get it only past them.
@@ -1046,8 +1046,8 @@ def _apply_nn_deconvolution(args, weights: Dict[str, float], n_frames: Optional[
     _set('deconvolve_mode', 'nn')
     _set('deconvolve_nn', True)
     _set('deconvolve', False)                # not Richardson-Lucy as well
-    if getattr(args, 'nn_deconv_blend', NN_DECONV_DEFAULT_BLEND) == NN_DECONV_DEFAULT_BLEND:
-        _set('nn_deconv_blend', NN_DECONV_GALAXY_BLEND if galaxy else NN_DECONV_OTHER_BLEND)  # --config KEY=VALUE wins
+    if getattr(args, 'nn_deconv_blend', None) is None:   # an explicit --nn-deconv-blend / --config value wins
+        _set('nn_deconv_blend', NN_DECONV_GALAXY_BLEND if galaxy else NN_DECONV_OTHER_BLEND)
     for attr in ('denoise_curvelet', 'denoise_acdnr', 'denoise_bilateral', 'denoise_aniso', 'denoise_nn'):
         _set(attr, False)                    # the network denoises as it sharpens
     if not trained:

@@ -746,6 +746,7 @@ python originstack.py -d <dir> -o <output.fits> [options]
 | `--starless-process` | Denoise / local-contrast / deconvolve a starless copy, add the stars back untouched |
 | `--layered-stretch` | Preview stretch points taken from a starless copy (preview JPEG only) |
 | `--deconvolve {off,rl,rl-sv,tv,sparse}` | Richardson-Lucy (global or spatially-variant), TV, or sparse-wavelet deconvolution |
+| `--nn-deconv-blend FRAC` | With `--deconvolve nn`: share (0-1) of the deconvolver kept, the rest the neural denoiser (default automatic: 0.75, galaxies 0.35 under `--auto`) |
 | `--plate-solve` | Plate solve (built-in local Gaia solver by default; `--plate-solver` picks ASTAP/astrometry.net) |
 | `--from-stack STACK.fits` | Re-run post-processing only, on an earlier run's linear stack |
 | `--spike-reject` | Remove cosmic-ray / hot-pixel spikes on the raw mosaic before debayering (cheap; `--auto` turns it on for < 20 frames, mean stacking or drizzle) |
