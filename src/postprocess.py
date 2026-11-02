@@ -32,6 +32,8 @@ from src.denoising import (
     directional_wavelet_denoise,
     larson_sekanina,
     multiscale_local_contrast,
+    noise_flatten,
+    noise_restore,
     radial_renormalize,
     reduce_chroma_noise,
     remove_star_halos,
@@ -41,9 +43,12 @@ from src.denoising import (
 from src.models import Config, FrameInfo, ProcessingStats
 from src.photometric_calibration import photometric_color_calibrate
 from src.psf_deconvolution import (
+    clipped_core_mask,
+    deconvolution_residual,
     estimate_psf,
     estimate_psf_blind,
     make_synthetic_psf,
+    relative_kernel,
     richardson_lucy_deconvolve,
     sparse_wavelet_deconvolve,
     tv_regularized_deconvolve,
@@ -287,6 +292,22 @@ def _sanitize(img: np.ndarray, step_name: str = "") -> np.ndarray:
     return img
 
 
+def _noise_rel_map(args, stacked: np.ndarray) -> Optional[np.ndarray]:
+    """Relative noise sigma map for the denoisers, or None when the noise is uniform.
+
+    ``args._noise_rel`` comes from ``--full-field``'s coverage count (``pipeline``), or from
+    the ``<stem>_coverage.fits`` beside a ``--from-stack`` input. Used only when it matches the
+    image and the depth really varies (the deepest pixel at least 5% quieter than the
+    shallowest): a plain run is then bit-identical to before. ``--config
+    noise_map_denoise=false`` turns it off."""
+    rel = getattr(args, '_noise_rel', None)
+    if rel is None or not getattr(args, 'noise_map_denoise', True):
+        return None
+    if rel.shape != stacked.shape[:2] or float(rel.max()) < 1.05:
+        return None
+    return rel
+
+
 def _postprocess_early(stacked: np.ndarray, args: argparse.Namespace,
                       final: List[FrameInfo], skip_steps: set,
                       _diag_dir, _diag_counter: list):
@@ -367,12 +388,31 @@ def _postprocess_early(stacked: np.ndarray, args: argparse.Namespace,
 
     # Star halo removal (before background extraction)
     if getattr(args, 'halo_removal', False) and _pp_sources is not None and len(_pp_sources) > 0:
-        _halo_fwhm = float(np.median(
-            [f.metrics.get('fwhm', 4.0) for f in final
-             if f.metrics and f.metrics.get('fwhm', 0) > 0]) or 4.0)
-        print(f"\n  Removing star halos (fwhm={_halo_fwhm:.1f}px)...")
+        _halo_fwhm = _stack_fwhm(stacked, _pp_sources, final)     # NaN on --from-stack before
         _halo_start = time.time()
-        stacked = remove_star_halos(stacked, _pp_sources, fwhm=_halo_fwhm)
+        _halo_done = False
+        if getattr(args, 'halo_removal_method', 'gaussian') == 'psf':
+            safe_print(f"\n  Removing star halos (Gaia-anchored extended PSF, fwhm={_halo_fwhm:.1f}px)...")
+            from src.halo_model import subtract_halos
+            from src.pipeline import stack_header_for_phase4
+            _halo_hdr = stack_header_for_phase4(args)
+            if _halo_hdr is None:
+                safe_print("    no stack WCS -- using the Gaussian halo model instead")
+            else:
+                stacked, _halo_info = subtract_halos(stacked, _halo_hdr, _halo_fwhm)
+                if _halo_info is not None and 'declined' in _halo_info:
+                    safe_print(f"    PSF halo model not used ({_halo_info['declined']}) -- "
+                               f"using the Gaussian halo model instead")
+                else:
+                    _halo_done = True
+                    if args.verbose and _halo_info:
+                        for _c, _v in _halo_info['channels'].items():
+                            safe_print(f"    {'RGB'[_c]}: {_v['stars']} halo-bearing stars, flux scale "
+                                       f"scatter {_v['scatter_dex']:.2f} dex")
+        else:
+            safe_print(f"\n  Removing star halos (fwhm={_halo_fwhm:.1f}px)...")
+        if not _halo_done:
+            stacked = remove_star_halos(stacked, _pp_sources, fwhm=_halo_fwhm)
         safe_print(f"  Star halo removal ({format_time(time.time() - _halo_start)})")
         stacked = _sanitize(stacked, "halo removal")
 
@@ -959,10 +999,16 @@ def postprocess_stack(
         print(f"\n  Applying directional (curvelet-inspired) wavelet denoising "
               f"(protect_strength={curv_protect:.2f}, chroma={curv_chroma:.1f})...")
         curv_start = time.time()
+        _rel = _noise_rel_map(args, stacked)
+        if _rel is not None:
+            stacked, _ped = noise_flatten(stacked, _rel)
         stacked = directional_wavelet_denoise(
             stacked, chroma_factor=curv_chroma, star_mask=_dn_mask,
             protect_strength=curv_protect,
-            variance_stabilize=getattr(args, 'variance_stabilize', False))
+            variance_stabilize=getattr(args, 'variance_stabilize', False),
+            cycle_spins=int(getattr(args, 'wavelet_cycle_spins', 1)))
+        if _rel is not None:
+            stacked = noise_restore(stacked, _rel, _ped)
         safe_print(f"  ✓ Directional wavelet denoise ({format_time(time.time() - curv_start)})")
 
     # 6.7c. Learned Noise2Noise denoiser, or the learned deconvolver (--deconvolve nn: the
@@ -979,6 +1025,9 @@ def postprocess_stack(
         else:
             _diag_save(stacked, _diag_dir, _diag_counter,
                        'before_nn_deconvolve' if _nn_deconv else 'before_nn_denoise')
+            _rel = _noise_rel_map(args, stacked)     # shallow rims: flatten the noise first
+            if _rel is not None:
+                stacked, _ped = noise_flatten(stacked, _rel)
             nn_strength = float(getattr(args, 'nn_denoise_strength', 1.0))
             nn_restore = float(getattr(args, 'nn_deconv_restore_sigma' if _nn_deconv
                                        else 'nn_restore_sigma', 4.0))
@@ -1021,6 +1070,8 @@ def postprocess_stack(
                 stacked = (np.float32(_blend) * stacked + np.float32(1.0 - _blend) * _den).astype(np.float32)
                 del _den
             del _pre_nn
+            if _rel is not None:
+                stacked = noise_restore(stacked, _rel, _ped)
             # The preview stretch is solved from the sky noise; keep it at the noise the
             # image had before this step, or it would stretch ~10x harder.
             _sig_after = _sky_stats(luminance(stacked))[1]
@@ -1222,9 +1273,31 @@ def postprocess_stack(
                                                     star_mask=deconv_mask)
                 safe_print(f"  ✓ Sparse deconvolution ({format_time(time.time() - deconv_start)})")
             else:
-                safe_print(f"  Richardson-Lucy deconvolution (iters={rl_iters})...")
-                stacked = richardson_lucy_deconvolve(stacked, psf, iterations=rl_iters,
-                                                      star_mask=deconv_mask)
+                _kernel, _rl_mask = psf, deconv_mask
+                _ratio = getattr(args, 'deconvolve_target_ratio', None)
+                if _ratio and psf_fwhm > 0:
+                    # deconvolve to a narrower PSF, not to a point: no ringing to mask out, so only
+                    # clipped cores are protected (psf_deconvolution.relative_kernel)
+                    try:
+                        _tfwhm = float(_ratio) * psf_fwhm
+                        _kernel = relative_kernel(psf, _tfwhm)
+                        _rl_mask = clipped_core_mask(luminance(stacked), 2.0 * psf_fwhm)
+                        safe_print(f"  Relative-kernel Richardson-Lucy (iters={rl_iters}, "
+                                   f"{psf_fwhm:.2f} -> {_tfwhm:.2f} px target PSF)...")
+                    except ValueError as _rke:
+                        safe_print(f"  Relative kernel not used ({_rke}); plain Richardson-Lucy")
+                        _kernel, _rl_mask = psf, deconv_mask
+                else:
+                    safe_print(f"  Richardson-Lucy deconvolution (iters={rl_iters})...")
+                _rl_before = stacked if args.verbose else None
+                stacked = richardson_lucy_deconvolve(stacked, _kernel, iterations=rl_iters,
+                                                      star_mask=_rl_mask)
+                if _rl_before is not None:
+                    _res = deconvolution_residual(_rl_before, stacked, _kernel,
+                                                  _sky_stats(luminance(_rl_before))[1])
+                    safe_print(f"    consistency (kernel * result vs input, chi-square per pixel): "
+                               f"sky {_res['chi2_sky']:.2f}, stars {_res['chi2_bright']:.2f}")
+                    del _rl_before
                 safe_print(f"  ✓ Richardson-Lucy deconvolution "
                            f"({format_time(time.time() - deconv_start)})")
             if _dc_stars is not None:

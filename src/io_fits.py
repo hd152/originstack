@@ -37,6 +37,22 @@ def to_uint8(x: np.ndarray) -> np.ndarray:
     return np.clip(np.rint(np.asarray(x, np.float32) * np.float32(255.0)), 0, 255).astype(np.uint8)
 
 
+def to_uint8_dithered(x: np.ndarray, seed: int = 0) -> np.ndarray:
+    """``to_uint8`` with triangular-PDF dither (Lipshitz, Wannamaker & Vanderkooy 1992).
+
+    Rounding a smooth gradient to 8 bits leaves visible contour bands; noise of +-1 step before
+    the rounding breaks them up and keeps the mean exact. A noisy sky dithers itself, but a
+    denoised object interior (the NN denoisers leave almost none) does not. Pixels at exactly 0 or
+    1 (clipped black and white) stay as they are, so a black sky does not gain speckle. The
+    generator is seeded: the same image gives the same bytes. For the JPEG only -- the lossless
+    exports keep plain rounding."""
+    v = np.asarray(x, np.float32) * np.float32(255.0)
+    rng = np.random.default_rng(seed)
+    noise = rng.random(v.shape, dtype=np.float32) - rng.random(v.shape, dtype=np.float32)
+    inside = (v > 0.0) & (v < 255.0)
+    return np.clip(np.rint(np.where(inside, v + noise, v)), 0, 255).astype(np.uint8)
+
+
 def _rescale_intensity(x: np.ndarray, lo: float, hi: float) -> np.ndarray:
     """Linearly rescale ``x`` from [lo, hi] to [0, 1], clipping outside that
     range -- equivalent to skimage.exposure.rescale_intensity(x, in_range=(lo,
@@ -1360,9 +1376,8 @@ def export_paths(jpeg_path: str) -> Dict[str, str]:
 
 
 def write_final_images(img01: np.ndarray, jpeg_path: str, exports=()) -> None:
-    """The preview JPEG of a [0, 1] display image, plus the lossless ``exports`` ('png':
-    8-bit, the JPEG's exact pixels before compression; 'png16': 16-bit) from the same
-    render. Each file goes through a temporary name, so a failed write never leaves a
+    """The preview JPEG of a [0, 1] display image (dithered to 8 bits), plus the lossless
+    ``exports`` ('png': 8-bit, plainly rounded; 'png16': 16-bit) from the same render. Each file goes through a temporary name, so a failed write never leaves a
     half-written file."""
     def atomic(path, write):
         tmp = path + '.tmp'
@@ -1376,7 +1391,8 @@ def write_final_images(img01: np.ndarray, jpeg_path: str, exports=()) -> None:
                 except OSError:
                     pass
     u8 = to_uint8(img01)
-    atomic(jpeg_path, lambda t: write_preview_jpeg(u8, t))
+    # the JPEG alone is dithered (smooth denoised regions would band); the PNG is plain rounding
+    atomic(jpeg_path, lambda t: write_preview_jpeg(to_uint8_dithered(img01), t))
     paths = export_paths(jpeg_path)
     if 'png' in exports and Image is not None:
         atomic(paths['png'], lambda t: Image.fromarray(u8).save(t, format='PNG', compress_level=6))
@@ -1604,6 +1620,16 @@ def populate_fits_header(header: fits.Header, frames: List[FrameInfo],
                                      'Total integration time (minutes)')
             header['TOTEXP'] = (round(total_integration, 1),
                                 'Total integrated exposure time in seconds')
+            try:
+                from src.effective_exposure import effective_integration
+                _eff = effective_integration(frames)
+            except Exception:
+                _eff = None
+            if _eff is not None:
+                header['TEFFTIME'] = (round(_eff['teff_time'], 1),
+                                      'Integration time in median-quality seconds')
+                header['TEFFRATIO'] = (round(_eff['ratio'], 3),
+                                       'TEFFTIME / integration time of the frames counted')
         elif 'EXPTIME' in first_header:
             try:
                 total_exp = float(first_header['EXPTIME']) * len(frames)

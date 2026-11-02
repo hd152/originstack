@@ -140,6 +140,7 @@ files from different sessions have landed in the wrong PR before). So:
 | `difference_imaging.py` / `transient_triage.py` | ZOGY subtraction + detection (`--transient-detect REF.fits`); CNN triage (`--transient-triage`; numpy forward pass reading the bundled ONNX, native tract kernel in a `triage`-feature build) |
 | `photometry_core.py` | `aperture_photometry_batch`, WCS helpers (`_celestial_wcs`, `_pixel_coords`, `_field_centre_and_radius`) shared by photometry, colour calibration, annotation, mosaic |
 | `camera_profile.py` | Camera from the FITS `CAMERA` keyword; per-model constants in `src/data/camera_profiles/<model>.json` (raw gain per ISO, colour slopes), gain checked on two of the session's lights before photometry (`resolve_camera` -> `args._camera`, `verify_gain`). Details: [camera-profile](dev-notes/camera-profile.md) |
+| `halo_model.py` | Gaia-anchored extended-PSF halo subtraction (`--halo-removal` + `--config halo_removal_method=psf`): flux scale from Gaia, radial PSF by weighted least squares, per-sector cap; [halo-model](dev-notes/halo-model.md) |
 | `photometry.py` / `photometry_timeseries.py` / `lightcurve_analysis.py` / `gain_ptc.py` | `--photometry`; `--photometry-timeseries`; `--lightcurve-analysis`; PTC gain from bias/flat pairs |
 | `observing_geometry.py` | Alt/az, airmass, parallactic angle (closed-form fallbacks, no IERS needed) |
 | `plate_solve.py` / `local_solve.py` | `--plate-solve` backend dispatch; built-in Gaia-tile solver |
@@ -238,6 +239,8 @@ Details in the linked notes.
 - Subsampled sigma-clipped medians for CFA equalisation (period-4 structure biases them).
 - RCD per-Bayer-site stages (stops vectorising); RCD strips without a buffer pool.
 - `--cfa-drizzle` as a default; kernel-regression merge of Bayer samples (stars wider and noisier than RCD + proper coadd); demosaic-free luminance; ubercal flat from stars (unconstrained on the local sessions) ([siril-comparison](dev-notes/siril-comparison.md), [native-kernels](dev-notes/native-kernels.md)).
+- Tile-aware proper coadd (a PSF and weight per frame and tile): `tools/psf_census.py` on six sessions found a frame-by-cell FWHM excess of 0-3.7% (gate 3%, two sessions just over, ~0.4% estimated sensitivity gain) ([psf-census](dev-notes/psf-census.md)).
+- `--denoiser wavelet` cycle spinning (4 grid shifts): 4-7% less noise on synthetic scenes, 0.3% on a real Pleiades crop for 4x the time; kept as `wavelet_cycle_spins`, default 1.
 - Radial lateral-CA model: `tools/stack_optics_census.py` measured a 0.15-0.25 px R-G shift at the corner (B-G under 0.1) against 3-5 px stars ([stack-optics](dev-notes/stack-optics.md)). The same census found a clean horizontal FWHM gradient (12-55%) in every stack that `--deconvolve nn` only partly removes; a column-adaptive relative-kernel RL pass after the NN flattened it (max/min 1.35 -> 1.08) but rang around faint stars.
 - Per-frame lacosmic as a noise reducer (it was smoothing; fixed noise model now) ([siril-comparison](dev-notes/siril-comparison.md)).
 - Proper coadd outside the core in `--full-field` (normalised convolution, per-tile, MTF filter, Wiener) ([module-notes](dev-notes/module-notes.md)).

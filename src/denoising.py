@@ -70,6 +70,32 @@ def _band_noise_sigma(coeffs: np.ndarray, mult: float, floor: float) -> float:
     return max(mad * mult, floor)
 
 
+def noise_rel_from_coverage(coverage: np.ndarray) -> np.ndarray:
+    """Relative noise sigma of a mean stack from the per-pixel count of frames behind it:
+    ``sqrt(max_count / count)`` (1 where the stack is deepest, 1.41 where half the frames
+    reach). ``--full-field`` extends the stack past the common crop into rims covered by fewer
+    frames, which are correspondingly noisier."""
+    cov = np.maximum(np.asarray(coverage, dtype=np.float64), 1.0)
+    return np.sqrt(cov.max() / cov).astype(np.float32)
+
+
+def noise_flatten(img: np.ndarray, rel: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """Make the noise uniform before a denoiser that assumes one global sigma.
+
+    ``img`` is (H, W, C) and ``rel`` (H, W) the relative noise sigma. Each channel is divided by
+    ``rel`` about its median (an arbitrary constant: ``noise_restore`` undoes it exactly), so a
+    rim that is 1.4x noisier looks like the rest to the denoiser instead of being under-smoothed
+    (a global sigma, set by the deep centre) and left speckled. Returns ``(flat, pedestal)``."""
+    ped = np.median(img.reshape(-1, img.shape[2]), axis=0).astype(np.float32)
+    inv = (1.0 / rel).astype(np.float32)[:, :, None]
+    return (ped + (img - ped) * inv).astype(np.float32), ped
+
+
+def noise_restore(flat: np.ndarray, rel: np.ndarray, pedestal: np.ndarray) -> np.ndarray:
+    """Inverse of ``noise_flatten`` (after the denoiser has run on the flattened image)."""
+    return (pedestal + (flat - pedestal) * rel.astype(np.float32)[:, :, None]).astype(np.float32)
+
+
 def _structure_tensor_coherence(plane: np.ndarray, sigma: float = 1.5) -> np.ndarray:
     """Local structure-tensor coherence, ``(lambda1-lambda2)/(lambda1+lambda2)``
     of the Gaussian-windowed gradient outer-product tensor. Near 1 on a
@@ -99,13 +125,19 @@ def _resize_to(arr: np.ndarray, shape: Tuple[int, int]) -> np.ndarray:
     return ndimage.zoom(arr, (zy, zx), order=1)
 
 
+# Grid shifts (rows, cols) of the cycle-spun wavelet denoiser, in the order they are added:
+# spread over the 16 px period of the 4-level decimated transform.
+_CYCLE_SHIFTS = [(0, 0), (2, 1), (1, 3), (3, 2), (4, 2), (2, 6), (6, 4), (5, 7)]
+
+
 def directional_wavelet_denoise(img: np.ndarray, levels: int = 4,
                                 chroma_factor: float = 2.0,
                                 star_mask: Optional[np.ndarray] = None,
                                 protect_strength: float = 0.6,
                                 coherence_sigma: float = 1.5,
                                 variance_stabilize: bool = False,
-                                band_sigma: bool = True) -> np.ndarray:
+                                band_sigma: bool = True,
+                                cycle_spins: int = 1) -> np.ndarray:
     """Directional (curvelet/shearlet-*inspired*) adaptive wavelet
     denoising -- ``--denoiser curvelet``.
 
@@ -148,7 +180,27 @@ def directional_wavelet_denoise(img: np.ndarray, levels: int = 4,
     white noise; stacks carry correlated noise (resampling, debayering: lag-1
     correlation ~0.4 on Origin stacks), whose power sits in the coarser bands,
     so the one sigma under-thresholded them. ``False`` restores the single sigma.
+
+    ``cycle_spins`` > 1 averages the result over that many grid shifts of the input (cycle
+    spinning, Coifman & Donoho 1995): a decimated wavelet transform is not shift-invariant, so a
+    single pass leaves a blocky texture tied to its grid, which the average removes. Costs
+    ``cycle_spins`` times the time; 4 shifts cut sky noise a further 4-7% on synthetic scenes but only
+    0.3% on a real Pleiades crop. 1 is the plain single pass, bit-identical to before.
     """
+    n_spin = int(np.clip(cycle_spins, 1, len(_CYCLE_SHIFTS)))
+    if n_spin > 1:
+        acc = np.zeros(img.shape, dtype=np.float64)
+        for dy, dx in _CYCLE_SHIFTS[:n_spin]:
+            shifted = np.roll(img, (dy, dx), axis=(0, 1))
+            out = directional_wavelet_denoise(
+                shifted, levels, chroma_factor, None, protect_strength, coherence_sigma,
+                variance_stabilize, band_sigma, 1)
+            acc += np.roll(out, (-dy, -dx), axis=(0, 1))
+        result = (acc / n_spin).astype(np.float32)
+        if star_mask is not None:
+            mask3 = star_mask[:, :, np.newaxis]
+            result = (result * (1.0 - mask3) + img.astype(np.float64) * mask3).astype(np.float32)
+        return result
     h, w = img.shape[0], img.shape[1]
     src = img.astype(np.float64)
     protect_strength = float(np.clip(protect_strength, 0.0, 0.95))

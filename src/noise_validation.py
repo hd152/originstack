@@ -19,6 +19,7 @@ the noise floor and repeatability, not producing a science stack.
 """
 from __future__ import annotations
 
+import logging
 from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
@@ -34,6 +35,8 @@ except Exception:  # pragma: no cover
     ndimage = None
     _gaussian_blur = None
     _HAS_SCIPY = False
+
+_log = logging.getLogger("originstack")
 
 
 def half_means(frames: np.ndarray) -> Tuple[np.ndarray, np.ndarray, int, int]:
@@ -148,8 +151,8 @@ def validate_noise(frames: np.ndarray, frame_noise: Optional[float] = None,
            'half_sizes': (na, nb)}
     try:
         out['frc'] = split_half_resolution(a, b)
-    except Exception:      # a measurement on top of the noise map must never lose it
-        pass
+    except Exception as exc:      # a measurement on top of the noise map must never lose it
+        _log.debug("split-half resolution not measured: %s", exc)
     if frame_noise and frame_noise > 0:
         expected = frame_noise / np.sqrt(na + nb)
         out['correlation_factor'] = float(np.mean(med) / expected)
