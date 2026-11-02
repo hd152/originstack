@@ -670,6 +670,8 @@ def _apply_full_field(args, stacked, final, final_indices, mem_rgb, shifts, tran
     if res is None:
         return None
     out, rect, coverage = res
+    from src.denoising import noise_rel_from_coverage
+    args._noise_rel = noise_rel_from_coverage(coverage)       # the denoisers flatten the noise
     stats.output_shape = (rect[1] - rect[0], rect[3] - rect[2])
     stats.cropped_pixels = (H - stats.output_shape[0], W - stats.output_shape[1])
     try:
@@ -2026,6 +2028,23 @@ def _set_diagnostic_dir(args, output_path: str, shape) -> None:
     args._diagnostic_dir = diag_dir
 
 
+def _load_noise_rel(args, stack_path: str, shape) -> None:
+    """``--from-stack``: the relative noise map from the ``<stem>_coverage.fits`` a
+    ``--full-field`` run wrote beside the stack (frames behind each pixel), when it matches."""
+    cov_path = os.path.splitext(stack_path)[0] + '_coverage.fits'
+    if not os.path.exists(cov_path):
+        return
+    try:
+        from astropy.io import fits
+
+        from src.denoising import noise_rel_from_coverage
+        cov = np.asarray(fits.getdata(cov_path))
+        if cov.shape == tuple(shape):
+            args._noise_rel = noise_rel_from_coverage(cov)
+    except Exception as exc:
+        _log.debug("coverage map not read: %s", exc)
+
+
 def postprocess_from_stack(stack_path: str, output_path: str,
                            args: argparse.Namespace) -> np.ndarray:
     """``--from-stack``: Phase 4 alone, on the linear main FITS of an earlier run.
@@ -2059,6 +2078,7 @@ def postprocess_from_stack(stack_path: str, output_path: str,
                    "stack, so --auto's per-target choices are not available)")
 
     prepare_linear_for_phase4(args, stacked, header)
+    _load_noise_rel(args, stack_path, stacked.shape[:2])
 
     stats = ProcessingStats()
     # Background/sky steps are reused from this file while the stack and their

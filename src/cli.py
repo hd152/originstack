@@ -2899,6 +2899,16 @@ def build_parser() -> argparse.ArgumentParser:
         # Config.WING_MASK_K pixel sigmas (background.wing_aware_star_mask), not just the
         # 4 px core. `--config bg_wing_mask=false` restores the compact mask.
         bg_wing_mask=True,
+        # --denoiser wavelet averages over this many grid shifts (cycle spinning, 1-8) for that
+        # many times the step's time. Off (1): 4 shifts cut sky noise 4-7% on synthetic scenes but
+        # only 0.3% on a real Pleiades crop (31.15 -> 31.05 ADU). `--config wavelet_cycle_spins=4`.
+        wavelet_cycle_spins=1,
+        # The wavelet and NN denoisers assume one noise sigma; --full-field's shallow rims are
+        # noisier. They flatten the noise by the coverage map first (denoising.noise_flatten).
+        noise_map_denoise=True,
+        # --deconvolve (Richardson-Lucy): deconvolve to a PSF this fraction of the measured width
+        # instead of to a point (psf_deconvolution.relative_kernel), e.g. 0.8; None = the plain kernel.
+        deconvolve_target_ratio=None,
         # Phase 1 fits the dark's glow scale on a few lights (dark_scale.py) and applies it on top
         # of the exposure ratio when the session was shot at another sensor temperature than the
         # dark. `--config session_dark_scale=false` keeps the plain exposure ratio.

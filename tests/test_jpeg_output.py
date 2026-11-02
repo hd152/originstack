@@ -49,3 +49,23 @@ def test_viewer_jpeg_keeps_full_resolution_colour():
     with Image.open(io.BytesIO(preview_jpeg_from_uint8(_red_stars()))) as im:
         assert JpegImagePlugin.get_sampling(im) == 0
     assert JPEG_SAVE_KW == {"subsampling": 0}
+
+
+def test_dithered_uint8_breaks_banding_keeps_mean_and_is_deterministic():
+    from src.io_fits import to_uint8_dithered
+    ramp = np.tile(np.linspace(0.2, 0.2 + 3.0 / 255.0, 4000, dtype=np.float32), (8, 1))
+    plain, dith = to_uint8(ramp), to_uint8_dithered(ramp)
+    assert len(np.unique(plain)) <= 4
+    # a fine ramp: the plain rounding is a staircase, the dithered local mean follows the ramp
+    cols = lambda a: a.astype(np.float64).reshape(8, 100, 40).mean(axis=(0, 2))
+    err_plain = np.abs(cols(plain) - cols(ramp * 255)).max()
+    err_dith = np.abs(cols(dith) - cols(ramp * 255)).max()
+    assert err_dith < 0.5 * err_plain
+    assert abs(float(dith.mean()) - float(ramp.mean() * 255)) < 0.05
+    assert np.array_equal(dith, to_uint8_dithered(ramp))                   # same bytes twice
+
+
+def test_dither_leaves_clipped_black_and_white_alone():
+    from src.io_fits import to_uint8_dithered
+    x = np.array([[0.0, 1.0, 0.0, 1.0]] * 64, np.float32)
+    assert np.array_equal(to_uint8_dithered(x), to_uint8(x))

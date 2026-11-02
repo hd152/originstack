@@ -13,6 +13,7 @@ from typing import Dict, List, Optional
 
 import numpy as np
 
+from src.effective_exposure import LOW_T_EFF, frame_t_eff
 from src.utils import safe_print
 
 # A kept frame is annotated (never rejected) when it is this far off the session median.
@@ -22,7 +23,7 @@ BACKGROUND_FLAG_RATIO = 1.5
 
 COLUMNS = ('filename', 'verdict', 'stage', 'reason', 'notes', 'score', 'snr', 'fwhm',
            'ellipticity', 'star_count', 'background', 'shift_x', 'shift_y',
-           'reg_residual_px', 'transparency')
+           'reg_residual_px', 'transparency', 't_eff')
 
 
 def _num(v) -> Optional[float]:
@@ -82,6 +83,10 @@ def build_frame_report(lights, rejected_reasons: Dict[str, str], final,
             notes.append(f"{int(stars)} stars < {STARS_FLAG_RATIO:g}x median ({med['star_count']:.0f})")
         if bg and med['background'] and bg > BACKGROUND_FLAG_RATIO * med['background']:
             notes.append(f"background {bg:.0f} > {BACKGROUND_FLAG_RATIO:g}x median ({med['background']:.0f})")
+        t_eff = frame_t_eff(m, med['fwhm'], med['background'])
+        if t_eff is not None and t_eff < LOW_T_EFF:
+            notes.append(f"effective exposure {t_eff:.2f} of a median frame (seeing, sky and "
+                         f"transparency combined)")
         ell = _num(m.get('ellipticity'))
         if max_ellipticity and ell is not None and ell > max_ellipticity:
             notes.append(f"ellipticity {ell:.2f} > {max_ellipticity:g}")
@@ -96,6 +101,7 @@ def build_frame_report(lights, rejected_reasons: Dict[str, str], final,
             'shift_y': _num(sh[1]) if len(sh) > 1 else None,
             'reg_residual_px': _num(m.get('reg_residual_px')),
             'transparency': _num(m.get('transparency')),
+            't_eff': None if t_eff is None else round(t_eff, 3),
         })
     return rows
 

@@ -238,6 +238,8 @@ Details in the linked notes.
 - Subsampled sigma-clipped medians for CFA equalisation (period-4 structure biases them).
 - RCD per-Bayer-site stages (stops vectorising); RCD strips without a buffer pool.
 - `--cfa-drizzle` as a default; kernel-regression merge of Bayer samples (stars wider and noisier than RCD + proper coadd); demosaic-free luminance; ubercal flat from stars (unconstrained on the local sessions) ([siril-comparison](dev-notes/siril-comparison.md), [native-kernels](dev-notes/native-kernels.md)).
+- Tile-aware proper coadd (a PSF and weight per frame and tile): `tools/psf_census.py` on six sessions found a frame-by-cell FWHM excess of 0-3.7% (gate 3%, two sessions just over, ~0.4% estimated sensitivity gain) ([psf-census](dev-notes/psf-census.md)).
+- `--denoiser wavelet` cycle spinning (4 grid shifts): 4-7% less noise on synthetic scenes, 0.3% on a real Pleiades crop for 4x the time; kept as `wavelet_cycle_spins`, default 1.
 - Per-frame lacosmic as a noise reducer (it was smoothing; fixed noise model now) ([siril-comparison](dev-notes/siril-comparison.md)).
 - Proper coadd outside the core in `--full-field` (normalised convolution, per-tile, MTF filter, Wiener) ([module-notes](dev-notes/module-notes.md)).
 - Widening `--use-gpu` coverage (fewer VRAM-bound workers); GPU stays opt-in.
