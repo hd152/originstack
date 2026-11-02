@@ -95,11 +95,10 @@
     <p class="lede">Celestron Origin が保存したフォルダ、Seestar S50／S50 Pro のフレームフォルダ、または任意のカラーカメラのフレームを OriginStack で指定して、スタートを押すだけ。キャリブレーション、位置合わせ、スタッキングを行い、そのまま仕上げまで済ませます。かぶりを除去し、Gaia の星で色を合わせ、ノイズを減らし、星を引き締め、強調処理を施します。設定は対象に合わせて自動で選ばれます。お使いのコンピューター上で動作し、アカウントは不要です。ネットに接続するのは星表データと天体名の取得だけで、<code>--offline</code> でそれも止められます。</p>
 
     <div class="actions">
-      <a data-goatcounter-click="download-hero-win" class="btn primary" id="download" href="https://github.com/hd152/originstack/releases/latest">Windows 版をダウンロード</a> <a data-goatcounter-click="source-github-index" class="btn quiet" href="https://github.com/hd152/originstack">GitHub でソースを見る</a>
+      <a data-goatcounter-click="download-hero-win" class="btn primary" id="download" href="https://github.com/hd152/originstack/releases/latest">Windows 版をダウンロード</a> <a data-goatcounter-click="source-github-index" class="btn quiet" href="https://github.com/hd152/originstack">GitHub でソースを見る</a> <a data-goatcounter-click="download-hero-msstore" class="btn quiet" id="store-btn" href="https://apps.microsoft.com/detail/9p7j005gdttn">Microsoft Store で入手</a>
     </div>
     <p class="platforms">すべてのダウンロード：<a data-goatcounter-click="download-list-win" href="https://github.com/hd152/originstack/releases/latest" data-asset="-setup\.exe$">Windows</a> &middot; <a data-goatcounter-click="download-list-win-portable" href="https://github.com/hd152/originstack/releases/latest" data-asset="-windows-x64-portable\.exe$">Windows（ポータブル版）</a> &middot; <a data-goatcounter-click="download-list-mac-arm64" href="https://github.com/hd152/originstack/releases/latest" data-asset="-macos-arm64\.zip$">Mac（Apple シリコン）</a> &middot; <a data-goatcounter-click="download-list-mac-x86_64" href="https://github.com/hd152/originstack/releases/latest" data-asset="-macos-x86_64\.zip$">Mac（Intel）</a> &middot; <a data-goatcounter-click="download-list-linux" href="https://github.com/hd152/originstack/releases/latest" data-asset="-linux-x64\.tar\.gz$">Linux</a>
     </p>
-    <p class="platforms"><a data-goatcounter-click="download-list-msstore" href="https://apps.microsoft.com/detail/9p7j005gdttn">Microsoft Store</a></p>
     <p class="fine" id="fine-win">Windows 10 または 11（64 ビット）、無料、オープンソース（GPLv3）。インストーラーはまだコード署名されていないため、SmartScreen の警告が出ることがあります。「詳細情報」を選び、「実行」を選んでください。</p>
     <p class="fine" id="fine-mac" hidden>macOS、無料、オープンソース（GPLv3）。Apple シリコン版には macOS 14 以降が必要です。アプリはまだ Apple の署名を受けていないため、初回起動時に macOS がブロックします。「アプリケーション」フォルダで OriginStack を Control キーを押しながらクリックして「開く」を選ぶか、「システム設定」の「プライバシーとセキュリティ」で「このまま開く」を選んで許可してください。<a href="#mac">詳細</a></p>
     <p class="fine" id="fine-linux" hidden>glibc 2.35 以降の Linux x86-64（Ubuntu 22.04、Debian 12、Fedora 36 以降）、無料、オープンソース（GPLv3）。展開して <code>./install.sh</code> を実行してください。<a href="#get">詳細</a></p>
@@ -484,6 +483,7 @@ python desktop_app.py</pre>
   dl.textContent = T.download.replace('{os}', label);
   dl.setAttribute('data-goatcounter-click', 'download-hero-' + plat);
   if (plat !== 'win') {
+    document.getElementById('store-btn').hidden = true;
     document.getElementById('fine-win').hidden = true;
     document.getElementById(plat === 'linux' ? 'fine-linux' : 'fine-mac').hidden = false;
   }
