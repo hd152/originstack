@@ -59,12 +59,19 @@ class FakeZenodo:
         if method == 'GET' and len(parts) == 4:
             return _Resp(dep)
         if method == 'PUT' and len(parts) == 4:
+            if dep['submitted'] and not dep.get('editing'):
+                raise urllib.error.HTTPError(url, 403, 'published', {}, io.BytesIO(b'locked'))
             dep['metadata'] = dict(json.loads(body)['metadata'], prereserve_doi={'doi': f'10.5281/zenodo.{dep["id"]}'})
             return _Resp(dep)
         if method == 'GET' and parts[4] == 'files':
             return _Resp(list(dep['files'].values()))
+        if method == 'POST' and parts[-1] == 'edit':
+            assert dep['submitted']
+            dep['editing'] = True
+            return _Resp(dep)
         if method == 'POST' and parts[-1] == 'publish':
             dep['submitted'] = True
+            dep['editing'] = False
             return _Resp({'doi': f'10.5281/zenodo.{dep["id"]}', 'id': dep['id']})
         raise AssertionError((method, path))
 
@@ -189,3 +196,70 @@ def test_drafts_only_creates_drafts_with_reserved_dois_and_uploads_nothing(setup
     assert uz.main([str(man)]) == 0                                     # a normal run then uploads into the same draft
     assert set(fake.deps[st['id']]['files']) == {'a.zip', 'b.zip'}
     assert len(fake.deps) == 1
+
+
+def _two_records(tmp_path):
+    recs = []
+    for n in ('one', 'two'):
+        f = tmp_path / f'{n}.zip'
+        f.write_bytes(n.encode() * 300)
+        recs.append({'name': n, 'metadata': dict(META, title=f'T {n}'), 'files': [str(f)]})
+    man = tmp_path / 'm.json'
+    man.write_text(json.dumps({'records': recs}))
+    return recs, man
+
+
+def test_runs_leave_published_records_alone(tmp_path, monkeypatch, capsys):
+    recs, man = _two_records(tmp_path)
+    fake = FakeZenodo()
+    monkeypatch.setenv('ZENODO_TOKEN', 'SECRET')
+    monkeypatch.setattr(uz.urllib.request, 'urlopen', fake)
+    assert uz.main([str(man), '--drafts-only']) == 0
+    state = json.loads(Path(str(man) + '.state.json').read_text())
+    uz.Zenodo('SECRET', opener=fake).publish(state['one']['id'])                     # the owner published one by hand
+    fake.calls.clear()
+    assert uz.main([str(man)]) == 0                                                  # the full run must not trip on it
+    out = capsys.readouterr().out
+    assert 'one: already published, left alone' in out
+    assert not [c for c in fake.calls if c[0] == 'PUT' and f"/{state['one']['id']}" in c[1]]
+    assert set(fake.deps[state['two']['id']]['files']) == {'two.zip'}
+    assert uz.main([str(man), '--publish']) == 0                                     # only the other one is published now
+    assert 'one: already published' in capsys.readouterr().out
+    assert fake.deps[state['two']['id']]['submitted']
+
+
+def test_refresh_metadata_updates_a_published_record_and_keeps_its_files(tmp_path, monkeypatch):
+    recs, man = _two_records(tmp_path)
+    fake = FakeZenodo()
+    monkeypatch.setenv('ZENODO_TOKEN', 'SECRET')
+    monkeypatch.setattr(uz.urllib.request, 'urlopen', fake)
+    assert uz.main([str(man)]) == 0
+    state = json.loads(Path(str(man) + '.state.json').read_text())
+    uz.Zenodo('SECRET', opener=fake).publish(state['one']['id'])
+    files_before = dict(fake.deps[state['one']['id']]['files'])
+    recs[0]['metadata']['title'] = 'T one, better keywords'
+    recs[1]['metadata']['title'] = 'T two, better keywords'
+    man.write_text(json.dumps({'records': recs}))
+    assert uz.main([str(man), '--refresh-metadata']) == 0
+    one, two = fake.deps[state['one']['id']], fake.deps[state['two']['id']]
+    assert one['metadata']['title'].endswith('better keywords') and one['submitted'] and not one['editing']
+    assert one['files'] == files_before
+    assert two['metadata']['title'].endswith('better keywords') and not two['submitted']
+
+
+def test_refresh_refuses_to_republish_if_files_changed(tmp_path):
+    recs, man = _two_records(tmp_path)
+    fake = FakeZenodo()
+    api = uz.Zenodo('SECRET', opener=fake)
+    state = {}
+    uz.upload_record(api, recs[0], state, str(man) + '.state.json', log=lambda *_: None)
+    api.publish(state['one']['id'])
+    real_edit = api.edit
+
+    def edit_and_change(dep_id):
+        res = real_edit(dep_id)
+        fake.deps[dep_id]['files']['one.zip']['checksum'] = 'changed'
+        return res
+    api.edit = edit_and_change
+    with pytest.raises(RuntimeError, match='files differ'):
+        uz.refresh_metadata(api, recs[0], state['one'], log=lambda *_: None)
