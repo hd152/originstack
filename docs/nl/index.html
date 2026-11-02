@@ -87,7 +87,7 @@
     <div class="bar">
       <picture><source type="image/webp" srcset="../img/logo-dark-200.webp 200w, ../img/logo-dark-400.webp 400w" sizes="188px"><img src="../img/logo-dark.png" alt="OriginStack" width="920" height="256"></picture>
       <nav aria-label="Onderdelen">
-        <a href="#oneclick">Eén klik</a> <a href="#time">Snelheid</a> <a href="#app">De app</a> <a href="#compare">Vergeleken</a> <a href="stack-celestron-origin.html">Handleiding</a> <a href="../advanced.html">Geavanceerd</a> <a href="../how-it-works.html">Hoe het werkt</a> <a href="#get">Installeren</a>
+        <a href="#how">How it works</a> <a href="#oneclick">What you get</a> <a href="#app">The app</a> <a href="#get">Install</a> <a href="stack-celestron-origin.html">Guide</a> <a href="#technical">Technical details</a>
       </nav>
     </div>
 
@@ -117,7 +117,7 @@
       <span class="cap r">114 frames, gestapeld en bewerkt</span>
       <input type="range" min="0" max="100" value="50" aria-label="Sleep om één frame met de afgewerkte stack te vergelijken">
     </div>
-    <p class="hero-bridge"><span>Begin bij het verschil</span> <a href="#oneclick">Bekijk wat één klik doet&nbsp;→</a></p>
+    <p class="hero-bridge"><span>Begin bij het verschil</span> <a href="#how">See how simple it is&nbsp;→</a></p>
     <p class="fine">OriginStack is gratis. Als het je een avond bewerken bespaart, kun je <a data-goatcounter-click="support-index" href="https://ko-fi.com/originstack">een fooi geven op Ko-fi</a>.</p>
     </div>
     </div>
@@ -125,6 +125,28 @@
 </header>
 
 <main id="main-content">
+<section id="how">
+  <div class="wrap">
+    <h2>How it works, in three steps</h2>
+    <p class="intro measure">You do not need to know anything about image processing. If you can pick a folder, you can use it.</p>
+    <div class="phases">
+      <div>
+        <h3>1. Pick your folder</h3>
+        <p>Choose the folder your telescope or camera saved. OriginStack counts the frames and works out what you photographed.</p>
+      </div>
+      <div>
+        <h3>2. Press Start</h3>
+        <p>It combines hundreds of short, noisy exposures into one clean picture and then finishes it for you. A night of frames takes about a minute on a normal laptop.</p>
+      </div>
+      <div>
+        <h3>3. Get your picture</h3>
+        <p>You get a finished JPEG ready to share, plus the unprocessed combined image in case you want to edit it further elsewhere.</p>
+      </div>
+    </div>
+    <p class="plain measure">It is free, it runs on your own computer, and it needs no account. It never sends your pictures anywhere.</p>
+  </div>
+</section>
+
 <section id="oneclick">
   <div class="wrap">
     <h2>Eén klik doet al het werk</h2>
@@ -159,9 +181,112 @@
   </div>
 </section>
 
-<section id="time">
+<section id="app">
   <div class="wrap">
-    <h2>Een nacht aan frames in ongeveer een minuut</h2>
+    <h2>Kijk mee, of sla de instellingen over</h2>
+    <p class="intro measure">Wijs de app een map met frames aan, zeg wat je hebt gefotografeerd (of laat dat uitzoeken) en druk op Starten. Elke instelling heeft een uitleg van één regel, en de standaardwaarden kiezen de rest voor je object. Dit zijn echte schermen van het stapelen van de frames van het Zonnebloemstelsel die hieronder in de vergelijkingen worden gebruikt. Nieuw in het bewerken van beelden van de Celestron Origin? De <a href="stack-celestron-origin.html">stap-voor-stap-handleiding</a> begint bij de sessiemap die de telescoop opslaat.</p>
+
+    <div class="shots">
+      <figure class="shot big">
+        <picture><source type="image/webp" srcset="../img/app-running-800.webp 800w, ../img/app-running-1200.webp 1200w, ../img/app-running-1600.webp 1600w" sizes="(min-width: 1424px) 1176px, calc(100vw - 2 * clamp(20px, 5vw, 72px))"><img src="../img/app-running.png" width="1600" height="1176" loading="lazy" alt="Het OriginStack-venster tijdens een run: links de map en uitvoer met afbeeldingskaarten voor het type doel en de runmodus, drie van de vier pijplijnfasen als klaar gemarkeerd en daaronder het logboek; rechts een voorbeeld van het Zonnebloemstelsel halverwege de nabewerking en een tabel met de scores per frame."></picture>
+        <figcaption>Halverwege de run van het Zonnebloemstelsel. Fase 1 tot en met 3 zijn klaar, en de voorvertoning volgt elke afwerkingsstap terwijl die plaatsvindt.</figcaption>
+      </figure>
+      <figure class="shot s7">
+        <picture><source type="image/webp" srcset="../img/app-setup-800.webp 800w, ../img/app-setup-1200.webp 1200w, ../img/app-setup-1600.webp 1600w" sizes="(max-width: 800px) calc(100vw - 40px), 57vw"><img src="../img/app-setup.png" width="1600" height="1176" loading="lazy" alt="Het venster van OriginStack vóór een run: een gekozen map met het aantal frames en de objectnaam uit het sessiebestand eronder, afbeeldingskaarten voor Automatisch herkennen, Sterrenstelsel (gemarkeerd als Voorgesteld), Nevel, Sterrenhoop, Sterrenveld en Komeet, een keuze tussen Volledige kwaliteit en Snel bekijken, een voorbeeldbeeld van een sterrenstelsel in de voorvertoning, en een samenvatting Deze run met frames, object, modus, gewijzigde instellingen en uitvoerbestand."></picture>
+        <figcaption>Vóór een run. Kies een map en de app telt je frames, leest het object uit de sessie en stelt een kaart voor; de voorvertoning toont een voorbeeldresultaat en Deze run zegt precies wat Starten gaat doen.</figcaption>
+      </figure>
+      <figure class="shot s5">
+        <picture><source type="image/webp" srcset="../img/app-done-800.webp 800w" sizes="(max-width: 800px) calc(100vw - 40px), 40vw"><img src="../img/app-done.png" width="800" height="1374" loading="lazy" alt="De voorbeeld- en framepanelen na afloop van de run, met het uiteindelijke beeld van het Zonnebloemstelsel en een samenvatting: 158 van 158 frames gestackt in 2 minuten 25 seconden."></picture>
+        <figcaption>Als het klaar is, kun je in het resultaat in- en uitzoomen en verschuiven, of met een schuif wisselen tussen de lineaire stack en het afgewerkte beeld.</figcaption>
+      </figure>
+      <figure class="shot s7">
+        <picture><source type="image/webp" srcset="../img/app-expert-800.webp 800w" sizes="(max-width: 800px) calc(100vw - 40px), 57vw"><img src="../img/app-expert.png" width="800" height="627" loading="lazy" alt="Het paneel Extra opties met een zoekvak en een lijst groepen, met opties voor registratie en stapelen zoals proper image coaddition, strepen verwijderen en het vervormingsmodel, elk met een uitleg van één regel."></picture>
+        <figcaption>Onder Extra opties staan nog zo'n honderd opties, elk met een uitleg van één regel en een zoekvak om ze te vinden; de zeldzamere blijven verborgen tot je Opties voor experts aanvinkt.</figcaption>
+      </figure>
+    </div>
+  </div>
+</section>
+
+<section id="gallery">
+  <div class="wrap">
+    <h2>Ermee gemaakt</h2>
+    <p class="intro measure">Allemaal uit ruwe frames van de Celestron Origin, gestapeld en bewerkt door OriginStack, onder gemeten hemels van <strong>Bortle 7-9</strong> (sterke lichtvervuiling, achtertuin of dak, geen donkere locatie) -- zie de <a href="https://github.com/hd152/originstack#readme">README</a> voor de metingen per beeld en de methode.</p>
+    <div class="gallery">
+      <figure class="hero"><picture><source type="image/webp" srcset="../img/orion-nebula-m42-celestron-origin-800.webp 800w, ../img/orion-nebula-m42-celestron-origin-1200.webp 1200w, ../img/orion-nebula-m42-celestron-origin-1600.webp 1600w" sizes="(min-width: 1424px) 1176px, calc(100vw - 2 * clamp(20px, 5vw, 72px))"><img src="../img/orion-nebula-m42-celestron-origin.jpg" width="1600" height="1067" loading="lazy" alt="De Orionnevel: een helderwitte kern met donkere stofbanen in een brede wolk van roze en grijs gas."></picture><figcaption><b>Nevel</b> Orionnevel (M42), zeven nachten gecombineerd, 2 u 44 min</figcaption></figure>
+      <figure><picture><source type="image/webp" srcset="../img/whirlpool-galaxy-m51-celestron-origin-800.webp 800w, ../img/whirlpool-galaxy-m51-celestron-origin-1200.webp 1200w" sizes="(max-width: 800px) calc(100vw - 40px), 30vw"><img src="../img/whirlpool-galaxy-m51-celestron-origin.jpg" width="1200" height="800" loading="lazy" alt="Het Draaikolkstelsel, een spiraal van bovenaf gezien met stoffige armen, met eronder zijn kleinere begeleidende stelsel."></picture><figcaption><b>Sterrenstelsel</b> Draaikolkstelsel (M51), acht nachten gecombineerd, 2 u 38 min</figcaption></figure>
+      <figure><picture><source type="image/webp" srcset="../img/pleiades-m45-celestron-origin-800.webp 800w, ../img/pleiades-m45-celestron-origin-1200.webp 1200w" sizes="(max-width: 800px) calc(100vw - 40px), 30vw"><img src="../img/pleiades-m45-celestron-origin.jpg" width="1200" height="800" loading="lazy" alt="De Pleiaden: heldere blauwwitte sterren gehuld in slierten blauwe reflectienevel."></picture><figcaption><b>Open sterrenhoop</b> Pleiaden (M45), vijftien nachten gecombineerd, 5 u 16 min</figcaption></figure>
+      <figure><picture><source type="image/webp" srcset="../img/dumbbell-nebula-m27-celestron-origin-800.webp 800w, ../img/dumbbell-nebula-m27-celestron-origin-1200.webp 1200w" sizes="(max-width: 800px) calc(100vw - 40px), 30vw"><img src="../img/dumbbell-nebula-m27-celestron-origin.jpg" width="1200" height="800" loading="lazy" alt="De Halternevel: een blauwgroene klokhuisvorm met rode randen en zwakkere buitenste lobben."></picture><figcaption><b>Planetaire nevel</b> Halternevel (M27), twee nachten, 9 min</figcaption></figure>
+      <figure><picture><source type="image/webp" srcset="../img/messier-15-globular-cluster-celestron-origin-800.webp 800w, ../img/messier-15-globular-cluster-celestron-origin-1200.webp 1200w" sizes="(max-width: 800px) calc(100vw - 40px), 30vw"><img src="../img/messier-15-globular-cluster-celestron-origin.jpg" width="1200" height="800" loading="lazy" alt="De bolhoop M15: een dichte bol van duizenden sterren rond een heldere kern."></picture><figcaption><b>Bolhoop</b> M15, 172 &times; 15 s</figcaption></figure>
+      <figure><picture><source type="image/webp" srcset="../img/comet-c2025-a6-lemmon-celestron-origin-800.webp 800w, ../img/comet-c2025-a6-lemmon-celestron-origin-1200.webp 1200w" sizes="(max-width: 800px) calc(100vw - 40px), 30vw"><img src="../img/comet-c2025-a6-lemmon-celestron-origin.jpg" width="1200" height="800" loading="lazy" alt="Komeet Lemmon: een helderwitte kop met een lange, rechte, licht oranje staart."></picture><figcaption><b>Komeet</b> C/2025 A6 (Lemmon), 111 &times; 10 s, gestapeld op de komeet</figcaption></figure>
+      <figure><picture><source type="image/webp" srcset="../img/sagittarius-star-cloud-m24-celestron-origin-800.webp 800w, ../img/sagittarius-star-cloud-m24-celestron-origin-1200.webp 1200w" sizes="(max-width: 800px) calc(100vw - 40px), 30vw"><img src="../img/sagittarius-star-cloud-m24-celestron-origin.jpg" width="1200" height="729" loading="lazy" alt="Een dicht sterrenveld in Boogschutter met donkere stofbanen."></picture><figcaption><b>Sterrenveld</b> Boogschutter-sterrenwolk (M24), 138 &times; 10 s</figcaption></figure>
+    </div>
+    <p class="plain measure">Eén beeld van elk soort doel waarvoor OriginStack een instelling heeft, elk gestapeld uit alle beschikbare nachten. Meer in de <a href="../gallery.html">galerij</a>.</p>
+  </div>
+</section>
+
+<section id="get">
+  <div class="wrap">
+    <h2>Installeren</h2>
+    <p class="intro measure">Weet u niet welke download geschikt is? Kies hieronder uw systeem en ervaring.</p>
+    <div class="chooser" aria-label="Downloadkiezer">
+      <label>Besturingssysteem
+        <select id="chooser-os">
+          <option value="windows">Windows 10/11</option>
+          <option value="mac">macOS</option>
+          <option value="linux">Linux</option>
+        </select>
+      </label>
+      <label>Ervaring
+        <select id="chooser-user">
+          <option value="beginner">Ik ben nieuw met stacken</option>
+          <option value="cli">Ik geef de voorkeur aan de opdrachtregel</option>
+        </select>
+      </label>
+    </div>
+    <p class="chooser-output" id="chooser-output">Het Windows-installatieprogramma is de eenvoudigste manier om te beginnen.</p>
+    <div class="get">
+      <div>
+        <h3>Installatieprogramma voor Windows</h3>
+        <p>Gratis stacksoftware voor Windows 10 en 11. Download het installatiebestand van de <a data-goatcounter-click="release-page-index" href="https://github.com/hd152/originstack/releases/latest">nieuwste release</a> en voer het uit. Het installeert alleen voor jouw gebruiker, voegt een item in het Startmenu en een verwijderprogramma toe, en heeft geen Python nodig.</p>
+        <p>Liever niets installeren? De portable exe is één bestand dat u vanuit elke map of vanaf een USB-stick kunt starten. Hij pakt zichzelf bij elke start uit en opent daardoor een paar seconden later dan de geïnstalleerde app.</p>
+        <p>Liever de zip? Gebruik eerst Alles uitpakken en start daarna OriginStack.exe uit de uitgepakte map. Starten vanuit de zip zelf werkt niet.</p>
+      </div>
+      <div id="mac">
+        <h3>App voor macOS</h3>
+        <p>Download de zip voor je Mac van de <a data-goatcounter-click="release-page-index" href="https://github.com/hd152/originstack/releases/latest">nieuwste release</a>: <code>macos-arm64</code> voor Apple silicon (M1 en later, vereist macOS 14 of nieuwer) of <code>macos-x86_64</code> voor een Mac met Intel. Open de zip en sleep OriginStack naar Apps. Het heeft geen Python nodig.</p>
+        <p>De app is nog niet door Apple ondertekend, dus macOS blokkeert de eerste keer openen. Klik met Control ingedrukt op OriginStack en kies Open, en daarna nogmaals Open; probeer het op macOS 15 en later één keer te openen en kies daarna Toch openen onder Systeeminstellingen, Privacy en beveiliging. Of verwijder de downloadmarkering in Terminal:</p>
+<pre>xattr -dr com.apple.quarantine /Applications/OriginStack.app</pre>
+        <p>De Mac-versies zijn minder in de praktijk gebruikt dan de versie voor Windows.</p>
+      </div>
+      <div>
+        <h3>Bundel voor Linux</h3>
+        <p>Download <code>OriginStack-&lt;version&gt;-linux-x64.tar.gz</code> van de <a data-goatcounter-click="release-page-index" href="https://github.com/hd152/originstack/releases/latest">nieuwste release</a>, pak het uit en voer het installatieprogramma uit. Het installeert alleen voor jouw gebruiker, voegt een item in het programmamenu toe, en heeft geen Python of root nodig.</p>
+<pre>tar xzf OriginStack-*-linux-x64.tar.gz
+cd OriginStack-*-linux-x64
+./install.sh</pre>
+        <p>Het vereist glibc 2.35 of nieuwer (Ubuntu 22.04, Debian 12, Fedora 36 en later) en is minder in de praktijk gebruikt dan de versie voor Windows. Voer <code>./install.sh --uninstall</code> uit om het te verwijderen.</p>
+      </div>
+      <div>
+        <h3>Wat het leest</h3>
+        <p>Ruwe bestanden van de Celestron Origin (de FITS-frames in elke sessiemap, met hun <code>info.json</code>), en frames van kleurencamera's als FITS, camera-RAW (Canon, Nikon, Sony en andere, vereist rawpy), TIFF en XISF. SER-video wordt ondersteund voor planeten. Formaten mogen in één map door elkaar staan.</p>
+        <p>Helemaal offline werken? Geef <code>--offline</code> mee, of vink het aan in de app, en OriginStack doet helemaal geen netwerkverzoeken.</p>
+      </div>
+      <div id="no-gen-ai">
+        <h3>Geen generatieve AI, niets in de cloud</h3>
+        <p>OriginStack stuurt je beelden nooit naar een AI-dienst en genereert of verzint nooit beeldinhoud. De verwerking is klassieke, gedocumenteerde signaalverwerking die voor dit project is geschreven, van kalibratie en uitlijning tot achtergrondverwijdering en ruisonderdrukking, en je kunt alles in de broncode lezen. Er is geen andere astronomiesoftware, geen account en geen clouddienst nodig, alleen gangbare opensource wetenschappelijke bibliotheken.</p>
+        <p>Twee optionele stappen, <code>--denoiser nn</code> en <code>--deconvolve nn</code>, gebruiken kleine neurale netwerken die getraind zijn op echte Celestron Origin-sessies (de tweede ook op scherpere survey-opnamen van dezelfde hemel). Ze draaien op je eigen computer en zijn gecontroleerd met onafhankelijke stacks om te bevestigen dat ze geen sterren of details toevoegen die niet in de gegevens zitten. De automatische instellingen gebruiken de tweede voor Origin-sessies; <code>--deconvolve off</code> zet hem uit. <a href="../how-it-works.html#learned">Hoe ze werken</a>.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="technical">
+  <div class="wrap">
+    <h2>The technical details</h2>
+    <p class="intro measure">Everything above is all you need to get a good picture. This section is for people who want the numbers: how fast it is, how it measures up against other software, and how to install it from source. Open any part to read it.</p>
+
+    <details class="tech" id="time">
+      <summary>Speed and memory: a night of frames in about a minute</summary>
     <p class="intro measure">De Omeganevel, 114 frames, op een laptop met 8 kernen: <strong>62 seconden</strong> van de ruwe bestanden tot een afgewerkt beeld, tegen 89 begin oktober. Het rode blok is het deel dat het beeld er goed uit laat zien; de rest is 114 frames precies op elkaar krijgen.</p>
 
     <div class="run" role="img" aria-label="Balk die 62 seconden opdeelt in laden en beoordelen 13.7, registreren 1.6, uitlijnen en stapelen 22.0, afwerken 18.1 en schijf en voorbereiding 6.3 seconden">
@@ -199,38 +324,10 @@
     </div>
     <p class="plain measure">Frames worden één voor één verwerkt, dus 500 frames hebben ongeveer evenveel geheugen nodig als 50. Tijdelijke bestanden nemen tijdens de run ongeveer 100 MB schijfruimte per frame in beslag; de uitgelijnde frames blijven in plaats daarvan in het geheugen als daar ruimte voor is, waarbij altijd een vijfde vrij blijft.</p>
     <p class="plain measure"><strong>Waarom het snel is.</strong> Meer dan 80 van de zwaarste stappen zijn gecompileerd Rust, geen Python: het standaard combineren van de stack is ongeveer 37 keer sneller dan de NumPy-code die het vervangt, het repareren van hete pixels 25 tot 55 keer, het achtergrondmodel ongeveer 31 keer. De meeste geven precies dezelfde getallen als voorheen. De verwerking van frames is ingericht op hoe een processor zich echt gedraagt, één worker per kern op driekwart van de kernen, en meerdere nachten van één object worden één keer afgewerkt in plaats van per nacht: zeven sessies van de Orionnevel gingen van 15 naar ongeveer 8 minuten.</p>
-  </div>
-</section>
+    </details>
 
-<section id="app">
-  <div class="wrap">
-    <h2>Kijk mee, of sla de instellingen over</h2>
-    <p class="intro measure">Wijs de app een map met frames aan, zeg wat je hebt gefotografeerd (of laat dat uitzoeken) en druk op Starten. Elke instelling heeft een uitleg van één regel, en de standaardwaarden kiezen de rest voor je object. Dit zijn echte schermen van het stapelen van de frames van het Zonnebloemstelsel die hieronder in de vergelijkingen worden gebruikt. Nieuw in het bewerken van beelden van de Celestron Origin? De <a href="stack-celestron-origin.html">stap-voor-stap-handleiding</a> begint bij de sessiemap die de telescoop opslaat.</p>
-
-    <div class="shots">
-      <figure class="shot big">
-        <picture><source type="image/webp" srcset="../img/app-running-800.webp 800w, ../img/app-running-1200.webp 1200w, ../img/app-running-1600.webp 1600w" sizes="(min-width: 1424px) 1176px, calc(100vw - 2 * clamp(20px, 5vw, 72px))"><img src="../img/app-running.png" width="1600" height="1176" loading="lazy" alt="Het OriginStack-venster tijdens een run: links de map en uitvoer met afbeeldingskaarten voor het type doel en de runmodus, drie van de vier pijplijnfasen als klaar gemarkeerd en daaronder het logboek; rechts een voorbeeld van het Zonnebloemstelsel halverwege de nabewerking en een tabel met de scores per frame."></picture>
-        <figcaption>Halverwege de run van het Zonnebloemstelsel. Fase 1 tot en met 3 zijn klaar, en de voorvertoning volgt elke afwerkingsstap terwijl die plaatsvindt.</figcaption>
-      </figure>
-      <figure class="shot s7">
-        <picture><source type="image/webp" srcset="../img/app-setup-800.webp 800w, ../img/app-setup-1200.webp 1200w, ../img/app-setup-1600.webp 1600w" sizes="(max-width: 800px) calc(100vw - 40px), 57vw"><img src="../img/app-setup.png" width="1600" height="1176" loading="lazy" alt="Het venster van OriginStack vóór een run: een gekozen map met het aantal frames en de objectnaam uit het sessiebestand eronder, afbeeldingskaarten voor Automatisch herkennen, Sterrenstelsel (gemarkeerd als Voorgesteld), Nevel, Sterrenhoop, Sterrenveld en Komeet, een keuze tussen Volledige kwaliteit en Snel bekijken, een voorbeeldbeeld van een sterrenstelsel in de voorvertoning, en een samenvatting Deze run met frames, object, modus, gewijzigde instellingen en uitvoerbestand."></picture>
-        <figcaption>Vóór een run. Kies een map en de app telt je frames, leest het object uit de sessie en stelt een kaart voor; de voorvertoning toont een voorbeeldresultaat en Deze run zegt precies wat Starten gaat doen.</figcaption>
-      </figure>
-      <figure class="shot s5">
-        <picture><source type="image/webp" srcset="../img/app-done-800.webp 800w" sizes="(max-width: 800px) calc(100vw - 40px), 40vw"><img src="../img/app-done.png" width="800" height="1374" loading="lazy" alt="De voorbeeld- en framepanelen na afloop van de run, met het uiteindelijke beeld van het Zonnebloemstelsel en een samenvatting: 158 van 158 frames gestackt in 2 minuten 25 seconden."></picture>
-        <figcaption>Als het klaar is, kun je in het resultaat in- en uitzoomen en verschuiven, of met een schuif wisselen tussen de lineaire stack en het afgewerkte beeld.</figcaption>
-      </figure>
-      <figure class="shot s7">
-        <picture><source type="image/webp" srcset="../img/app-expert-800.webp 800w" sizes="(max-width: 800px) calc(100vw - 40px), 57vw"><img src="../img/app-expert.png" width="800" height="627" loading="lazy" alt="Het paneel Extra opties met een zoekvak en een lijst groepen, met opties voor registratie en stapelen zoals proper image coaddition, strepen verwijderen en het vervormingsmodel, elk met een uitleg van één regel."></picture>
-        <figcaption>Onder Extra opties staan nog zo'n honderd opties, elk met een uitleg van één regel en een zoekvak om ze te vinden; de zeldzamere blijven verborgen tot je Opties voor experts aanvinkt.</figcaption>
-      </figure>
-    </div>
-  </div>
-</section>
-
-<section id="compare">
-  <div class="wrap">
-    <h2>Vergeleken</h2>
+    <details class="tech" id="compare">
+      <summary>How it compares with Siril, DeepSkyStacker, PixInsight and the Origin app</summary>
     <p class="intro measure">Wat één run oplevert, uitgaande van de frames die de Origin opslaat. De volledige tabel, met Astro Pixel Processor en opmerkingen per programma, staat op de <a href="../compare.html">vergelijkingspagina</a>.</p>
 
     <table class="wide matrix">
@@ -337,68 +434,11 @@
     </div>
 
     <p class="caveat measure">Hoe er is gemeten: de TIFF van de Origin is lineair maar ligt op een groot voetstuk, dus de helderste sterkernen worden afgekapt; elke stack is met één gain per kleurkanaal op de helderheidsschaal van OriginStack gebracht, gemeten waar het beeld lineair is, en afgekapte sterren zijn weggelaten. De ruisverhoudingen hangen van die gain af, dus lees ze als plus of min 5 tot 10%. Vier sessies met één telescoop is een kleine steekproef. <a href="https://github.com/hd152/originstack/blob/main/tools/bench_vs_origin.py">tools/bench_vs_origin.py</a> herhaalt het op je eigen frames.</p>
-  </div>
-</section>
+    </details>
 
-<section id="gallery">
-  <div class="wrap">
-    <h2>Ermee gemaakt</h2>
-    <p class="intro measure">Allemaal uit ruwe frames van de Celestron Origin, gestapeld en bewerkt door OriginStack, onder gemeten hemels van <strong>Bortle 7-9</strong> (sterke lichtvervuiling, achtertuin of dak, geen donkere locatie) -- zie de <a href="https://github.com/hd152/originstack#readme">README</a> voor de metingen per beeld en de methode.</p>
-    <div class="gallery">
-      <figure class="hero"><picture><source type="image/webp" srcset="../img/orion-nebula-m42-celestron-origin-800.webp 800w, ../img/orion-nebula-m42-celestron-origin-1200.webp 1200w, ../img/orion-nebula-m42-celestron-origin-1600.webp 1600w" sizes="(min-width: 1424px) 1176px, calc(100vw - 2 * clamp(20px, 5vw, 72px))"><img src="../img/orion-nebula-m42-celestron-origin.jpg" width="1600" height="1067" loading="lazy" alt="De Orionnevel: een helderwitte kern met donkere stofbanen in een brede wolk van roze en grijs gas."></picture><figcaption><b>Nevel</b> Orionnevel (M42), zeven nachten gecombineerd, 2 u 44 min</figcaption></figure>
-      <figure><picture><source type="image/webp" srcset="../img/whirlpool-galaxy-m51-celestron-origin-800.webp 800w, ../img/whirlpool-galaxy-m51-celestron-origin-1200.webp 1200w" sizes="(max-width: 800px) calc(100vw - 40px), 30vw"><img src="../img/whirlpool-galaxy-m51-celestron-origin.jpg" width="1200" height="800" loading="lazy" alt="Het Draaikolkstelsel, een spiraal van bovenaf gezien met stoffige armen, met eronder zijn kleinere begeleidende stelsel."></picture><figcaption><b>Sterrenstelsel</b> Draaikolkstelsel (M51), acht nachten gecombineerd, 2 u 38 min</figcaption></figure>
-      <figure><picture><source type="image/webp" srcset="../img/pleiades-m45-celestron-origin-800.webp 800w, ../img/pleiades-m45-celestron-origin-1200.webp 1200w" sizes="(max-width: 800px) calc(100vw - 40px), 30vw"><img src="../img/pleiades-m45-celestron-origin.jpg" width="1200" height="800" loading="lazy" alt="De Pleiaden: heldere blauwwitte sterren gehuld in slierten blauwe reflectienevel."></picture><figcaption><b>Open sterrenhoop</b> Pleiaden (M45), vijftien nachten gecombineerd, 5 u 16 min</figcaption></figure>
-      <figure><picture><source type="image/webp" srcset="../img/dumbbell-nebula-m27-celestron-origin-800.webp 800w, ../img/dumbbell-nebula-m27-celestron-origin-1200.webp 1200w" sizes="(max-width: 800px) calc(100vw - 40px), 30vw"><img src="../img/dumbbell-nebula-m27-celestron-origin.jpg" width="1200" height="800" loading="lazy" alt="De Halternevel: een blauwgroene klokhuisvorm met rode randen en zwakkere buitenste lobben."></picture><figcaption><b>Planetaire nevel</b> Halternevel (M27), twee nachten, 9 min</figcaption></figure>
-      <figure><picture><source type="image/webp" srcset="../img/messier-15-globular-cluster-celestron-origin-800.webp 800w, ../img/messier-15-globular-cluster-celestron-origin-1200.webp 1200w" sizes="(max-width: 800px) calc(100vw - 40px), 30vw"><img src="../img/messier-15-globular-cluster-celestron-origin.jpg" width="1200" height="800" loading="lazy" alt="De bolhoop M15: een dichte bol van duizenden sterren rond een heldere kern."></picture><figcaption><b>Bolhoop</b> M15, 172 &times; 15 s</figcaption></figure>
-      <figure><picture><source type="image/webp" srcset="../img/comet-c2025-a6-lemmon-celestron-origin-800.webp 800w, ../img/comet-c2025-a6-lemmon-celestron-origin-1200.webp 1200w" sizes="(max-width: 800px) calc(100vw - 40px), 30vw"><img src="../img/comet-c2025-a6-lemmon-celestron-origin.jpg" width="1200" height="800" loading="lazy" alt="Komeet Lemmon: een helderwitte kop met een lange, rechte, licht oranje staart."></picture><figcaption><b>Komeet</b> C/2025 A6 (Lemmon), 111 &times; 10 s, gestapeld op de komeet</figcaption></figure>
-      <figure><picture><source type="image/webp" srcset="../img/sagittarius-star-cloud-m24-celestron-origin-800.webp 800w, ../img/sagittarius-star-cloud-m24-celestron-origin-1200.webp 1200w" sizes="(max-width: 800px) calc(100vw - 40px), 30vw"><img src="../img/sagittarius-star-cloud-m24-celestron-origin.jpg" width="1200" height="729" loading="lazy" alt="Een dicht sterrenveld in Boogschutter met donkere stofbanen."></picture><figcaption><b>Sterrenveld</b> Boogschutter-sterrenwolk (M24), 138 &times; 10 s</figcaption></figure>
-    </div>
-    <p class="plain measure">Eén beeld van elk soort doel waarvoor OriginStack een instelling heeft, elk gestapeld uit alle beschikbare nachten. Meer in de <a href="../gallery.html">galerij</a>.</p>
-  </div>
-</section>
-
-<section id="get">
-  <div class="wrap">
-    <h2>Installeren</h2>
-    <p class="intro measure">Weet u niet welke download geschikt is? Kies hieronder uw systeem en ervaring.</p>
-    <div class="chooser" aria-label="Downloadkiezer">
-      <label>Besturingssysteem
-        <select id="chooser-os">
-          <option value="windows">Windows 10/11</option>
-          <option value="mac">macOS</option>
-          <option value="linux">Linux</option>
-        </select>
-      </label>
-      <label>Ervaring
-        <select id="chooser-user">
-          <option value="beginner">Ik ben nieuw met stacken</option>
-          <option value="cli">Ik geef de voorkeur aan de opdrachtregel</option>
-        </select>
-      </label>
-    </div>
-    <p class="chooser-output" id="chooser-output">Het Windows-installatieprogramma is de eenvoudigste manier om te beginnen.</p>
-    <div class="get">
-      <div>
-        <h3>Installatieprogramma voor Windows</h3>
-        <p>Gratis stacksoftware voor Windows 10 en 11. Download het installatiebestand van de <a data-goatcounter-click="release-page-index" href="https://github.com/hd152/originstack/releases/latest">nieuwste release</a> en voer het uit. Het installeert alleen voor jouw gebruiker, voegt een item in het Startmenu en een verwijderprogramma toe, en heeft geen Python nodig.</p>
-        <p>Liever niets installeren? De portable exe is één bestand dat u vanuit elke map of vanaf een USB-stick kunt starten. Hij pakt zichzelf bij elke start uit en opent daardoor een paar seconden later dan de geïnstalleerde app.</p>
-        <p>Liever de zip? Gebruik eerst Alles uitpakken en start daarna OriginStack.exe uit de uitgepakte map. Starten vanuit de zip zelf werkt niet.</p>
-      </div>
-      <div id="mac">
-        <h3>App voor macOS</h3>
-        <p>Download de zip voor je Mac van de <a data-goatcounter-click="release-page-index" href="https://github.com/hd152/originstack/releases/latest">nieuwste release</a>: <code>macos-arm64</code> voor Apple silicon (M1 en later, vereist macOS 14 of nieuwer) of <code>macos-x86_64</code> voor een Mac met Intel. Open de zip en sleep OriginStack naar Apps. Het heeft geen Python nodig.</p>
-        <p>De app is nog niet door Apple ondertekend, dus macOS blokkeert de eerste keer openen. Klik met Control ingedrukt op OriginStack en kies Open, en daarna nogmaals Open; probeer het op macOS 15 en later één keer te openen en kies daarna Toch openen onder Systeeminstellingen, Privacy en beveiliging. Of verwijder de downloadmarkering in Terminal:</p>
-<pre>xattr -dr com.apple.quarantine /Applications/OriginStack.app</pre>
-        <p>De Mac-versies zijn minder in de praktijk gebruikt dan de versie voor Windows.</p>
-      </div>
-      <div>
-        <h3>Bundel voor Linux</h3>
-        <p>Download <code>OriginStack-&lt;version&gt;-linux-x64.tar.gz</code> van de <a data-goatcounter-click="release-page-index" href="https://github.com/hd152/originstack/releases/latest">nieuwste release</a>, pak het uit en voer het installatieprogramma uit. Het installeert alleen voor jouw gebruiker, voegt een item in het programmamenu toe, en heeft geen Python of root nodig.</p>
-<pre>tar xzf OriginStack-*-linux-x64.tar.gz
-cd OriginStack-*-linux-x64
-./install.sh</pre>
-        <p>Het vereist glibc 2.35 of nieuwer (Ubuntu 22.04, Debian 12, Fedora 36 en later) en is minder in de praktijk gebruikt dan de versie voor Windows. Voer <code>./install.sh --uninstall</code> uit om het te verwijderen.</p>
-      </div>
+    <details class="tech" id="source">
+      <summary>Install from source, and everything else it does</summary>
+      <div class="get">
       <div>
         <h3>Vanaf de broncode</h3>
         <p>Op Windows, Linux (getest) of macOS (niet getest):</p>
@@ -413,17 +453,8 @@ python desktop_app.py</pre>
         <p>Kalibratie met bias-, dark- en flatframes, verwijderen van hete pixels en satellietsporen, sigma-clipping en andere stackmethoden die uitschieters verwerpen, optioneel drizzle, verwijderen van achtergrond en gradiënten, ruisonderdrukking en deconvolutie, plate solving, kleurkalibratie, fotometrie en een komeetmodus. Als je een gratis alternatief zoekt voor DeepSkyStacker of Siril voor gegevens van de Celestron Origin en andere one-shot-colourcamera's, dan is het daarvoor gemaakt.</p>
         <p>Nachten op hetzelfde object tellen op: vijf nachten op het Draaikolkstelsel hadden samen 30% minder hemelruis en 12% smallere sterren dan de beste nacht alleen. Voeg nachten toe met <code>--merge</code>, zonder de oude frames te bewaren. <a href="stack-celestron-origin.html#nights">Zo werkt het</a>.</p>
       </div>
-      <div>
-        <h3>Wat het leest</h3>
-        <p>Ruwe bestanden van de Celestron Origin (de FITS-frames in elke sessiemap, met hun <code>info.json</code>), en frames van kleurencamera's als FITS, camera-RAW (Canon, Nikon, Sony en andere, vereist rawpy), TIFF en XISF. SER-video wordt ondersteund voor planeten. Formaten mogen in één map door elkaar staan.</p>
-        <p>Helemaal offline werken? Geef <code>--offline</code> mee, of vink het aan in de app, en OriginStack doet helemaal geen netwerkverzoeken.</p>
       </div>
-      <div id="no-gen-ai">
-        <h3>Geen generatieve AI, niets in de cloud</h3>
-        <p>OriginStack stuurt je beelden nooit naar een AI-dienst en genereert of verzint nooit beeldinhoud. De verwerking is klassieke, gedocumenteerde signaalverwerking die voor dit project is geschreven, van kalibratie en uitlijning tot achtergrondverwijdering en ruisonderdrukking, en je kunt alles in de broncode lezen. Er is geen andere astronomiesoftware, geen account en geen clouddienst nodig, alleen gangbare opensource wetenschappelijke bibliotheken.</p>
-        <p>Twee optionele stappen, <code>--denoiser nn</code> en <code>--deconvolve nn</code>, gebruiken kleine neurale netwerken die getraind zijn op echte Celestron Origin-sessies (de tweede ook op scherpere survey-opnamen van dezelfde hemel). Ze draaien op je eigen computer en zijn gecontroleerd met onafhankelijke stacks om te bevestigen dat ze geen sterren of details toevoegen die niet in de gegevens zitten. De automatische instellingen gebruiken de tweede voor Origin-sessies; <code>--deconvolve off</code> zet hem uit. <a href="../how-it-works.html#learned">Hoe ze werken</a>.</p>
-      </div>
-    </div>
+    </details>
   </div>
 </section>
 </main>
@@ -532,6 +563,16 @@ python desktop_app.py</pre>
   };
   os.addEventListener('change', update);
   user.addEventListener('change', update);
+})();
+</script>
+<script>
+(() => {
+  const open = () => {
+    const el = document.getElementById(location.hash.slice(1));
+    if (el && el.tagName === 'DETAILS') el.open = true;
+    else if (el) { const d = el.closest('details'); if (d) d.open = true; }
+  };
+  addEventListener('hashchange', open); open();
 })();
 </script>
 </body>

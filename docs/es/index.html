@@ -87,7 +87,7 @@
     <div class="bar">
       <picture><source type="image/webp" srcset="../img/logo-dark-200.webp 200w, ../img/logo-dark-400.webp 400w" sizes="188px"><img src="../img/logo-dark.png" alt="OriginStack" width="920" height="256"></picture>
       <nav aria-label="Secciones">
-        <a href="#oneclick">Un clic</a> <a href="#time">Velocidad</a> <a href="#app">La aplicación</a> <a href="#compare">Comparativa</a> <a href="stack-celestron-origin.html">Guía</a> <a href="../advanced.html">Avanzado</a> <a href="../how-it-works.html">Cómo funciona</a> <a href="#get">Instalar</a>
+        <a href="#how">How it works</a> <a href="#oneclick">What you get</a> <a href="#app">The app</a> <a href="#get">Install</a> <a href="stack-celestron-origin.html">Guide</a> <a href="#technical">Technical details</a>
       </nav>
     </div>
 
@@ -117,7 +117,7 @@
       <span class="cap r">114 tomas, apiladas y procesadas</span>
       <input type="range" min="0" max="100" value="50" aria-label="Arrastra para comparar una toma con el apilado terminado">
     </div>
-    <p class="hero-bridge"><span>Empieza por la diferencia</span> <a href="#oneclick">Vea lo que hace un solo clic&nbsp;→</a></p>
+    <p class="hero-bridge"><span>Empieza por la diferencia</span> <a href="#how">See how simple it is&nbsp;→</a></p>
     <p class="fine">OriginStack es gratuito. Si te ahorra una noche de procesado, puedes <a data-goatcounter-click="support-index" href="https://ko-fi.com/originstack">dejar una propina en Ko-fi</a>.</p>
     </div>
     </div>
@@ -125,6 +125,28 @@
 </header>
 
 <main id="main-content">
+<section id="how">
+  <div class="wrap">
+    <h2>How it works, in three steps</h2>
+    <p class="intro measure">You do not need to know anything about image processing. If you can pick a folder, you can use it.</p>
+    <div class="phases">
+      <div>
+        <h3>1. Pick your folder</h3>
+        <p>Choose the folder your telescope or camera saved. OriginStack counts the frames and works out what you photographed.</p>
+      </div>
+      <div>
+        <h3>2. Press Start</h3>
+        <p>It combines hundreds of short, noisy exposures into one clean picture and then finishes it for you. A night of frames takes about a minute on a normal laptop.</p>
+      </div>
+      <div>
+        <h3>3. Get your picture</h3>
+        <p>You get a finished JPEG ready to share, plus the unprocessed combined image in case you want to edit it further elsewhere.</p>
+      </div>
+    </div>
+    <p class="plain measure">It is free, it runs on your own computer, and it needs no account. It never sends your pictures anywhere.</p>
+  </div>
+</section>
+
 <section id="oneclick">
   <div class="wrap">
     <h2>Un clic hace todo el trabajo</h2>
@@ -159,9 +181,112 @@
   </div>
 </section>
 
-<section id="time">
+<section id="app">
   <div class="wrap">
-    <h2>Una noche de tomas en aproximadamente un minuto</h2>
+    <h2>Míralo trabajar o sáltate los ajustes</h2>
+    <p class="intro measure">Indica a la aplicación una carpeta de tomas, di qué has fotografiado (o deja que lo averigüe) y pulsa Iniciar. Cada ajuste tiene una explicación de una línea, y los valores predeterminados eligen el resto según tu objeto. Estas son pantallas reales del apilado de las tomas de la galaxia del Girasol usadas en las comparativas de más abajo. ¿Es la primera vez que procesas imágenes del Celestron Origin? La <a href="stack-celestron-origin.html">guía paso a paso</a> parte de la carpeta de sesión que guarda el telescopio.</p>
+
+    <div class="shots">
+      <figure class="shot big">
+        <picture><source type="image/webp" srcset="../img/app-running-800.webp 800w, ../img/app-running-1200.webp 1200w, ../img/app-running-1600.webp 1600w" sizes="(min-width: 1424px) 1176px, calc(100vw - 2 * clamp(20px, 5vw, 72px))"><img src="../img/app-running.png" width="1600" height="1176" loading="lazy" alt="La ventana de OriginStack durante una ejecución: a la izquierda la carpeta y la salida con tarjetas de imagen para el tipo de objetivo y el modo de ejecución, tres de las cuatro fases de la canalización marcadas como terminadas y el registro debajo; a la derecha una vista previa de la Galaxia del Girasol a mitad del posprocesado y una tabla con las puntuaciones de cada toma."></picture>
+        <figcaption>A mitad de la ejecución del Girasol. Las fases 1 a 3 están hechas, y la vista previa sigue cada paso de acabado a medida que ocurre.</figcaption>
+      </figure>
+      <figure class="shot s7">
+        <picture><source type="image/webp" srcset="../img/app-setup-800.webp 800w, ../img/app-setup-1200.webp 1200w, ../img/app-setup-1600.webp 1600w" sizes="(max-width: 800px) calc(100vw - 40px), 57vw"><img src="../img/app-setup.png" width="1600" height="1176" loading="lazy" alt="La ventana de OriginStack antes de una ejecución: una carpeta elegida con sus recuentos de tomas y debajo el nombre del objeto sacado del archivo de sesión, tarjetas ilustradas para Detección automática, Galaxia (marcada como Sugerido), Nebulosa, Cúmulo estelar, Campo estelar y Cometa, una elección entre Calidad máxima y Vista rápida, una imagen de galaxia de ejemplo en la vista previa y un resumen Esta ejecución con las tomas, el objeto, el modo, los ajustes modificados y el archivo de salida."></picture>
+        <figcaption>Antes de una ejecución. Elige una carpeta y la aplicación cuenta tus tomas, lee el objeto de la sesión y sugiere una tarjeta; la vista previa muestra un resultado de ejemplo y Esta ejecución dice exactamente qué hará Iniciar.</figcaption>
+      </figure>
+      <figure class="shot s5">
+        <picture><source type="image/webp" srcset="../img/app-done-800.webp 800w" sizes="(max-width: 800px) calc(100vw - 40px), 40vw"><img src="../img/app-done.png" width="800" height="1374" loading="lazy" alt="Los paneles de vista previa y de tomas al terminar la ejecución, con la imagen final de la Galaxia del Girasol y un resumen: 158 de 158 tomas apiladas en 2 minutos 25 segundos."></picture>
+        <figcaption>Al terminar puedes hacer zoom y desplazarte por el resultado, o deslizar entre el apilado lineal y la imagen terminada.</figcaption>
+      </figure>
+      <figure class="shot s7">
+        <picture><source type="image/webp" srcset="../img/app-expert-800.webp 800w" sizes="(max-width: 800px) calc(100vw - 40px), 57vw"><img src="../img/app-expert.png" width="800" height="627" loading="lazy" alt="El panel Opciones adicionales con un cuadro de búsqueda y una lista de grupos, que muestra opciones de registro y apilado como la coadición óptima de imágenes, la eliminación de bandas y el modelo de distorsión, cada una con una descripción de una línea."></picture>
+        <figcaption>En Opciones adicionales hay alrededor de un centenar de opciones más, cada una con una descripción de una línea y un cuadro de búsqueda para encontrarlas; las menos habituales permanecen ocultas hasta que marcas Opciones avanzadas.</figcaption>
+      </figure>
+    </div>
+  </div>
+</section>
+
+<section id="gallery">
+  <div class="wrap">
+    <h2>Hecho con OriginStack</h2>
+    <p class="intro measure">Todo a partir de tomas en bruto del Celestron Origin, apiladas y procesadas con OriginStack, bajo cielos medidos de <strong>Bortle 7-9</strong> (fuerte contaminación lumínica, jardín/azotea, no un lugar oscuro) -- consulta el <a href="https://github.com/hd152/originstack#readme">README</a> para ver las mediciones de cada imagen y el método.</p>
+    <div class="gallery">
+      <figure class="hero"><picture><source type="image/webp" srcset="../img/orion-nebula-m42-celestron-origin-800.webp 800w, ../img/orion-nebula-m42-celestron-origin-1200.webp 1200w, ../img/orion-nebula-m42-celestron-origin-1600.webp 1600w" sizes="(min-width: 1424px) 1176px, calc(100vw - 2 * clamp(20px, 5vw, 72px))"><img src="../img/orion-nebula-m42-celestron-origin.jpg" width="1600" height="1067" loading="lazy" alt="La nebulosa de Orión: un núcleo blanco brillante con bandas de polvo oscuras dentro de una amplia nube de gas rosa y gris."></picture><figcaption><b>Nebulosa</b> Nebulosa de Orión (M42), siete noches combinadas, 2 h 44 min</figcaption></figure>
+      <figure><picture><source type="image/webp" srcset="../img/whirlpool-galaxy-m51-celestron-origin-800.webp 800w, ../img/whirlpool-galaxy-m51-celestron-origin-1200.webp 1200w" sizes="(max-width: 800px) calc(100vw - 40px), 30vw"><img src="../img/whirlpool-galaxy-m51-celestron-origin.jpg" width="1200" height="800" loading="lazy" alt="La galaxia del Remolino, una espiral vista de frente con brazos polvorientos, y su galaxia compañera más pequeña debajo."></picture><figcaption><b>Galaxia</b> Galaxia del Remolino (M51), ocho noches combinadas, 2 h 38 min</figcaption></figure>
+      <figure><picture><source type="image/webp" srcset="../img/pleiades-m45-celestron-origin-800.webp 800w, ../img/pleiades-m45-celestron-origin-1200.webp 1200w" sizes="(max-width: 800px) calc(100vw - 40px), 30vw"><img src="../img/pleiades-m45-celestron-origin.jpg" width="1200" height="800" loading="lazy" alt="Las Pléyades: estrellas brillantes de un blanco azulado envueltas en jirones de nebulosa de reflexión azul."></picture><figcaption><b>Cúmulo abierto</b> Pléyades (M45), quince noches combinadas, 5 h 16 min</figcaption></figure>
+      <figure><picture><source type="image/webp" srcset="../img/dumbbell-nebula-m27-celestron-origin-800.webp 800w, ../img/dumbbell-nebula-m27-celestron-origin-1200.webp 1200w" sizes="(max-width: 800px) calc(100vw - 40px), 30vw"><img src="../img/dumbbell-nebula-m27-celestron-origin.jpg" width="1200" height="800" loading="lazy" alt="La nebulosa Dumbbell: una forma de corazón de manzana verde azulada con bordes rojos y lóbulos exteriores más tenues."></picture><figcaption><b>Nebulosa planetaria</b> Nebulosa Dumbbell (M27), dos noches, 9 min</figcaption></figure>
+      <figure><picture><source type="image/webp" srcset="../img/messier-15-globular-cluster-celestron-origin-800.webp 800w, ../img/messier-15-globular-cluster-celestron-origin-1200.webp 1200w" sizes="(max-width: 800px) calc(100vw - 40px), 30vw"><img src="../img/messier-15-globular-cluster-celestron-origin.jpg" width="1200" height="800" loading="lazy" alt="El cúmulo globular M15: una bola densa de miles de estrellas alrededor de un núcleo brillante."></picture><figcaption><b>Cúmulo globular</b> M15, 172 &times; 15 s</figcaption></figure>
+      <figure><picture><source type="image/webp" srcset="../img/comet-c2025-a6-lemmon-celestron-origin-800.webp 800w, ../img/comet-c2025-a6-lemmon-celestron-origin-1200.webp 1200w" sizes="(max-width: 800px) calc(100vw - 40px), 30vw"><img src="../img/comet-c2025-a6-lemmon-celestron-origin.jpg" width="1200" height="800" loading="lazy" alt="El cometa Lemmon: una cabeza blanca brillante con una cola larga, recta y ligeramente anaranjada."></picture><figcaption><b>Cometa</b> C/2025 A6 (Lemmon), 111 &times; 10 s, apilado sobre el cometa</figcaption></figure>
+      <figure><picture><source type="image/webp" srcset="../img/sagittarius-star-cloud-m24-celestron-origin-800.webp 800w, ../img/sagittarius-star-cloud-m24-celestron-origin-1200.webp 1200w" sizes="(max-width: 800px) calc(100vw - 40px), 30vw"><img src="../img/sagittarius-star-cloud-m24-celestron-origin.jpg" width="1200" height="729" loading="lazy" alt="Un denso campo de estrellas en Sagitario con franjas oscuras de polvo."></picture><figcaption><b>Campo estelar</b> Nube estelar de Sagitario (M24), 138 &times; 10 s</figcaption></figure>
+    </div>
+    <p class="plain measure">Una imagen de cada tipo de objetivo para el que OriginStack tiene un ajuste, cada una apilada con todas las noches disponibles. Más en la <a href="../gallery.html">galería</a>.</p>
+  </div>
+</section>
+
+<section id="get">
+  <div class="wrap">
+    <h2>Instalación</h2>
+    <p class="intro measure">?No sabe qu? descarga es la adecuada? Elija abajo su sistema y experiencia.</p>
+    <div class="chooser" aria-label="Selector de descargas">
+      <label>Sistema operativo
+        <select id="chooser-os">
+          <option value="windows">Windows 10/11</option>
+          <option value="mac">macOS</option>
+          <option value="linux">Linux</option>
+        </select>
+      </label>
+      <label>Experiencia
+        <select id="chooser-user">
+          <option value="beginner">Soy nuevo en el apilado</option>
+          <option value="cli">Prefiero la l?nea de comandos</option>
+        </select>
+      </label>
+    </div>
+    <p class="chooser-output" id="chooser-output">El instalador de Windows es la forma m?s sencilla de comenzar.</p>
+    <div class="get">
+      <div>
+        <h3>Instalador para Windows</h3>
+        <p>Software de apilado gratuito para Windows 10 y 11. Descarga el archivo de instalación de la <a data-goatcounter-click="release-page-index" href="https://github.com/hd152/originstack/releases/latest">última versión</a> y ejecútalo. Se instala solo para tu usuario, añade una entrada en el menú Inicio y un desinstalador, y no necesita Python.</p>
+        <p>¿Prefiere no instalar nada? El exe portátil es un único archivo que puede ejecutar desde cualquier carpeta o desde una memoria USB. Se descomprime cada vez que se inicia, por lo que tarda unos segundos más en abrirse que la aplicación instalada.</p>
+        <p>¿Prefieres el zip? Usa primero Extraer todo y luego ejecuta OriginStack.exe desde la carpeta extraída. Ejecutarlo desde dentro del zip no funciona.</p>
+      </div>
+      <div id="mac">
+        <h3>Aplicación para macOS</h3>
+        <p>Descarga el zip para tu Mac de la <a data-goatcounter-click="release-page-index" href="https://github.com/hd152/originstack/releases/latest">última versión</a>: <code>macos-arm64</code> para Apple silicon (M1 y posteriores, requiere macOS 14 o posterior) o <code>macos-x86_64</code> para un Mac con Intel. Abre el zip y arrastra OriginStack a Aplicaciones. No necesita Python.</p>
+        <p>La aplicación aún no está firmada por Apple, así que macOS bloquea el primer inicio. Haz Control-clic en OriginStack y elige Abrir, y luego Abrir otra vez; en macOS 15 y posteriores, intenta abrirla una vez y luego elige Abrir igualmente en Ajustes del Sistema, Privacidad y seguridad. O borra la marca de descarga en Terminal:</p>
+<pre>xattr -dr com.apple.quarantine /Applications/OriginStack.app</pre>
+        <p>Las versiones para Mac se han usado menos en la práctica que la versión para Windows.</p>
+      </div>
+      <div>
+        <h3>Paquete para Linux</h3>
+        <p>Descarga <code>OriginStack-&lt;version&gt;-linux-x64.tar.gz</code> de la <a data-goatcounter-click="release-page-index" href="https://github.com/hd152/originstack/releases/latest">última versión</a>, descomprímelo y ejecuta el instalador. Se instala solo para tu usuario, añade una entrada en el menú de aplicaciones y no necesita Python ni root.</p>
+<pre>tar xzf OriginStack-*-linux-x64.tar.gz
+cd OriginStack-*-linux-x64
+./install.sh</pre>
+        <p>Requiere glibc 2.35 o posterior (Ubuntu 22.04, Debian 12, Fedora 36 y posteriores) y se ha usado menos en la práctica que la versión para Windows. Ejecuta <code>./install.sh --uninstall</code> para eliminarlo.</p>
+      </div>
+      <div>
+        <h3>Qué formatos lee</h3>
+        <p>Archivos en bruto del Celestron Origin (las tomas FITS de cada carpeta de sesión, con su <code>info.json</code>), y tomas de cámaras a color en FITS, RAW de cámara (Canon, Nikon, Sony y otras, requiere rawpy), TIFF y XISF. Se admite vídeo SER para trabajo planetario. Puedes mezclar formatos libremente en una carpeta.</p>
+        <p>¿Lo quieres totalmente sin conexión? Usa <code>--offline</code>, o márcalo en la aplicación, y OriginStack no hará ninguna petición de red.</p>
+      </div>
+      <div id="no-gen-ai">
+        <h3>Sin IA generativa, nada en la nube</h3>
+        <p>OriginStack nunca envía sus imágenes a un servicio de IA y nunca genera ni inventa contenido de imagen. Su procesamiento es tratamiento de señal clásico y documentado, escrito para este proyecto, desde la calibración y la alineación hasta la eliminación del fondo y la reducción de ruido, y puede leerlo todo en el código fuente. No necesita otro software de astronomía, ni cuenta, ni servicio en la nube, solo bibliotecas científicas de código abierto habituales.</p>
+        <p>Dos pasos opcionales, <code>--denoiser nn</code> y <code>--deconvolve nn</code>, usan pequeñas redes neuronales entrenadas con sesiones reales del Celestron Origin (la segunda, también con imágenes de sondeos más nítidas del mismo cielo). Se ejecutan en su propio ordenador y se comprobaron con apilados independientes para confirmar que no añaden estrellas ni detalles que no estén en los datos. Los ajustes automáticos usan el segundo para las sesiones del Origin; <code>--deconvolve off</code> lo desactiva. <a href="../how-it-works.html#learned">Cómo funcionan</a>.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="technical">
+  <div class="wrap">
+    <h2>The technical details</h2>
+    <p class="intro measure">Everything above is all you need to get a good picture. This section is for people who want the numbers: how fast it is, how it measures up against other software, and how to install it from source. Open any part to read it.</p>
+
+    <details class="tech" id="time">
+      <summary>Speed and memory: a night of frames in about a minute</summary>
     <p class="intro measure">La nebulosa Omega, 114 tomas, en un portátil de 8 núcleos: <strong>62 segundos</strong> desde los archivos en bruto hasta la imagen terminada, frente a 89 a principios de octubre. El bloque rojo es la parte que hace que la imagen se vea bien; el resto es conseguir que 114 tomas encajen.</p>
 
     <div class="run" role="img" aria-label="Barra que muestra 62 segundos divididos en carga y puntuación 13.7, registro 1.6, alineación y apilado 22.0, acabado 18.1, y disco y preparación 6.3 segundos">
@@ -199,38 +324,10 @@
     </div>
     <p class="plain measure">Las tomas se procesan de una en una, así que 500 tomas necesitan más o menos la misma memoria que 50. Los archivos temporales ocupan unos 100 MB de disco por toma mientras dura la ejecución; las tomas alineadas se guardan en memoria cuando hay espacio, dejando siempre libre una quinta parte de ella.</p>
     <p class="plain measure"><strong>Por qué es rápido.</strong> Más de 80 de los pasos más pesados son Rust compilado, no Python: la combinación de apilado por defecto es unas 37 veces más rápida que el código NumPy al que sustituyó, la reparación de píxeles calientes de 25 a 55 veces y el ajuste del fondo unas 31 veces. La mayoría dan exactamente los mismos números que antes. El procesado de las tomas está organizado según cómo se comporta realmente una CPU, un proceso por núcleo en tres cuartas partes de los núcleos, y varias noches de un mismo objeto se terminan una sola vez en lugar de una por noche: siete sesiones de la Nebulosa de Orión pasaron de 15 a unos 8 minutos.</p>
-  </div>
-</section>
+    </details>
 
-<section id="app">
-  <div class="wrap">
-    <h2>Míralo trabajar o sáltate los ajustes</h2>
-    <p class="intro measure">Indica a la aplicación una carpeta de tomas, di qué has fotografiado (o deja que lo averigüe) y pulsa Iniciar. Cada ajuste tiene una explicación de una línea, y los valores predeterminados eligen el resto según tu objeto. Estas son pantallas reales del apilado de las tomas de la galaxia del Girasol usadas en las comparativas de más abajo. ¿Es la primera vez que procesas imágenes del Celestron Origin? La <a href="stack-celestron-origin.html">guía paso a paso</a> parte de la carpeta de sesión que guarda el telescopio.</p>
-
-    <div class="shots">
-      <figure class="shot big">
-        <picture><source type="image/webp" srcset="../img/app-running-800.webp 800w, ../img/app-running-1200.webp 1200w, ../img/app-running-1600.webp 1600w" sizes="(min-width: 1424px) 1176px, calc(100vw - 2 * clamp(20px, 5vw, 72px))"><img src="../img/app-running.png" width="1600" height="1176" loading="lazy" alt="La ventana de OriginStack durante una ejecución: a la izquierda la carpeta y la salida con tarjetas de imagen para el tipo de objetivo y el modo de ejecución, tres de las cuatro fases de la canalización marcadas como terminadas y el registro debajo; a la derecha una vista previa de la Galaxia del Girasol a mitad del posprocesado y una tabla con las puntuaciones de cada toma."></picture>
-        <figcaption>A mitad de la ejecución del Girasol. Las fases 1 a 3 están hechas, y la vista previa sigue cada paso de acabado a medida que ocurre.</figcaption>
-      </figure>
-      <figure class="shot s7">
-        <picture><source type="image/webp" srcset="../img/app-setup-800.webp 800w, ../img/app-setup-1200.webp 1200w, ../img/app-setup-1600.webp 1600w" sizes="(max-width: 800px) calc(100vw - 40px), 57vw"><img src="../img/app-setup.png" width="1600" height="1176" loading="lazy" alt="La ventana de OriginStack antes de una ejecución: una carpeta elegida con sus recuentos de tomas y debajo el nombre del objeto sacado del archivo de sesión, tarjetas ilustradas para Detección automática, Galaxia (marcada como Sugerido), Nebulosa, Cúmulo estelar, Campo estelar y Cometa, una elección entre Calidad máxima y Vista rápida, una imagen de galaxia de ejemplo en la vista previa y un resumen Esta ejecución con las tomas, el objeto, el modo, los ajustes modificados y el archivo de salida."></picture>
-        <figcaption>Antes de una ejecución. Elige una carpeta y la aplicación cuenta tus tomas, lee el objeto de la sesión y sugiere una tarjeta; la vista previa muestra un resultado de ejemplo y Esta ejecución dice exactamente qué hará Iniciar.</figcaption>
-      </figure>
-      <figure class="shot s5">
-        <picture><source type="image/webp" srcset="../img/app-done-800.webp 800w" sizes="(max-width: 800px) calc(100vw - 40px), 40vw"><img src="../img/app-done.png" width="800" height="1374" loading="lazy" alt="Los paneles de vista previa y de tomas al terminar la ejecución, con la imagen final de la Galaxia del Girasol y un resumen: 158 de 158 tomas apiladas en 2 minutos 25 segundos."></picture>
-        <figcaption>Al terminar puedes hacer zoom y desplazarte por el resultado, o deslizar entre el apilado lineal y la imagen terminada.</figcaption>
-      </figure>
-      <figure class="shot s7">
-        <picture><source type="image/webp" srcset="../img/app-expert-800.webp 800w" sizes="(max-width: 800px) calc(100vw - 40px), 57vw"><img src="../img/app-expert.png" width="800" height="627" loading="lazy" alt="El panel Opciones adicionales con un cuadro de búsqueda y una lista de grupos, que muestra opciones de registro y apilado como la coadición óptima de imágenes, la eliminación de bandas y el modelo de distorsión, cada una con una descripción de una línea."></picture>
-        <figcaption>En Opciones adicionales hay alrededor de un centenar de opciones más, cada una con una descripción de una línea y un cuadro de búsqueda para encontrarlas; las menos habituales permanecen ocultas hasta que marcas Opciones avanzadas.</figcaption>
-      </figure>
-    </div>
-  </div>
-</section>
-
-<section id="compare">
-  <div class="wrap">
-    <h2>Cómo se compara</h2>
+    <details class="tech" id="compare">
+      <summary>How it compares with Siril, DeepSkyStacker, PixInsight and the Origin app</summary>
     <p class="intro measure">Lo que da una sola ejecución, a partir de las tomas que guarda el Origin. La tabla completa, con Astro Pixel Processor y notas sobre cada programa, está en la <a href="../compare.html">página de comparación</a>.</p>
 
     <table class="wide matrix">
@@ -337,68 +434,11 @@
     </div>
 
     <p class="caveat measure">Cómo se midió: el TIFF del Origin es lineal pero está sobre un pedestal grande, así que los núcleos de sus estrellas más brillantes se recortan; cada apilado se llevó a la escala de brillo de OriginStack con una ganancia por canal de color, medida donde la imagen es lineal, y se dejaron fuera las estrellas recortadas. Las relaciones de ruido dependen de esa ganancia, así que tómalas con un margen de más o menos un 5 a 10%. Cuatro sesiones de un solo telescopio son una muestra pequeña. <a href="https://github.com/hd152/originstack/blob/main/tools/bench_vs_origin.py">tools/bench_vs_origin.py</a> lo repite con tus propias tomas.</p>
-  </div>
-</section>
+    </details>
 
-<section id="gallery">
-  <div class="wrap">
-    <h2>Hecho con OriginStack</h2>
-    <p class="intro measure">Todo a partir de tomas en bruto del Celestron Origin, apiladas y procesadas con OriginStack, bajo cielos medidos de <strong>Bortle 7-9</strong> (fuerte contaminación lumínica, jardín/azotea, no un lugar oscuro) -- consulta el <a href="https://github.com/hd152/originstack#readme">README</a> para ver las mediciones de cada imagen y el método.</p>
-    <div class="gallery">
-      <figure class="hero"><picture><source type="image/webp" srcset="../img/orion-nebula-m42-celestron-origin-800.webp 800w, ../img/orion-nebula-m42-celestron-origin-1200.webp 1200w, ../img/orion-nebula-m42-celestron-origin-1600.webp 1600w" sizes="(min-width: 1424px) 1176px, calc(100vw - 2 * clamp(20px, 5vw, 72px))"><img src="../img/orion-nebula-m42-celestron-origin.jpg" width="1600" height="1067" loading="lazy" alt="La nebulosa de Orión: un núcleo blanco brillante con bandas de polvo oscuras dentro de una amplia nube de gas rosa y gris."></picture><figcaption><b>Nebulosa</b> Nebulosa de Orión (M42), siete noches combinadas, 2 h 44 min</figcaption></figure>
-      <figure><picture><source type="image/webp" srcset="../img/whirlpool-galaxy-m51-celestron-origin-800.webp 800w, ../img/whirlpool-galaxy-m51-celestron-origin-1200.webp 1200w" sizes="(max-width: 800px) calc(100vw - 40px), 30vw"><img src="../img/whirlpool-galaxy-m51-celestron-origin.jpg" width="1200" height="800" loading="lazy" alt="La galaxia del Remolino, una espiral vista de frente con brazos polvorientos, y su galaxia compañera más pequeña debajo."></picture><figcaption><b>Galaxia</b> Galaxia del Remolino (M51), ocho noches combinadas, 2 h 38 min</figcaption></figure>
-      <figure><picture><source type="image/webp" srcset="../img/pleiades-m45-celestron-origin-800.webp 800w, ../img/pleiades-m45-celestron-origin-1200.webp 1200w" sizes="(max-width: 800px) calc(100vw - 40px), 30vw"><img src="../img/pleiades-m45-celestron-origin.jpg" width="1200" height="800" loading="lazy" alt="Las Pléyades: estrellas brillantes de un blanco azulado envueltas en jirones de nebulosa de reflexión azul."></picture><figcaption><b>Cúmulo abierto</b> Pléyades (M45), quince noches combinadas, 5 h 16 min</figcaption></figure>
-      <figure><picture><source type="image/webp" srcset="../img/dumbbell-nebula-m27-celestron-origin-800.webp 800w, ../img/dumbbell-nebula-m27-celestron-origin-1200.webp 1200w" sizes="(max-width: 800px) calc(100vw - 40px), 30vw"><img src="../img/dumbbell-nebula-m27-celestron-origin.jpg" width="1200" height="800" loading="lazy" alt="La nebulosa Dumbbell: una forma de corazón de manzana verde azulada con bordes rojos y lóbulos exteriores más tenues."></picture><figcaption><b>Nebulosa planetaria</b> Nebulosa Dumbbell (M27), dos noches, 9 min</figcaption></figure>
-      <figure><picture><source type="image/webp" srcset="../img/messier-15-globular-cluster-celestron-origin-800.webp 800w, ../img/messier-15-globular-cluster-celestron-origin-1200.webp 1200w" sizes="(max-width: 800px) calc(100vw - 40px), 30vw"><img src="../img/messier-15-globular-cluster-celestron-origin.jpg" width="1200" height="800" loading="lazy" alt="El cúmulo globular M15: una bola densa de miles de estrellas alrededor de un núcleo brillante."></picture><figcaption><b>Cúmulo globular</b> M15, 172 &times; 15 s</figcaption></figure>
-      <figure><picture><source type="image/webp" srcset="../img/comet-c2025-a6-lemmon-celestron-origin-800.webp 800w, ../img/comet-c2025-a6-lemmon-celestron-origin-1200.webp 1200w" sizes="(max-width: 800px) calc(100vw - 40px), 30vw"><img src="../img/comet-c2025-a6-lemmon-celestron-origin.jpg" width="1200" height="800" loading="lazy" alt="El cometa Lemmon: una cabeza blanca brillante con una cola larga, recta y ligeramente anaranjada."></picture><figcaption><b>Cometa</b> C/2025 A6 (Lemmon), 111 &times; 10 s, apilado sobre el cometa</figcaption></figure>
-      <figure><picture><source type="image/webp" srcset="../img/sagittarius-star-cloud-m24-celestron-origin-800.webp 800w, ../img/sagittarius-star-cloud-m24-celestron-origin-1200.webp 1200w" sizes="(max-width: 800px) calc(100vw - 40px), 30vw"><img src="../img/sagittarius-star-cloud-m24-celestron-origin.jpg" width="1200" height="729" loading="lazy" alt="Un denso campo de estrellas en Sagitario con franjas oscuras de polvo."></picture><figcaption><b>Campo estelar</b> Nube estelar de Sagitario (M24), 138 &times; 10 s</figcaption></figure>
-    </div>
-    <p class="plain measure">Una imagen de cada tipo de objetivo para el que OriginStack tiene un ajuste, cada una apilada con todas las noches disponibles. Más en la <a href="../gallery.html">galería</a>.</p>
-  </div>
-</section>
-
-<section id="get">
-  <div class="wrap">
-    <h2>Instalación</h2>
-    <p class="intro measure">?No sabe qu? descarga es la adecuada? Elija abajo su sistema y experiencia.</p>
-    <div class="chooser" aria-label="Selector de descargas">
-      <label>Sistema operativo
-        <select id="chooser-os">
-          <option value="windows">Windows 10/11</option>
-          <option value="mac">macOS</option>
-          <option value="linux">Linux</option>
-        </select>
-      </label>
-      <label>Experiencia
-        <select id="chooser-user">
-          <option value="beginner">Soy nuevo en el apilado</option>
-          <option value="cli">Prefiero la l?nea de comandos</option>
-        </select>
-      </label>
-    </div>
-    <p class="chooser-output" id="chooser-output">El instalador de Windows es la forma m?s sencilla de comenzar.</p>
-    <div class="get">
-      <div>
-        <h3>Instalador para Windows</h3>
-        <p>Software de apilado gratuito para Windows 10 y 11. Descarga el archivo de instalación de la <a data-goatcounter-click="release-page-index" href="https://github.com/hd152/originstack/releases/latest">última versión</a> y ejecútalo. Se instala solo para tu usuario, añade una entrada en el menú Inicio y un desinstalador, y no necesita Python.</p>
-        <p>¿Prefiere no instalar nada? El exe portátil es un único archivo que puede ejecutar desde cualquier carpeta o desde una memoria USB. Se descomprime cada vez que se inicia, por lo que tarda unos segundos más en abrirse que la aplicación instalada.</p>
-        <p>¿Prefieres el zip? Usa primero Extraer todo y luego ejecuta OriginStack.exe desde la carpeta extraída. Ejecutarlo desde dentro del zip no funciona.</p>
-      </div>
-      <div id="mac">
-        <h3>Aplicación para macOS</h3>
-        <p>Descarga el zip para tu Mac de la <a data-goatcounter-click="release-page-index" href="https://github.com/hd152/originstack/releases/latest">última versión</a>: <code>macos-arm64</code> para Apple silicon (M1 y posteriores, requiere macOS 14 o posterior) o <code>macos-x86_64</code> para un Mac con Intel. Abre el zip y arrastra OriginStack a Aplicaciones. No necesita Python.</p>
-        <p>La aplicación aún no está firmada por Apple, así que macOS bloquea el primer inicio. Haz Control-clic en OriginStack y elige Abrir, y luego Abrir otra vez; en macOS 15 y posteriores, intenta abrirla una vez y luego elige Abrir igualmente en Ajustes del Sistema, Privacidad y seguridad. O borra la marca de descarga en Terminal:</p>
-<pre>xattr -dr com.apple.quarantine /Applications/OriginStack.app</pre>
-        <p>Las versiones para Mac se han usado menos en la práctica que la versión para Windows.</p>
-      </div>
-      <div>
-        <h3>Paquete para Linux</h3>
-        <p>Descarga <code>OriginStack-&lt;version&gt;-linux-x64.tar.gz</code> de la <a data-goatcounter-click="release-page-index" href="https://github.com/hd152/originstack/releases/latest">última versión</a>, descomprímelo y ejecuta el instalador. Se instala solo para tu usuario, añade una entrada en el menú de aplicaciones y no necesita Python ni root.</p>
-<pre>tar xzf OriginStack-*-linux-x64.tar.gz
-cd OriginStack-*-linux-x64
-./install.sh</pre>
-        <p>Requiere glibc 2.35 o posterior (Ubuntu 22.04, Debian 12, Fedora 36 y posteriores) y se ha usado menos en la práctica que la versión para Windows. Ejecuta <code>./install.sh --uninstall</code> para eliminarlo.</p>
-      </div>
+    <details class="tech" id="source">
+      <summary>Install from source, and everything else it does</summary>
+      <div class="get">
       <div>
         <h3>Desde el código fuente</h3>
         <p>En Windows, Linux (probado) o macOS (no probado):</p>
@@ -413,17 +453,8 @@ python desktop_app.py</pre>
         <p>Calibración con bias, darks y flats, eliminación de píxeles calientes y trazas de satélites, sigma clip y otros métodos de apilado con rechazo de valores atípicos, drizzle opcional, eliminación del fondo y de gradientes, reducción de ruido y deconvolución, resolución astrométrica, calibración de color, fotometría y un modo cometa. Si buscas una alternativa gratuita a DeepSkyStacker o Siril para datos de astrofotografía del Celestron Origin y de otras cámaras a color de un solo disparo, está hecho para eso.</p>
         <p>Las noches de un mismo objeto se suman: cinco noches de la galaxia del Remolino, combinadas, tenían un 30 % menos de ruido de cielo y estrellas un 12 % más finas que la mejor de ellas sola. Añade más noches con <code>--merge</code> sin guardar los fotogramas antiguos. <a href="stack-celestron-origin.html#nights">Cómo funciona</a>.</p>
       </div>
-      <div>
-        <h3>Qué formatos lee</h3>
-        <p>Archivos en bruto del Celestron Origin (las tomas FITS de cada carpeta de sesión, con su <code>info.json</code>), y tomas de cámaras a color en FITS, RAW de cámara (Canon, Nikon, Sony y otras, requiere rawpy), TIFF y XISF. Se admite vídeo SER para trabajo planetario. Puedes mezclar formatos libremente en una carpeta.</p>
-        <p>¿Lo quieres totalmente sin conexión? Usa <code>--offline</code>, o márcalo en la aplicación, y OriginStack no hará ninguna petición de red.</p>
       </div>
-      <div id="no-gen-ai">
-        <h3>Sin IA generativa, nada en la nube</h3>
-        <p>OriginStack nunca envía sus imágenes a un servicio de IA y nunca genera ni inventa contenido de imagen. Su procesamiento es tratamiento de señal clásico y documentado, escrito para este proyecto, desde la calibración y la alineación hasta la eliminación del fondo y la reducción de ruido, y puede leerlo todo en el código fuente. No necesita otro software de astronomía, ni cuenta, ni servicio en la nube, solo bibliotecas científicas de código abierto habituales.</p>
-        <p>Dos pasos opcionales, <code>--denoiser nn</code> y <code>--deconvolve nn</code>, usan pequeñas redes neuronales entrenadas con sesiones reales del Celestron Origin (la segunda, también con imágenes de sondeos más nítidas del mismo cielo). Se ejecutan en su propio ordenador y se comprobaron con apilados independientes para confirmar que no añaden estrellas ni detalles que no estén en los datos. Los ajustes automáticos usan el segundo para las sesiones del Origin; <code>--deconvolve off</code> lo desactiva. <a href="../how-it-works.html#learned">Cómo funcionan</a>.</p>
-      </div>
-    </div>
+    </details>
   </div>
 </section>
 </main>
@@ -532,6 +563,16 @@ python desktop_app.py</pre>
   };
   os.addEventListener('change', update);
   user.addEventListener('change', update);
+})();
+</script>
+<script>
+(() => {
+  const open = () => {
+    const el = document.getElementById(location.hash.slice(1));
+    if (el && el.tagName === 'DETAILS') el.open = true;
+    else if (el) { const d = el.closest('details'); if (d) d.open = true; }
+  };
+  addEventListener('hashchange', open); open();
 })();
 </script>
 </body>

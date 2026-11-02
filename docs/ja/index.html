@@ -85,7 +85,7 @@
     <div class="bar">
       <picture><source type="image/webp" srcset="../img/logo-dark-200.webp 200w, ../img/logo-dark-400.webp 400w" sizes="188px"><img src="../img/logo-dark.png" alt="OriginStack" width="920" height="256"></picture>
       <nav aria-label="セクション">
-        <a href="#oneclick">ワンクリック</a> <a href="#time">速度</a> <a href="#app">アプリ</a> <a href="#compare">比較</a> <a href="stack-celestron-origin.html">ガイド</a> <a href="../advanced.html">上級者向け</a> <a href="../how-it-works.html">仕組み</a> <a href="#get">インストール</a>
+        <a href="#how">How it works</a> <a href="#oneclick">What you get</a> <a href="#app">The app</a> <a href="#get">Install</a> <a href="stack-celestron-origin.html">Guide</a> <a href="#technical">Technical details</a>
       </nav>
     </div>
 
@@ -115,7 +115,7 @@
       <span class="cap r">114 フレームをスタック・画像処理</span>
       <input type="range" min="0" max="100" value="50" aria-label="ドラッグして1フレームと完成したスタックを比較">
     </div>
-    <p class="hero-bridge"><span>違いから見てみましょう</span> <a href="#oneclick">ワンクリックで何が起きるかを見る&nbsp;→</a></p>
+    <p class="hero-bridge"><span>違いから見てみましょう</span> <a href="#how">See how simple it is&nbsp;→</a></p>
     <p class="fine">OriginStack は無料です。画像処理の一晩分が省けたなら、<a data-goatcounter-click="support-index" href="https://ko-fi.com/originstack">Ko-fi でチップを送る</a>こともできます。</p>
     </div>
     </div>
@@ -123,6 +123,28 @@
 </header>
 
 <main id="main-content">
+<section id="how">
+  <div class="wrap">
+    <h2>How it works, in three steps</h2>
+    <p class="intro measure">You do not need to know anything about image processing. If you can pick a folder, you can use it.</p>
+    <div class="phases">
+      <div>
+        <h3>1. Pick your folder</h3>
+        <p>Choose the folder your telescope or camera saved. OriginStack counts the frames and works out what you photographed.</p>
+      </div>
+      <div>
+        <h3>2. Press Start</h3>
+        <p>It combines hundreds of short, noisy exposures into one clean picture and then finishes it for you. A night of frames takes about a minute on a normal laptop.</p>
+      </div>
+      <div>
+        <h3>3. Get your picture</h3>
+        <p>You get a finished JPEG ready to share, plus the unprocessed combined image in case you want to edit it further elsewhere.</p>
+      </div>
+    </div>
+    <p class="plain measure">It is free, it runs on your own computer, and it needs no account. It never sends your pictures anywhere.</p>
+  </div>
+</section>
+
 <section id="oneclick">
   <div class="wrap">
     <h2>ワンクリックですべて完了</h2>
@@ -157,9 +179,112 @@
   </div>
 </section>
 
-<section id="time">
+<section id="app">
   <div class="wrap">
-    <h2>一晩分のフレームを約1分で</h2>
+    <h2>処理を見守るか、設定を省略するか</h2>
+    <p class="intro measure">フレームのフォルダを指定し、何を撮影したかを選んで（またはアプリに判断させて）、「開始」を押すだけです。すべての設定に1行の説明があり、残りは既定値が対象に合わせて選びます。以下は、後述の比較で使ったひまわり銀河のフレームをスタックしたときの実際の画面です。Celestron Origin の画像処理は初めてですか？<a href="stack-celestron-origin.html">ステップ・バイ・ステップのガイド</a>では、望遠鏡が保存するセッションフォルダから説明しています。</p>
+
+    <div class="shots">
+      <figure class="shot big">
+        <picture><source type="image/webp" srcset="../img/app-running-800.webp 800w, ../img/app-running-1200.webp 1200w, ../img/app-running-1600.webp 1600w" sizes="(min-width: 1424px) 1176px, calc(100vw - 2 * clamp(20px, 5vw, 72px))"><img src="../img/app-running.png" width="1600" height="1176" loading="lazy" alt="実行中の OriginStack ウィンドウ。左側にフォルダーと出力、対象の種類と実行モードを選ぶ画像カード、完了としてマークされた 4 つ中 3 つのパイプライン段階、その下にログ。右側には後処理の途中にあるヒマワリ銀河のプレビューと、フレームごとのスコアの表。"></picture>
+        <figcaption>ひまわり銀河の処理途中。フェーズ 1〜3 が完了し、プレビューは仕上げの各ステップの進行に合わせて更新されます。</figcaption>
+      </figure>
+      <figure class="shot s7">
+        <picture><source type="image/webp" srcset="../img/app-setup-800.webp 800w, ../img/app-setup-1200.webp 1200w, ../img/app-setup-1600.webp 1600w" sizes="(max-width: 800px) calc(100vw - 40px), 57vw"><img src="../img/app-setup.png" width="1600" height="1176" loading="lazy" alt="実行前の OriginStack のウィンドウ：選択したフォルダとそのフレーム数、その下にセッションファイルから読み取った対象名。自動検出、銀河（おすすめ表示付き）、星雲、星団、星野、彗星の画像カード、最高品質とクイックルックの選択、プレビューに表示された銀河の作例、そしてフレーム、対象、モード、変更した設定、出力ファイルをまとめた「今回の実行」の概要。"></picture>
+        <figcaption>実行前。フォルダを選ぶと、アプリがフレーム数を数え、セッションから対象を読み取ってカードを提案します。プレビューには作例が表示され、「今回の実行」に「開始」で何が行われるかが正確に示されます。</figcaption>
+      </figure>
+      <figure class="shot s5">
+        <picture><source type="image/webp" srcset="../img/app-done-800.webp 800w" sizes="(max-width: 800px) calc(100vw - 40px), 40vw"><img src="../img/app-done.png" width="800" height="1374" loading="lazy" alt="実行完了後のプレビューとフレームのパネル。ヒマワリ銀河の最終画像と、158 フレーム中 158 フレームを 2 分 25 秒でスタックしたという要約が表示されています。"></picture>
+        <figcaption>完了したら、結果を拡大・移動したり、リニアスタックと完成画像を切り替えて比較したりできます。</figcaption>
+      </figure>
+      <figure class="shot s7">
+        <picture><source type="image/webp" srcset="../img/app-expert-800.webp 800w" sizes="(max-width: 800px) calc(100vw - 40px), 57vw"><img src="../img/app-expert.png" width="800" height="627" loading="lazy" alt="検索ボックスとグループ一覧のある「追加オプション」パネル。厳密な画像コアディション、縞ノイズ除去、歪みモデルなど、位置合わせとスタックのオプションがそれぞれ1行の説明付きで表示されています。"></picture>
+        <figcaption>「追加オプション」にはさらに約 100 個のオプションがあり、それぞれ1行の説明と検索ボックスで探せます。使用頻度の低いものは「上級オプション」にチェックを入れるまで非表示です。</figcaption>
+      </figure>
+    </div>
+  </div>
+</section>
+
+<section id="gallery">
+  <div class="wrap">
+    <h2>作例</h2>
+    <p class="intro measure">すべて Celestron Origin の生フレームを OriginStack でスタック・画像処理したもので、測定値 <strong>Bortle 7-9</strong> の空（強い光害、自宅の庭や屋上で、暗い空の観測地ではありません）で撮影しています。画像ごとの測定値と方法は <a href="https://github.com/hd152/originstack#readme">README</a> をご覧ください。</p>
+    <div class="gallery">
+      <figure class="hero"><picture><source type="image/webp" srcset="../img/orion-nebula-m42-celestron-origin-800.webp 800w, ../img/orion-nebula-m42-celestron-origin-1200.webp 1200w, ../img/orion-nebula-m42-celestron-origin-1600.webp 1600w" sizes="(min-width: 1424px) 1176px, calc(100vw - 2 * clamp(20px, 5vw, 72px))"><img src="../img/orion-nebula-m42-celestron-origin.jpg" width="1600" height="1067" loading="lazy" alt="オリオン大星雲：ピンクと灰色のガスの広い雲の中に、暗いダストレーンを伴う明るい白い中心部。"></picture><figcaption><b>星雲</b> オリオン大星雲（M42）、7晩を合成、2時間44分</figcaption></figure>
+      <figure><picture><source type="image/webp" srcset="../img/whirlpool-galaxy-m51-celestron-origin-800.webp 800w, ../img/whirlpool-galaxy-m51-celestron-origin-1200.webp 1200w" sizes="(max-width: 800px) calc(100vw - 40px), 30vw"><img src="../img/whirlpool-galaxy-m51-celestron-origin.jpg" width="1200" height="800" loading="lazy" alt="子持ち銀河：塵の多い腕を持つ正面向きの渦巻銀河と、その下にある小さな伴銀河。"></picture><figcaption><b>銀河</b> 子持ち銀河（M51）、8晩を合成、2時間38分</figcaption></figure>
+      <figure><picture><source type="image/webp" srcset="../img/pleiades-m45-celestron-origin-800.webp 800w, ../img/pleiades-m45-celestron-origin-1200.webp 1200w" sizes="(max-width: 800px) calc(100vw - 40px), 30vw"><img src="../img/pleiades-m45-celestron-origin.jpg" width="1200" height="800" loading="lazy" alt="プレアデス星団：青い反射星雲の筋に包まれた、明るい青白い星々。"></picture><figcaption><b>散開星団</b> プレアデス星団（M45）、15晩を合成、5時間16分</figcaption></figure>
+      <figure><picture><source type="image/webp" srcset="../img/dumbbell-nebula-m27-celestron-origin-800.webp 800w, ../img/dumbbell-nebula-m27-celestron-origin-1200.webp 1200w" sizes="(max-width: 800px) calc(100vw - 40px), 30vw"><img src="../img/dumbbell-nebula-m27-celestron-origin.jpg" width="1200" height="800" loading="lazy" alt="亜鈴状星雲：赤い縁と淡い外側のローブを持つ、青緑色のリンゴの芯のような形。"></picture><figcaption><b>惑星状星雲</b> 亜鈴状星雲（M27）、2晩、9分</figcaption></figure>
+      <figure><picture><source type="image/webp" srcset="../img/messier-15-globular-cluster-celestron-origin-800.webp 800w, ../img/messier-15-globular-cluster-celestron-origin-1200.webp 1200w" sizes="(max-width: 800px) calc(100vw - 40px), 30vw"><img src="../img/messier-15-globular-cluster-celestron-origin.jpg" width="1200" height="800" loading="lazy" alt="球状星団M15：明るい中心部の周りに数千の星が密集した球。"></picture><figcaption><b>球状星団</b> M15、172 &times; 15 秒</figcaption></figure>
+      <figure><picture><source type="image/webp" srcset="../img/comet-c2025-a6-lemmon-celestron-origin-800.webp 800w, ../img/comet-c2025-a6-lemmon-celestron-origin-1200.webp 1200w" sizes="(max-width: 800px) calc(100vw - 40px), 30vw"><img src="../img/comet-c2025-a6-lemmon-celestron-origin.jpg" width="1200" height="800" loading="lazy" alt="レモン彗星：長くまっすぐで、かすかにオレンジ色の尾を持つ明るい白い頭部。"></picture><figcaption><b>彗星</b> C/2025 A6（レモン）、111 &times; 10 秒、彗星基準でスタック</figcaption></figure>
+      <figure><picture><source type="image/webp" srcset="../img/sagittarius-star-cloud-m24-celestron-origin-800.webp 800w, ../img/sagittarius-star-cloud-m24-celestron-origin-1200.webp 1200w" sizes="(max-width: 800px) calc(100vw - 40px), 30vw"><img src="../img/sagittarius-star-cloud-m24-celestron-origin.jpg" width="1200" height="729" loading="lazy" alt="暗い塵の帯が走る、いて座の恒星が密集した領域。"></picture><figcaption><b>星野</b> いて座スタークラウド（M24）、138 &times; 10 秒</figcaption></figure>
+    </div>
+    <p class="plain measure">OriginStack に設定がある天体の種類ごとに1枚ずつ、それぞれ撮影したすべての夜からスタックしました。ほかの作例は<a href="../gallery.html">ギャラリー</a>へ。</p>
+  </div>
+</section>
+
+<section id="get">
+  <div class="wrap">
+    <h2>インストール</h2>
+    <p class="intro measure">????????????????????????????????????????</p>
+    <div class="chooser" aria-label="????????">
+      <label>????????????
+        <select id="chooser-os">
+          <option value="windows">Windows 10/11</option>
+          <option value="mac">macOS</option>
+          <option value="linux">Linux</option>
+        </select>
+      </label>
+      <label>??
+        <select id="chooser-user">
+          <option value="beginner">????????????</option>
+          <option value="cli">??????????????</option>
+        </select>
+      </label>
+    </div>
+    <p class="chooser-output" id="chooser-output">Windows????????????????????</p>
+    <div class="get">
+      <div>
+        <h3>Windows インストーラー</h3>
+        <p>Windows 10 と 11 向けの無料スタックソフトです。<a data-goatcounter-click="release-page-index" href="https://github.com/hd152/originstack/releases/latest">最新リリース</a>からセットアップファイルをダウンロードして実行してください。現在のユーザーだけにインストールされ、スタートメニューの項目とアンインストーラーが追加されます。Python は不要です。</p>
+        <p>インストールしたくない場合は、ポータブル版の exe をお使いください。1 つのファイルだけで、任意のフォルダーや USB メモリから実行できます。起動のたびに自身を展開するため、インストール版より数秒遅れて開きます。</p>
+        <p>zip 版がよい場合は、まず「すべて展開」を行い、展開したフォルダから OriginStack.exe を実行してください。zip の中から直接実行すると失敗します。</p>
+      </div>
+      <div id="mac">
+        <h3>macOS アプリ</h3>
+        <p><a data-goatcounter-click="release-page-index" href="https://github.com/hd152/originstack/releases/latest">最新リリース</a>からお使いの Mac 用の zip をダウンロードしてください：Apple シリコン（M1 以降、macOS 14 以降が必要）なら <code>macos-arm64</code>、Intel Mac なら <code>macos-x86_64</code> です。zip を開き、OriginStack を「アプリケーション」フォルダにドラッグします。Python は不要です。</p>
+        <p>アプリはまだ Apple の署名を受けていないため、初回起動時に macOS がブロックします。OriginStack を Control キーを押しながらクリックして「開く」を選び、もう一度「開く」を選んでください。macOS 15 以降では、一度開こうとした後、「システム設定」の「プライバシーとセキュリティ」で「このまま開く」を選んでください。または、ターミナルでダウンロードのフラグを解除します：</p>
+<pre>xattr -dr com.apple.quarantine /Applications/OriginStack.app</pre>
+        <p>Mac 版は Windows 版に比べて実際の使用実績がまだ少なめです。</p>
+      </div>
+      <div>
+        <h3>Linux バンドル</h3>
+        <p><a data-goatcounter-click="release-page-index" href="https://github.com/hd152/originstack/releases/latest">最新リリース</a>から <code>OriginStack-&lt;version&gt;-linux-x64.tar.gz</code> をダウンロードし、展開してインストーラーを実行してください。現在のユーザーだけにインストールされ、アプリケーションメニューに項目が追加されます。Python も root 権限も不要です。</p>
+<pre>tar xzf OriginStack-*-linux-x64.tar.gz
+cd OriginStack-*-linux-x64
+./install.sh</pre>
+        <p>glibc 2.35 以降（Ubuntu 22.04、Debian 12、Fedora 36 以降）が必要で、Windows 版に比べて実際の使用実績はまだ少なめです。削除するには <code>./install.sh --uninstall</code> を実行してください。</p>
+      </div>
+      <div>
+        <h3>対応形式</h3>
+        <p>Celestron Origin の生ファイル（各セッションフォルダ内の FITS フレームと、その <code>info.json</code>）、およびカラーカメラの FITS、カメラ RAW（Canon、Nikon、Sony など。rawpy が必要）、TIFF、XISF のフレーム。惑星撮影用に SER 動画にも対応しています。1つのフォルダに複数の形式を自由に混在できます。</p>
+        <p>完全にオフラインで使いたい場合は、<code>--offline</code> を指定するか、アプリでチェックを入れてください。OriginStack はネットワーク接続を一切行いません。</p>
+      </div>
+      <div id="no-gen-ai">
+        <h3>生成AIは使わず、クラウドも使いません</h3>
+        <p>OriginStack は画像を AI サービスに送ることはなく、画像の内容を生成したり作り出したりすることもありません。処理はこのプロジェクトのために書かれた、文書化された古典的な信号処理で、キャリブレーションや位置合わせから背景除去、ノイズ低減まで、すべてソースコードで確認できます。ほかの天文ソフトウェアもアカウントもクラウドサービスも不要で、使うのは一般的なオープンソースの科学計算ライブラリだけです。</p>
+        <p><code>--denoiser nn</code> と <code>--deconvolve nn</code> の 2 つのオプション手順は、実際の Celestron Origin のセッションで学習した小さなニューラルネットワークを使います（後者は同じ空のより鮮明なサーベイ画像も使って学習）。お使いのコンピューター上で動作し、独立したスタックと照合して、データにない星やディテールを加えないことを確認済みです。自動設定では Origin のセッションに後者を使います。<code>--deconvolve off</code> で無効にできます。<a href="../how-it-works.html#learned">仕組み</a>。</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="technical">
+  <div class="wrap">
+    <h2>The technical details</h2>
+    <p class="intro measure">Everything above is all you need to get a good picture. This section is for people who want the numbers: how fast it is, how it measures up against other software, and how to install it from source. Open any part to read it.</p>
+
+    <details class="tech" id="time">
+      <summary>Speed and memory: a night of frames in about a minute</summary>
     <p class="intro measure">オメガ星雲 114 フレーム、8 コアのノート PC で、生ファイルから完成画像まで <strong>62 秒</strong>（10 月初めは 89 秒）。赤いブロックが画像の見栄えを良くする部分で、残りは 114 フレームの位置を揃える処理です。</p>
 
     <div class="run" role="img" aria-label="62 秒の内訳を示すバー：読み込みと評価 13.7 秒、位置合わせ 1.6 秒、整列とスタック 22.0 秒、仕上げ 18.1 秒、ディスクと準備 6.3 秒">
@@ -197,38 +322,10 @@
     </div>
     <p class="plain measure">フレームは1枚ずつ処理されるため、500 フレームでも 50 フレームとほぼ同じメモリで済みます。実行中の一時ファイルはフレームあたり約 100 MB のディスクを使います。メモリに余裕がある場合は、位置合わせ済みフレームを代わりにメモリ上に保持し、常に 5 分の 1 の空きを残します。</p>
     <p class="plain measure"><strong>速い理由。</strong>特に重い処理のうち 80 以上は Python ではなくコンパイル済みの Rust です。標準のスタック合成は置き換え前の NumPy コードより約 37 倍、ホットピクセル修復は 25〜55 倍、背景の当てはめは約 31 倍速く、そのほとんどは以前とまったく同じ数値を返します。フレーム処理は CPU の実際の振る舞いに合わせて、物理コアの 4 分の 3 に 1 コア 1 ワーカーを割り当てます。また同じ天体の複数夜は、夜ごとではなく一度だけ仕上げます。オリオン大星雲の 7 セッションは 15 分から約 8 分になりました。</p>
-  </div>
-</section>
+    </details>
 
-<section id="app">
-  <div class="wrap">
-    <h2>処理を見守るか、設定を省略するか</h2>
-    <p class="intro measure">フレームのフォルダを指定し、何を撮影したかを選んで（またはアプリに判断させて）、「開始」を押すだけです。すべての設定に1行の説明があり、残りは既定値が対象に合わせて選びます。以下は、後述の比較で使ったひまわり銀河のフレームをスタックしたときの実際の画面です。Celestron Origin の画像処理は初めてですか？<a href="stack-celestron-origin.html">ステップ・バイ・ステップのガイド</a>では、望遠鏡が保存するセッションフォルダから説明しています。</p>
-
-    <div class="shots">
-      <figure class="shot big">
-        <picture><source type="image/webp" srcset="../img/app-running-800.webp 800w, ../img/app-running-1200.webp 1200w, ../img/app-running-1600.webp 1600w" sizes="(min-width: 1424px) 1176px, calc(100vw - 2 * clamp(20px, 5vw, 72px))"><img src="../img/app-running.png" width="1600" height="1176" loading="lazy" alt="実行中の OriginStack ウィンドウ。左側にフォルダーと出力、対象の種類と実行モードを選ぶ画像カード、完了としてマークされた 4 つ中 3 つのパイプライン段階、その下にログ。右側には後処理の途中にあるヒマワリ銀河のプレビューと、フレームごとのスコアの表。"></picture>
-        <figcaption>ひまわり銀河の処理途中。フェーズ 1〜3 が完了し、プレビューは仕上げの各ステップの進行に合わせて更新されます。</figcaption>
-      </figure>
-      <figure class="shot s7">
-        <picture><source type="image/webp" srcset="../img/app-setup-800.webp 800w, ../img/app-setup-1200.webp 1200w, ../img/app-setup-1600.webp 1600w" sizes="(max-width: 800px) calc(100vw - 40px), 57vw"><img src="../img/app-setup.png" width="1600" height="1176" loading="lazy" alt="実行前の OriginStack のウィンドウ：選択したフォルダとそのフレーム数、その下にセッションファイルから読み取った対象名。自動検出、銀河（おすすめ表示付き）、星雲、星団、星野、彗星の画像カード、最高品質とクイックルックの選択、プレビューに表示された銀河の作例、そしてフレーム、対象、モード、変更した設定、出力ファイルをまとめた「今回の実行」の概要。"></picture>
-        <figcaption>実行前。フォルダを選ぶと、アプリがフレーム数を数え、セッションから対象を読み取ってカードを提案します。プレビューには作例が表示され、「今回の実行」に「開始」で何が行われるかが正確に示されます。</figcaption>
-      </figure>
-      <figure class="shot s5">
-        <picture><source type="image/webp" srcset="../img/app-done-800.webp 800w" sizes="(max-width: 800px) calc(100vw - 40px), 40vw"><img src="../img/app-done.png" width="800" height="1374" loading="lazy" alt="実行完了後のプレビューとフレームのパネル。ヒマワリ銀河の最終画像と、158 フレーム中 158 フレームを 2 分 25 秒でスタックしたという要約が表示されています。"></picture>
-        <figcaption>完了したら、結果を拡大・移動したり、リニアスタックと完成画像を切り替えて比較したりできます。</figcaption>
-      </figure>
-      <figure class="shot s7">
-        <picture><source type="image/webp" srcset="../img/app-expert-800.webp 800w" sizes="(max-width: 800px) calc(100vw - 40px), 57vw"><img src="../img/app-expert.png" width="800" height="627" loading="lazy" alt="検索ボックスとグループ一覧のある「追加オプション」パネル。厳密な画像コアディション、縞ノイズ除去、歪みモデルなど、位置合わせとスタックのオプションがそれぞれ1行の説明付きで表示されています。"></picture>
-        <figcaption>「追加オプション」にはさらに約 100 個のオプションがあり、それぞれ1行の説明と検索ボックスで探せます。使用頻度の低いものは「上級オプション」にチェックを入れるまで非表示です。</figcaption>
-      </figure>
-    </div>
-  </div>
-</section>
-
-<section id="compare">
-  <div class="wrap">
-    <h2>比較</h2>
+    <details class="tech" id="compare">
+      <summary>How it compares with Siril, DeepSkyStacker, PixInsight and the Origin app</summary>
     <p class="intro measure">Origin が保存したフレームから、1 回の実行で何が得られるか。Astro Pixel Processor を含む全体の表と各ソフトについての注記は<a href="../compare.html">比較ページ</a>にあります。</p>
 
     <table class="wide matrix">
@@ -335,68 +432,11 @@
     </div>
 
     <p class="caveat measure">測定方法：Origin の TIFF はリニアですが大きなペデスタル（底上げ）が乗っているため、最も明るい恒星の中心はクリップしています。各スタックは、画像がリニアな部分で測定したカラーチャンネルごとのゲイン1つで OriginStack の明るさのスケールに合わせ、クリップした恒星は除外しました。ノイズの比はそのゲインに依存するため、±5〜10% の幅があるものとして読んでください。1台の望遠鏡による4セッションは小さなサンプルです。<a href="https://github.com/hd152/originstack/blob/main/tools/bench_vs_origin.py">tools/bench_vs_origin.py</a> で、ご自身のフレームで再現できます。</p>
-  </div>
-</section>
+    </details>
 
-<section id="gallery">
-  <div class="wrap">
-    <h2>作例</h2>
-    <p class="intro measure">すべて Celestron Origin の生フレームを OriginStack でスタック・画像処理したもので、測定値 <strong>Bortle 7-9</strong> の空（強い光害、自宅の庭や屋上で、暗い空の観測地ではありません）で撮影しています。画像ごとの測定値と方法は <a href="https://github.com/hd152/originstack#readme">README</a> をご覧ください。</p>
-    <div class="gallery">
-      <figure class="hero"><picture><source type="image/webp" srcset="../img/orion-nebula-m42-celestron-origin-800.webp 800w, ../img/orion-nebula-m42-celestron-origin-1200.webp 1200w, ../img/orion-nebula-m42-celestron-origin-1600.webp 1600w" sizes="(min-width: 1424px) 1176px, calc(100vw - 2 * clamp(20px, 5vw, 72px))"><img src="../img/orion-nebula-m42-celestron-origin.jpg" width="1600" height="1067" loading="lazy" alt="オリオン大星雲：ピンクと灰色のガスの広い雲の中に、暗いダストレーンを伴う明るい白い中心部。"></picture><figcaption><b>星雲</b> オリオン大星雲（M42）、7晩を合成、2時間44分</figcaption></figure>
-      <figure><picture><source type="image/webp" srcset="../img/whirlpool-galaxy-m51-celestron-origin-800.webp 800w, ../img/whirlpool-galaxy-m51-celestron-origin-1200.webp 1200w" sizes="(max-width: 800px) calc(100vw - 40px), 30vw"><img src="../img/whirlpool-galaxy-m51-celestron-origin.jpg" width="1200" height="800" loading="lazy" alt="子持ち銀河：塵の多い腕を持つ正面向きの渦巻銀河と、その下にある小さな伴銀河。"></picture><figcaption><b>銀河</b> 子持ち銀河（M51）、8晩を合成、2時間38分</figcaption></figure>
-      <figure><picture><source type="image/webp" srcset="../img/pleiades-m45-celestron-origin-800.webp 800w, ../img/pleiades-m45-celestron-origin-1200.webp 1200w" sizes="(max-width: 800px) calc(100vw - 40px), 30vw"><img src="../img/pleiades-m45-celestron-origin.jpg" width="1200" height="800" loading="lazy" alt="プレアデス星団：青い反射星雲の筋に包まれた、明るい青白い星々。"></picture><figcaption><b>散開星団</b> プレアデス星団（M45）、15晩を合成、5時間16分</figcaption></figure>
-      <figure><picture><source type="image/webp" srcset="../img/dumbbell-nebula-m27-celestron-origin-800.webp 800w, ../img/dumbbell-nebula-m27-celestron-origin-1200.webp 1200w" sizes="(max-width: 800px) calc(100vw - 40px), 30vw"><img src="../img/dumbbell-nebula-m27-celestron-origin.jpg" width="1200" height="800" loading="lazy" alt="亜鈴状星雲：赤い縁と淡い外側のローブを持つ、青緑色のリンゴの芯のような形。"></picture><figcaption><b>惑星状星雲</b> 亜鈴状星雲（M27）、2晩、9分</figcaption></figure>
-      <figure><picture><source type="image/webp" srcset="../img/messier-15-globular-cluster-celestron-origin-800.webp 800w, ../img/messier-15-globular-cluster-celestron-origin-1200.webp 1200w" sizes="(max-width: 800px) calc(100vw - 40px), 30vw"><img src="../img/messier-15-globular-cluster-celestron-origin.jpg" width="1200" height="800" loading="lazy" alt="球状星団M15：明るい中心部の周りに数千の星が密集した球。"></picture><figcaption><b>球状星団</b> M15、172 &times; 15 秒</figcaption></figure>
-      <figure><picture><source type="image/webp" srcset="../img/comet-c2025-a6-lemmon-celestron-origin-800.webp 800w, ../img/comet-c2025-a6-lemmon-celestron-origin-1200.webp 1200w" sizes="(max-width: 800px) calc(100vw - 40px), 30vw"><img src="../img/comet-c2025-a6-lemmon-celestron-origin.jpg" width="1200" height="800" loading="lazy" alt="レモン彗星：長くまっすぐで、かすかにオレンジ色の尾を持つ明るい白い頭部。"></picture><figcaption><b>彗星</b> C/2025 A6（レモン）、111 &times; 10 秒、彗星基準でスタック</figcaption></figure>
-      <figure><picture><source type="image/webp" srcset="../img/sagittarius-star-cloud-m24-celestron-origin-800.webp 800w, ../img/sagittarius-star-cloud-m24-celestron-origin-1200.webp 1200w" sizes="(max-width: 800px) calc(100vw - 40px), 30vw"><img src="../img/sagittarius-star-cloud-m24-celestron-origin.jpg" width="1200" height="729" loading="lazy" alt="暗い塵の帯が走る、いて座の恒星が密集した領域。"></picture><figcaption><b>星野</b> いて座スタークラウド（M24）、138 &times; 10 秒</figcaption></figure>
-    </div>
-    <p class="plain measure">OriginStack に設定がある天体の種類ごとに1枚ずつ、それぞれ撮影したすべての夜からスタックしました。ほかの作例は<a href="../gallery.html">ギャラリー</a>へ。</p>
-  </div>
-</section>
-
-<section id="get">
-  <div class="wrap">
-    <h2>インストール</h2>
-    <p class="intro measure">????????????????????????????????????????</p>
-    <div class="chooser" aria-label="????????">
-      <label>????????????
-        <select id="chooser-os">
-          <option value="windows">Windows 10/11</option>
-          <option value="mac">macOS</option>
-          <option value="linux">Linux</option>
-        </select>
-      </label>
-      <label>??
-        <select id="chooser-user">
-          <option value="beginner">????????????</option>
-          <option value="cli">??????????????</option>
-        </select>
-      </label>
-    </div>
-    <p class="chooser-output" id="chooser-output">Windows????????????????????</p>
-    <div class="get">
-      <div>
-        <h3>Windows インストーラー</h3>
-        <p>Windows 10 と 11 向けの無料スタックソフトです。<a data-goatcounter-click="release-page-index" href="https://github.com/hd152/originstack/releases/latest">最新リリース</a>からセットアップファイルをダウンロードして実行してください。現在のユーザーだけにインストールされ、スタートメニューの項目とアンインストーラーが追加されます。Python は不要です。</p>
-        <p>インストールしたくない場合は、ポータブル版の exe をお使いください。1 つのファイルだけで、任意のフォルダーや USB メモリから実行できます。起動のたびに自身を展開するため、インストール版より数秒遅れて開きます。</p>
-        <p>zip 版がよい場合は、まず「すべて展開」を行い、展開したフォルダから OriginStack.exe を実行してください。zip の中から直接実行すると失敗します。</p>
-      </div>
-      <div id="mac">
-        <h3>macOS アプリ</h3>
-        <p><a data-goatcounter-click="release-page-index" href="https://github.com/hd152/originstack/releases/latest">最新リリース</a>からお使いの Mac 用の zip をダウンロードしてください：Apple シリコン（M1 以降、macOS 14 以降が必要）なら <code>macos-arm64</code>、Intel Mac なら <code>macos-x86_64</code> です。zip を開き、OriginStack を「アプリケーション」フォルダにドラッグします。Python は不要です。</p>
-        <p>アプリはまだ Apple の署名を受けていないため、初回起動時に macOS がブロックします。OriginStack を Control キーを押しながらクリックして「開く」を選び、もう一度「開く」を選んでください。macOS 15 以降では、一度開こうとした後、「システム設定」の「プライバシーとセキュリティ」で「このまま開く」を選んでください。または、ターミナルでダウンロードのフラグを解除します：</p>
-<pre>xattr -dr com.apple.quarantine /Applications/OriginStack.app</pre>
-        <p>Mac 版は Windows 版に比べて実際の使用実績がまだ少なめです。</p>
-      </div>
-      <div>
-        <h3>Linux バンドル</h3>
-        <p><a data-goatcounter-click="release-page-index" href="https://github.com/hd152/originstack/releases/latest">最新リリース</a>から <code>OriginStack-&lt;version&gt;-linux-x64.tar.gz</code> をダウンロードし、展開してインストーラーを実行してください。現在のユーザーだけにインストールされ、アプリケーションメニューに項目が追加されます。Python も root 権限も不要です。</p>
-<pre>tar xzf OriginStack-*-linux-x64.tar.gz
-cd OriginStack-*-linux-x64
-./install.sh</pre>
-        <p>glibc 2.35 以降（Ubuntu 22.04、Debian 12、Fedora 36 以降）が必要で、Windows 版に比べて実際の使用実績はまだ少なめです。削除するには <code>./install.sh --uninstall</code> を実行してください。</p>
-      </div>
+    <details class="tech" id="source">
+      <summary>Install from source, and everything else it does</summary>
+      <div class="get">
       <div>
         <h3>ソースから</h3>
         <p>Windows、Linux（テスト済み）、macOS（未テスト）で：</p>
@@ -411,17 +451,8 @@ python desktop_app.py</pre>
         <p>バイアス・ダーク・フラットによるキャリブレーション、ホットピクセルと人工衛星の軌跡の除去、シグマクリップなどの外れ値を除外するスタック方式、オプションのドリズル、背景とかぶりの除去、ノイズ除去とデコンボリューション、プレートソルブ、色較正、測光、彗星モード。Celestron Origin やその他のワンショットカラーの天体写真データ向けに、DeepSkyStacker や Siril に代わる無料のソフトをお探しなら、まさにそのために作られています。</p>
         <p>同じ対象の夜は積み重なります。子持ち銀河を5夜分合成すると、最も良い1夜だけの場合より空のノイズが30%少なく、星が12%細くなりました。<code>--merge</code> を使えば、古いフレームを残さずに夜を追加できます。<a href="stack-celestron-origin.html#nights">仕組み</a>。</p>
       </div>
-      <div>
-        <h3>対応形式</h3>
-        <p>Celestron Origin の生ファイル（各セッションフォルダ内の FITS フレームと、その <code>info.json</code>）、およびカラーカメラの FITS、カメラ RAW（Canon、Nikon、Sony など。rawpy が必要）、TIFF、XISF のフレーム。惑星撮影用に SER 動画にも対応しています。1つのフォルダに複数の形式を自由に混在できます。</p>
-        <p>完全にオフラインで使いたい場合は、<code>--offline</code> を指定するか、アプリでチェックを入れてください。OriginStack はネットワーク接続を一切行いません。</p>
       </div>
-      <div id="no-gen-ai">
-        <h3>生成AIは使わず、クラウドも使いません</h3>
-        <p>OriginStack は画像を AI サービスに送ることはなく、画像の内容を生成したり作り出したりすることもありません。処理はこのプロジェクトのために書かれた、文書化された古典的な信号処理で、キャリブレーションや位置合わせから背景除去、ノイズ低減まで、すべてソースコードで確認できます。ほかの天文ソフトウェアもアカウントもクラウドサービスも不要で、使うのは一般的なオープンソースの科学計算ライブラリだけです。</p>
-        <p><code>--denoiser nn</code> と <code>--deconvolve nn</code> の 2 つのオプション手順は、実際の Celestron Origin のセッションで学習した小さなニューラルネットワークを使います（後者は同じ空のより鮮明なサーベイ画像も使って学習）。お使いのコンピューター上で動作し、独立したスタックと照合して、データにない星やディテールを加えないことを確認済みです。自動設定では Origin のセッションに後者を使います。<code>--deconvolve off</code> で無効にできます。<a href="../how-it-works.html#learned">仕組み</a>。</p>
-      </div>
-    </div>
+    </details>
   </div>
 </section>
 </main>
@@ -530,6 +561,16 @@ python desktop_app.py</pre>
   };
   os.addEventListener('change', update);
   user.addEventListener('change', update);
+})();
+</script>
+<script>
+(() => {
+  const open = () => {
+    const el = document.getElementById(location.hash.slice(1));
+    if (el && el.tagName === 'DETAILS') el.open = true;
+    else if (el) { const d = el.closest('details'); if (d) d.open = true; }
+  };
+  addEventListener('hashchange', open); open();
 })();
 </script>
 </body>

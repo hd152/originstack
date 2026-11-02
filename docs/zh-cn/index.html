@@ -85,7 +85,7 @@
     <div class="bar">
       <picture><source type="image/webp" srcset="../img/logo-dark-200.webp 200w, ../img/logo-dark-400.webp 400w" sizes="188px"><img src="../img/logo-dark.png" alt="OriginStack" width="920" height="256"></picture>
       <nav aria-label="章节">
-        <a href="#oneclick">一键</a> <a href="#time">速度</a> <a href="#app">应用</a> <a href="#compare">对比</a> <a href="stack-celestron-origin.html">指南</a> <a href="../advanced.html">高级</a> <a href="../how-it-works.html">工作原理</a> <a href="#get">安装</a>
+        <a href="#how">How it works</a> <a href="#oneclick">What you get</a> <a href="#app">The app</a> <a href="#get">Install</a> <a href="stack-celestron-origin.html">Guide</a> <a href="#technical">Technical details</a>
       </nav>
     </div>
 
@@ -115,7 +115,7 @@
       <span class="cap r">114 帧，已叠加并处理</span>
       <input type="range" min="0" max="100" value="50" aria-label="拖动以对比单帧与最终叠加结果">
     </div>
-    <p class="hero-bridge"><span>从差别看起</span> <a href="#oneclick">看看一键都做了什么&nbsp;→</a></p>
+    <p class="hero-bridge"><span>从差别看起</span> <a href="#how">See how simple it is&nbsp;→</a></p>
     <p class="fine">OriginStack 是免费的。如果它为你省下了一晚上的后期处理时间，你可以<a data-goatcounter-click="support-index" href="https://ko-fi.com/originstack">在 Ko-fi 上打赏</a>。</p>
     </div>
     </div>
@@ -123,6 +123,28 @@
 </header>
 
 <main id="main-content">
+<section id="how">
+  <div class="wrap">
+    <h2>How it works, in three steps</h2>
+    <p class="intro measure">You do not need to know anything about image processing. If you can pick a folder, you can use it.</p>
+    <div class="phases">
+      <div>
+        <h3>1. Pick your folder</h3>
+        <p>Choose the folder your telescope or camera saved. OriginStack counts the frames and works out what you photographed.</p>
+      </div>
+      <div>
+        <h3>2. Press Start</h3>
+        <p>It combines hundreds of short, noisy exposures into one clean picture and then finishes it for you. A night of frames takes about a minute on a normal laptop.</p>
+      </div>
+      <div>
+        <h3>3. Get your picture</h3>
+        <p>You get a finished JPEG ready to share, plus the unprocessed combined image in case you want to edit it further elsewhere.</p>
+      </div>
+    </div>
+    <p class="plain measure">It is free, it runs on your own computer, and it needs no account. It never sends your pictures anywhere.</p>
+  </div>
+</section>
+
 <section id="oneclick">
   <div class="wrap">
     <h2>一键完成全部工作</h2>
@@ -157,9 +179,112 @@
   </div>
 </section>
 
-<section id="time">
+<section id="app">
   <div class="wrap">
-    <h2>一整夜的帧，大约一分钟</h2>
+    <h2>看它工作，或者直接跳过设置</h2>
+    <p class="intro measure">把应用指向一个存放帧的文件夹，说明你拍了什么（或让它自己判断），然后按“开始”。每个设置都有一行说明，其余的由默认值根据你的目标来选择。以下是叠加下文对比中所用向日葵星系帧时的真实界面。刚开始处理 Celestron Origin 图像？<a href="stack-celestron-origin.html">分步指南</a>从望远镜保存的会话文件夹开始讲起。</p>
+
+    <div class="shots">
+      <figure class="shot big">
+        <picture><source type="image/webp" srcset="../img/app-running-800.webp 800w, ../img/app-running-1200.webp 1200w, ../img/app-running-1600.webp 1600w" sizes="(min-width: 1424px) 1176px, calc(100vw - 2 * clamp(20px, 5vw, 72px))"><img src="../img/app-running.png" width="1600" height="1176" loading="lazy" alt="运行期间的 OriginStack 窗口：左侧是文件夹和输出，以及目标类型和运行模式的图片卡片，四个流水线阶段中有三个已标记为完成，下方是日志；右侧是向日葵星系后处理途中的预览，以及每帧得分的表格。"></picture>
+        <figcaption>向日葵星系运行到一半。第 1 至 3 阶段已完成，预览会随着每个成品处理步骤实时更新。</figcaption>
+      </figure>
+      <figure class="shot s7">
+        <picture><source type="image/webp" srcset="../img/app-setup-800.webp 800w, ../img/app-setup-1200.webp 1200w, ../img/app-setup-1600.webp 1600w" sizes="(max-width: 800px) calc(100vw - 40px), 57vw"><img src="../img/app-setup.png" width="1600" height="1176" loading="lazy" alt="运行前的 OriginStack 窗口：已选择一个文件夹，下方显示其帧数和来自会话文件的目标名称；图片卡片包括自动检测、星系（标记为建议）、星云、星团、星场和彗星；可选择完整质量或快速预览；预览中是一张星系示例图像；“本次运行”摘要列出了帧、目标、模式、已更改的设置和输出文件。"></picture>
+        <figcaption>运行前。选择一个文件夹，应用会统计你的帧数、从会话中读取目标并建议一张卡片；预览显示示例结果，“本次运行”准确说明按下“开始”后会做什么。</figcaption>
+      </figure>
+      <figure class="shot s5">
+        <picture><source type="image/webp" srcset="../img/app-done-800.webp 800w" sizes="(max-width: 800px) calc(100vw - 40px), 40vw"><img src="../img/app-done.png" width="800" height="1374" loading="lazy" alt="运行结束后的预览和帧面板，显示向日葵星系的最终图像和摘要：158 帧全部叠加，用时 2 分 25 秒。"></picture>
+        <figcaption>完成后，你可以缩放和平移结果，或在线性叠加与成品图像之间滑动对比。</figcaption>
+      </figure>
+      <figure class="shot s7">
+        <picture><source type="image/webp" srcset="../img/app-expert-800.webp 800w" sizes="(max-width: 800px) calc(100vw - 40px), 57vw"><img src="../img/app-expert.png" width="800" height="627" loading="lazy" alt="“其他选项”面板，带有搜索框和分组列表，显示配准与叠加选项，例如理想图像叠加、去除条纹和畸变模型，每项都有一行说明。"></picture>
+        <figcaption>“其他选项”下还有大约一百个选项，每个都有一行说明，并可通过搜索框查找；较少用的选项在勾选“专家选项”之前保持隐藏。</figcaption>
+      </figure>
+    </div>
+  </div>
+</section>
+
+<section id="gallery">
+  <div class="wrap">
+    <h2>作品展示</h2>
+    <p class="intro measure">全部来自 Celestron Origin 的原始帧，由 OriginStack 叠加和处理，拍摄于实测为 <strong>波特尔 7-9 级</strong> 的天空下（严重光污染，后院/屋顶，并非暗夜地点）。每张图像的测量值和方法见 <a href="https://github.com/hd152/originstack#readme">README</a>。</p>
+    <div class="gallery">
+      <figure class="hero"><picture><source type="image/webp" srcset="../img/orion-nebula-m42-celestron-origin-800.webp 800w, ../img/orion-nebula-m42-celestron-origin-1200.webp 1200w, ../img/orion-nebula-m42-celestron-origin-1600.webp 1600w" sizes="(min-width: 1424px) 1176px, calc(100vw - 2 * clamp(20px, 5vw, 72px))"><img src="../img/orion-nebula-m42-celestron-origin.jpg" width="1600" height="1067" loading="lazy" alt="猎户座大星云：明亮的白色核心带有暗色尘埃带，位于一片宽广的粉色与灰色气体云中。"></picture><figcaption><b>星云</b> 猎户座大星云（M42），七晚合成，2 小时 44 分钟</figcaption></figure>
+      <figure><picture><source type="image/webp" srcset="../img/whirlpool-galaxy-m51-celestron-origin-800.webp 800w, ../img/whirlpool-galaxy-m51-celestron-origin-1200.webp 1200w" sizes="(max-width: 800px) calc(100vw - 40px), 30vw"><img src="../img/whirlpool-galaxy-m51-celestron-origin.jpg" width="1200" height="800" loading="lazy" alt="涡状星系：一个正向的旋涡星系，旋臂中布满尘埃，下方是它较小的伴星系。"></picture><figcaption><b>星系</b> 涡状星系（M51），八晚合成，2 小时 38 分钟</figcaption></figure>
+      <figure><picture><source type="image/webp" srcset="../img/pleiades-m45-celestron-origin-800.webp 800w, ../img/pleiades-m45-celestron-origin-1200.webp 1200w" sizes="(max-width: 800px) calc(100vw - 40px), 30vw"><img src="../img/pleiades-m45-celestron-origin.jpg" width="1200" height="800" loading="lazy" alt="昴星团：明亮的蓝白色恒星，被一缕缕蓝色反射星云环绕。"></picture><figcaption><b>疏散星团</b> 昴星团（M45），十五晚合成，5 小时 16 分钟</figcaption></figure>
+      <figure><picture><source type="image/webp" srcset="../img/dumbbell-nebula-m27-celestron-origin-800.webp 800w, ../img/dumbbell-nebula-m27-celestron-origin-1200.webp 1200w" sizes="(max-width: 800px) calc(100vw - 40px), 30vw"><img src="../img/dumbbell-nebula-m27-celestron-origin.jpg" width="1200" height="800" loading="lazy" alt="哑铃星云：蓝绿色的苹果核形状，边缘呈红色，外侧有较暗的叶状结构。"></picture><figcaption><b>行星状星云</b> 哑铃星云（M27），两晚，9 分钟</figcaption></figure>
+      <figure><picture><source type="image/webp" srcset="../img/messier-15-globular-cluster-celestron-origin-800.webp 800w, ../img/messier-15-globular-cluster-celestron-origin-1200.webp 1200w" sizes="(max-width: 800px) calc(100vw - 40px), 30vw"><img src="../img/messier-15-globular-cluster-celestron-origin.jpg" width="1200" height="800" loading="lazy" alt="球状星团 M15：数千颗恒星密集成球，围绕着明亮的核心。"></picture><figcaption><b>球状星团</b> M15，172 &times; 15 秒</figcaption></figure>
+      <figure><picture><source type="image/webp" srcset="../img/comet-c2025-a6-lemmon-celestron-origin-800.webp 800w, ../img/comet-c2025-a6-lemmon-celestron-origin-1200.webp 1200w" sizes="(max-width: 800px) calc(100vw - 40px), 30vw"><img src="../img/comet-c2025-a6-lemmon-celestron-origin.jpg" width="1200" height="800" loading="lazy" alt="列蒙彗星：明亮的白色彗头，拖着一条又长又直、略带橙色的彗尾。"></picture><figcaption><b>彗星</b> C/2025 A6（列蒙），111 &times; 10 秒，以彗星为基准叠加</figcaption></figure>
+      <figure><picture><source type="image/webp" srcset="../img/sagittarius-star-cloud-m24-celestron-origin-800.webp 800w, ../img/sagittarius-star-cloud-m24-celestron-origin-1200.webp 1200w" sizes="(max-width: 800px) calc(100vw - 40px), 30vw"><img src="../img/sagittarius-star-cloud-m24-celestron-origin.jpg" width="1200" height="729" loading="lazy" alt="人马座一片密集的星场，带有暗尘埃带。"></picture><figcaption><b>星野</b> 人马座恒星云（M24），138 &times; 10 秒</figcaption></figure>
+    </div>
+    <p class="plain measure">OriginStack 为每类有设置的目标各选一张，每张都叠加了该目标所有的观测夜。更多作品见<a href="../gallery.html">作品集</a>。</p>
+  </div>
+</section>
+
+<section id="get">
+  <div class="wrap">
+    <h2>安装</h2>
+    <p class="intro measure">???????????????????????????</p>
+    <div class="chooser" aria-label="?????">
+      <label>????
+        <select id="chooser-os">
+          <option value="windows">Windows 10/11</option>
+          <option value="mac">macOS</option>
+          <option value="linux">Linux</option>
+        </select>
+      </label>
+      <label>????
+        <select id="chooser-user">
+          <option value="beginner">??????</option>
+          <option value="cli">???????</option>
+        </select>
+      </label>
+    </div>
+    <p class="chooser-output" id="chooser-output">Windows ??????????????</p>
+    <div class="get">
+      <div>
+        <h3>Windows 安装程序</h3>
+        <p>适用于 Windows 10 和 11 的免费叠加软件。从<a data-goatcounter-click="release-page-index" href="https://github.com/hd152/originstack/releases/latest">最新版本</a>下载安装文件并运行。它只为当前用户安装，会添加开始菜单项和卸载程序，无需 Python。</p>
+        <p>不想安装？便携版 exe 只是一个文件，可以从任意文件夹或 U 盘运行。它每次启动时都会先自行解压，因此打开速度比安装版慢几秒。</p>
+        <p>更喜欢 zip 包？请先使用“全部解压缩”，再从解压后的文件夹中运行 OriginStack.exe。直接在 zip 内运行会失败。</p>
+      </div>
+      <div id="mac">
+        <h3>macOS 应用</h3>
+        <p>从<a data-goatcounter-click="release-page-index" href="https://github.com/hd152/originstack/releases/latest">最新版本</a>下载适合你的 Mac 的 zip：Apple 芯片（M1 及更新，需要 macOS 14 或更高版本）选择 <code>macos-arm64</code>，Intel Mac 选择 <code>macos-x86_64</code>。打开 zip 并将 OriginStack 拖入“应用程序”。无需 Python。</p>
+        <p>应用尚未经过 Apple 签名，因此 macOS 会阻止首次启动。按住 Control 点按 OriginStack 并选择“打开”，然后再次选择“打开”；在 macOS 15 及更高版本上，先尝试打开一次，然后在“系统设置”&gt;“隐私与安全性”中选择“仍要打开”。也可以在“终端”中清除下载标记：</p>
+<pre>xattr -dr com.apple.quarantine /Applications/OriginStack.app</pre>
+        <p>Mac 版本的实际使用经验少于 Windows 版本。</p>
+      </div>
+      <div>
+        <h3>Linux 软件包</h3>
+        <p>从<code>OriginStack-&lt;version&gt;-linux-x64.tar.gz</code>，<a data-goatcounter-click="release-page-index" href="https://github.com/hd152/originstack/releases/latest">最新版本</a>页面下载解压后运行安装程序。它只为当前用户安装，会添加应用程序菜单项，无需 Python 或 root 权限。</p>
+<pre>tar xzf OriginStack-*-linux-x64.tar.gz
+cd OriginStack-*-linux-x64
+./install.sh</pre>
+        <p>需要 glibc 2.35 或更新版本（Ubuntu 22.04、Debian 12、Fedora 36 及更高版本），实际使用经验少于 Windows 版本。运行 <code>./install.sh --uninstall</code> 即可卸载。</p>
+      </div>
+      <div>
+        <h3>支持的格式</h3>
+        <p>Celestron Origin 原始文件（每个会话文件夹中的 FITS 帧及其 <code>info.json</code>），以及彩色相机的 FITS、相机 RAW（Canon、Nikon、Sony 等，需要 rawpy）、TIFF 和 XISF 帧。行星摄影支持 SER 视频。同一文件夹中可以随意混用各种格式。</p>
+        <p>想要完全离线？传入 <code>--offline</code>，或在应用中勾选，OriginStack 就不会发出任何网络请求。</p>
+      </div>
+      <div id="no-gen-ai">
+        <h3>不使用生成式 AI，不上云</h3>
+        <p>OriginStack 从不把你的图像发送给任何 AI 服务，也从不生成或臆造图像内容。它的处理流程是为本项目编写、有文档说明的经典信号处理，从校准、对齐到背景去除和降噪，全部可以在源代码中查看。它不需要其他天文软件，不需要账户，也不需要云服务，只用常见的开源科学计算库。</p>
+        <p><code>--denoiser nn</code> 和 <code>--deconvolve nn</code> 这两个可选步骤使用在真实 Celestron Origin 会话上训练的小型神经网络（后者还用同一片天空更清晰的巡天图像训练）。它们在您自己的电脑上运行，并已用独立叠加图像核对，确认不会添加数据中没有的星点或细节。自动设置对 Origin 的会话使用后者；<code>--deconvolve off</code> 可将其关闭。<a href="../how-it-works.html#learned">工作原理</a>。</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="technical">
+  <div class="wrap">
+    <h2>The technical details</h2>
+    <p class="intro measure">Everything above is all you need to get a good picture. This section is for people who want the numbers: how fast it is, how it measures up against other software, and how to install it from source. Open any part to read it.</p>
+
+    <details class="tech" id="time">
+      <summary>Speed and memory: a night of frames in about a minute</summary>
     <p class="intro measure">欧米茄星云，114 帧，在一台 8 核笔记本电脑上：从原始文件到成品图像只需 <strong>62 秒</strong>，10 月初为 89 秒。红色部分是让图像变好看的步骤；其余时间用于让 114 帧对齐。</p>
 
     <div class="run" role="img" aria-label="条形图，显示 62 秒的构成：加载与评分 13.7 秒、配准 1.6 秒、对齐与叠加 22.0 秒、成品处理 18.1 秒、磁盘与准备 6.3 秒">
@@ -197,38 +322,10 @@
     </div>
     <p class="plain measure">各帧逐一处理，因此 500 帧所需的内存与 50 帧大致相同。运行期间，临时文件每帧约占用 100 MB 磁盘；内存足够时，对齐后的帧会改为保存在内存中，并始终保留五分之一的内存空闲。</p>
     <p class="plain measure"><strong>为什么这么快。</strong>80 多个最耗时的步骤是编译后的 Rust 代码而不是 Python：默认的叠加合成比它取代的 NumPy 代码快约 37 倍，热像素修复快 25 到 55 倍，背景拟合快约 31 倍，而且大多数给出的结果与之前完全相同。帧处理按照 CPU 的实际表现来安排，在四分之三的核心上每个核心运行一个工作进程；同一目标的多个夜晚只做一次后期，而不是每晚各做一次：七个猎户座大星云的拍摄从 15 分钟缩短到约 8 分钟。</p>
-  </div>
-</section>
+    </details>
 
-<section id="app">
-  <div class="wrap">
-    <h2>看它工作，或者直接跳过设置</h2>
-    <p class="intro measure">把应用指向一个存放帧的文件夹，说明你拍了什么（或让它自己判断），然后按“开始”。每个设置都有一行说明，其余的由默认值根据你的目标来选择。以下是叠加下文对比中所用向日葵星系帧时的真实界面。刚开始处理 Celestron Origin 图像？<a href="stack-celestron-origin.html">分步指南</a>从望远镜保存的会话文件夹开始讲起。</p>
-
-    <div class="shots">
-      <figure class="shot big">
-        <picture><source type="image/webp" srcset="../img/app-running-800.webp 800w, ../img/app-running-1200.webp 1200w, ../img/app-running-1600.webp 1600w" sizes="(min-width: 1424px) 1176px, calc(100vw - 2 * clamp(20px, 5vw, 72px))"><img src="../img/app-running.png" width="1600" height="1176" loading="lazy" alt="运行期间的 OriginStack 窗口：左侧是文件夹和输出，以及目标类型和运行模式的图片卡片，四个流水线阶段中有三个已标记为完成，下方是日志；右侧是向日葵星系后处理途中的预览，以及每帧得分的表格。"></picture>
-        <figcaption>向日葵星系运行到一半。第 1 至 3 阶段已完成，预览会随着每个成品处理步骤实时更新。</figcaption>
-      </figure>
-      <figure class="shot s7">
-        <picture><source type="image/webp" srcset="../img/app-setup-800.webp 800w, ../img/app-setup-1200.webp 1200w, ../img/app-setup-1600.webp 1600w" sizes="(max-width: 800px) calc(100vw - 40px), 57vw"><img src="../img/app-setup.png" width="1600" height="1176" loading="lazy" alt="运行前的 OriginStack 窗口：已选择一个文件夹，下方显示其帧数和来自会话文件的目标名称；图片卡片包括自动检测、星系（标记为建议）、星云、星团、星场和彗星；可选择完整质量或快速预览；预览中是一张星系示例图像；“本次运行”摘要列出了帧、目标、模式、已更改的设置和输出文件。"></picture>
-        <figcaption>运行前。选择一个文件夹，应用会统计你的帧数、从会话中读取目标并建议一张卡片；预览显示示例结果，“本次运行”准确说明按下“开始”后会做什么。</figcaption>
-      </figure>
-      <figure class="shot s5">
-        <picture><source type="image/webp" srcset="../img/app-done-800.webp 800w" sizes="(max-width: 800px) calc(100vw - 40px), 40vw"><img src="../img/app-done.png" width="800" height="1374" loading="lazy" alt="运行结束后的预览和帧面板，显示向日葵星系的最终图像和摘要：158 帧全部叠加，用时 2 分 25 秒。"></picture>
-        <figcaption>完成后，你可以缩放和平移结果，或在线性叠加与成品图像之间滑动对比。</figcaption>
-      </figure>
-      <figure class="shot s7">
-        <picture><source type="image/webp" srcset="../img/app-expert-800.webp 800w" sizes="(max-width: 800px) calc(100vw - 40px), 57vw"><img src="../img/app-expert.png" width="800" height="627" loading="lazy" alt="“其他选项”面板，带有搜索框和分组列表，显示配准与叠加选项，例如理想图像叠加、去除条纹和畸变模型，每项都有一行说明。"></picture>
-        <figcaption>“其他选项”下还有大约一百个选项，每个都有一行说明，并可通过搜索框查找；较少用的选项在勾选“专家选项”之前保持隐藏。</figcaption>
-      </figure>
-    </div>
-  </div>
-</section>
-
-<section id="compare">
-  <div class="wrap">
-    <h2>对比</h2>
+    <details class="tech" id="compare">
+      <summary>How it compares with Siril, DeepSkyStacker, PixInsight and the Origin app</summary>
     <p class="intro measure">从 Origin 保存的帧出发，一次运行能得到什么。包含 Astro Pixel Processor 及各软件说明的完整表格见<a href="../compare.html">对比页面</a>。</p>
 
     <table class="wide matrix">
@@ -335,68 +432,11 @@
     </div>
 
     <p class="caveat measure">测量方法：Origin 的 TIFF 是线性的，但带有很大的基底偏移，因此最亮的星核会被截断；每个叠加结果都以每个颜色通道一个增益（在图像线性的区域测得）换算到 OriginStack 的亮度尺度上，并排除被截断的恒星。噪声比依赖于这一增益，因此请按正负 5% 到 10% 理解。来自同一台望远镜的四个会话样本量很小。<a href="https://github.com/hd152/originstack/blob/main/tools/bench_vs_origin.py">tools/bench_vs_origin.py</a> 可以在你自己的帧上重复这一测量。</p>
-  </div>
-</section>
+    </details>
 
-<section id="gallery">
-  <div class="wrap">
-    <h2>作品展示</h2>
-    <p class="intro measure">全部来自 Celestron Origin 的原始帧，由 OriginStack 叠加和处理，拍摄于实测为 <strong>波特尔 7-9 级</strong> 的天空下（严重光污染，后院/屋顶，并非暗夜地点）。每张图像的测量值和方法见 <a href="https://github.com/hd152/originstack#readme">README</a>。</p>
-    <div class="gallery">
-      <figure class="hero"><picture><source type="image/webp" srcset="../img/orion-nebula-m42-celestron-origin-800.webp 800w, ../img/orion-nebula-m42-celestron-origin-1200.webp 1200w, ../img/orion-nebula-m42-celestron-origin-1600.webp 1600w" sizes="(min-width: 1424px) 1176px, calc(100vw - 2 * clamp(20px, 5vw, 72px))"><img src="../img/orion-nebula-m42-celestron-origin.jpg" width="1600" height="1067" loading="lazy" alt="猎户座大星云：明亮的白色核心带有暗色尘埃带，位于一片宽广的粉色与灰色气体云中。"></picture><figcaption><b>星云</b> 猎户座大星云（M42），七晚合成，2 小时 44 分钟</figcaption></figure>
-      <figure><picture><source type="image/webp" srcset="../img/whirlpool-galaxy-m51-celestron-origin-800.webp 800w, ../img/whirlpool-galaxy-m51-celestron-origin-1200.webp 1200w" sizes="(max-width: 800px) calc(100vw - 40px), 30vw"><img src="../img/whirlpool-galaxy-m51-celestron-origin.jpg" width="1200" height="800" loading="lazy" alt="涡状星系：一个正向的旋涡星系，旋臂中布满尘埃，下方是它较小的伴星系。"></picture><figcaption><b>星系</b> 涡状星系（M51），八晚合成，2 小时 38 分钟</figcaption></figure>
-      <figure><picture><source type="image/webp" srcset="../img/pleiades-m45-celestron-origin-800.webp 800w, ../img/pleiades-m45-celestron-origin-1200.webp 1200w" sizes="(max-width: 800px) calc(100vw - 40px), 30vw"><img src="../img/pleiades-m45-celestron-origin.jpg" width="1200" height="800" loading="lazy" alt="昴星团：明亮的蓝白色恒星，被一缕缕蓝色反射星云环绕。"></picture><figcaption><b>疏散星团</b> 昴星团（M45），十五晚合成，5 小时 16 分钟</figcaption></figure>
-      <figure><picture><source type="image/webp" srcset="../img/dumbbell-nebula-m27-celestron-origin-800.webp 800w, ../img/dumbbell-nebula-m27-celestron-origin-1200.webp 1200w" sizes="(max-width: 800px) calc(100vw - 40px), 30vw"><img src="../img/dumbbell-nebula-m27-celestron-origin.jpg" width="1200" height="800" loading="lazy" alt="哑铃星云：蓝绿色的苹果核形状，边缘呈红色，外侧有较暗的叶状结构。"></picture><figcaption><b>行星状星云</b> 哑铃星云（M27），两晚，9 分钟</figcaption></figure>
-      <figure><picture><source type="image/webp" srcset="../img/messier-15-globular-cluster-celestron-origin-800.webp 800w, ../img/messier-15-globular-cluster-celestron-origin-1200.webp 1200w" sizes="(max-width: 800px) calc(100vw - 40px), 30vw"><img src="../img/messier-15-globular-cluster-celestron-origin.jpg" width="1200" height="800" loading="lazy" alt="球状星团 M15：数千颗恒星密集成球，围绕着明亮的核心。"></picture><figcaption><b>球状星团</b> M15，172 &times; 15 秒</figcaption></figure>
-      <figure><picture><source type="image/webp" srcset="../img/comet-c2025-a6-lemmon-celestron-origin-800.webp 800w, ../img/comet-c2025-a6-lemmon-celestron-origin-1200.webp 1200w" sizes="(max-width: 800px) calc(100vw - 40px), 30vw"><img src="../img/comet-c2025-a6-lemmon-celestron-origin.jpg" width="1200" height="800" loading="lazy" alt="列蒙彗星：明亮的白色彗头，拖着一条又长又直、略带橙色的彗尾。"></picture><figcaption><b>彗星</b> C/2025 A6（列蒙），111 &times; 10 秒，以彗星为基准叠加</figcaption></figure>
-      <figure><picture><source type="image/webp" srcset="../img/sagittarius-star-cloud-m24-celestron-origin-800.webp 800w, ../img/sagittarius-star-cloud-m24-celestron-origin-1200.webp 1200w" sizes="(max-width: 800px) calc(100vw - 40px), 30vw"><img src="../img/sagittarius-star-cloud-m24-celestron-origin.jpg" width="1200" height="729" loading="lazy" alt="人马座一片密集的星场，带有暗尘埃带。"></picture><figcaption><b>星野</b> 人马座恒星云（M24），138 &times; 10 秒</figcaption></figure>
-    </div>
-    <p class="plain measure">OriginStack 为每类有设置的目标各选一张，每张都叠加了该目标所有的观测夜。更多作品见<a href="../gallery.html">作品集</a>。</p>
-  </div>
-</section>
-
-<section id="get">
-  <div class="wrap">
-    <h2>安装</h2>
-    <p class="intro measure">???????????????????????????</p>
-    <div class="chooser" aria-label="?????">
-      <label>????
-        <select id="chooser-os">
-          <option value="windows">Windows 10/11</option>
-          <option value="mac">macOS</option>
-          <option value="linux">Linux</option>
-        </select>
-      </label>
-      <label>????
-        <select id="chooser-user">
-          <option value="beginner">??????</option>
-          <option value="cli">???????</option>
-        </select>
-      </label>
-    </div>
-    <p class="chooser-output" id="chooser-output">Windows ??????????????</p>
-    <div class="get">
-      <div>
-        <h3>Windows 安装程序</h3>
-        <p>适用于 Windows 10 和 11 的免费叠加软件。从<a data-goatcounter-click="release-page-index" href="https://github.com/hd152/originstack/releases/latest">最新版本</a>下载安装文件并运行。它只为当前用户安装，会添加开始菜单项和卸载程序，无需 Python。</p>
-        <p>不想安装？便携版 exe 只是一个文件，可以从任意文件夹或 U 盘运行。它每次启动时都会先自行解压，因此打开速度比安装版慢几秒。</p>
-        <p>更喜欢 zip 包？请先使用“全部解压缩”，再从解压后的文件夹中运行 OriginStack.exe。直接在 zip 内运行会失败。</p>
-      </div>
-      <div id="mac">
-        <h3>macOS 应用</h3>
-        <p>从<a data-goatcounter-click="release-page-index" href="https://github.com/hd152/originstack/releases/latest">最新版本</a>下载适合你的 Mac 的 zip：Apple 芯片（M1 及更新，需要 macOS 14 或更高版本）选择 <code>macos-arm64</code>，Intel Mac 选择 <code>macos-x86_64</code>。打开 zip 并将 OriginStack 拖入“应用程序”。无需 Python。</p>
-        <p>应用尚未经过 Apple 签名，因此 macOS 会阻止首次启动。按住 Control 点按 OriginStack 并选择“打开”，然后再次选择“打开”；在 macOS 15 及更高版本上，先尝试打开一次，然后在“系统设置”&gt;“隐私与安全性”中选择“仍要打开”。也可以在“终端”中清除下载标记：</p>
-<pre>xattr -dr com.apple.quarantine /Applications/OriginStack.app</pre>
-        <p>Mac 版本的实际使用经验少于 Windows 版本。</p>
-      </div>
-      <div>
-        <h3>Linux 软件包</h3>
-        <p>从<code>OriginStack-&lt;version&gt;-linux-x64.tar.gz</code>，<a data-goatcounter-click="release-page-index" href="https://github.com/hd152/originstack/releases/latest">最新版本</a>页面下载解压后运行安装程序。它只为当前用户安装，会添加应用程序菜单项，无需 Python 或 root 权限。</p>
-<pre>tar xzf OriginStack-*-linux-x64.tar.gz
-cd OriginStack-*-linux-x64
-./install.sh</pre>
-        <p>需要 glibc 2.35 或更新版本（Ubuntu 22.04、Debian 12、Fedora 36 及更高版本），实际使用经验少于 Windows 版本。运行 <code>./install.sh --uninstall</code> 即可卸载。</p>
-      </div>
+    <details class="tech" id="source">
+      <summary>Install from source, and everything else it does</summary>
+      <div class="get">
       <div>
         <h3>从源代码安装</h3>
         <p>适用于 Windows、Linux（已测试）或 macOS（未测试）：</p>
@@ -411,17 +451,8 @@ python desktop_app.py</pre>
         <p>使用偏置场、暗场和平场进行校准，去除热像素和卫星轨迹，σ 裁剪及其他剔除离群值的叠加方法，可选的 Drizzle，背景和梯度去除，降噪和去卷积，星图解算，颜色校准，测光，以及彗星模式。如果你正在为 Celestron Origin 及其他单次曝光彩色（OSC）天文摄影数据寻找 DeepSkyStacker 或 Siril 的免费替代品，它正是为此而生。</p>
         <p>同一目标的多个夜晚可以累加：涡状星系的五个夜晚合并后，天空噪声比其中最好的单夜少 30%，星点窄 12%。用 <code>--merge</code> 继续加入新的夜晚，无需保留旧的帧。<a href="stack-celestron-origin.html#nights">工作原理</a>。</p>
       </div>
-      <div>
-        <h3>支持的格式</h3>
-        <p>Celestron Origin 原始文件（每个会话文件夹中的 FITS 帧及其 <code>info.json</code>），以及彩色相机的 FITS、相机 RAW（Canon、Nikon、Sony 等，需要 rawpy）、TIFF 和 XISF 帧。行星摄影支持 SER 视频。同一文件夹中可以随意混用各种格式。</p>
-        <p>想要完全离线？传入 <code>--offline</code>，或在应用中勾选，OriginStack 就不会发出任何网络请求。</p>
       </div>
-      <div id="no-gen-ai">
-        <h3>不使用生成式 AI，不上云</h3>
-        <p>OriginStack 从不把你的图像发送给任何 AI 服务，也从不生成或臆造图像内容。它的处理流程是为本项目编写、有文档说明的经典信号处理，从校准、对齐到背景去除和降噪，全部可以在源代码中查看。它不需要其他天文软件，不需要账户，也不需要云服务，只用常见的开源科学计算库。</p>
-        <p><code>--denoiser nn</code> 和 <code>--deconvolve nn</code> 这两个可选步骤使用在真实 Celestron Origin 会话上训练的小型神经网络（后者还用同一片天空更清晰的巡天图像训练）。它们在您自己的电脑上运行，并已用独立叠加图像核对，确认不会添加数据中没有的星点或细节。自动设置对 Origin 的会话使用后者；<code>--deconvolve off</code> 可将其关闭。<a href="../how-it-works.html#learned">工作原理</a>。</p>
-      </div>
-    </div>
+    </details>
   </div>
 </section>
 </main>
@@ -530,6 +561,16 @@ python desktop_app.py</pre>
   };
   os.addEventListener('change', update);
   user.addEventListener('change', update);
+})();
+</script>
+<script>
+(() => {
+  const open = () => {
+    const el = document.getElementById(location.hash.slice(1));
+    if (el && el.tagName === 'DETAILS') el.open = true;
+    else if (el) { const d = el.closest('details'); if (d) d.open = true; }
+  };
+  addEventListener('hashchange', open); open();
 })();
 </script>
 </body>
