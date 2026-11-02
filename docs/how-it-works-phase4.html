@@ -144,6 +144,7 @@
   <div class="wrap">
     <h2>Star reduction <small class="step-time">(<code>star_reduce</code>, 0.5&nbsp;s)</small></h2>
     <p class="intro measure">Bright stars spread their light into soft halos that bury the faint detail around them. Star reduction shrinks each star&rsquo;s profile toward a tighter one (here the typical star width goes from 4.3&nbsp;px to about 3.5) without touching what is not star. Turn it off with <code>--no-star-reduce</code>.</p>
+    <p class="intro measure">The widest wings of the very brightest stars are a different problem: they stay above the sky noise for hundreds of pixels. The opt-in <code>--halo-removal</code> with <code>--config halo_removal_method=psf</code> models them from a radial profile measured on your stack, scaled by each star&rsquo;s Gaia magnitude, and subtracts them beyond the core without removing more than the light that is there. See <a href="advanced.html#finish">advanced features</a>.</p>
     <figure class="ba" data-ba>
       <div class="ba-frame">
         <img src="img/p4-star-after.webp" width="1200" height="801" loading="lazy" alt="After star reduction: the same star, tighter, with a smaller halo.">

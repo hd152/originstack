@@ -131,6 +131,12 @@
         <dd><p>When you have no flats, approximates one from a sample of light frames using the same decomposition, since dithering moves stars but not vignetting. Approximate, and opt-in.</p></dd></div>
       <div><dt>Darks matched by temperature<code>--dark-temp-model</code></dt>
         <dd><p>Fits dark current against sensor temperature across a whole dark library and evaluates it at each light's temperature, so a small library can cover a wide range.</p></dd></div>
+      <div><dt>A shipped flat keeps its detail<code>on by default</code></dt>
+        <dd><p>The Origin comes with one pre-averaged flat. The smoothing that suits a single noisy frame was applied to it too, and erased the sensor's real pixel-response pattern. A flat that is one file is now smoothed lightly (4 pixels, not 15); flats of several frames are smoothed as before.</p>
+        <p class="fact">On a 158-frame Sunflower stack the sky was 1.8 to 3.7% smoother at the 16-pixel scale, in all 36 comparisons.</p></dd></div>
+      <div><dt>A dark glow scale fitted per session<code>on by default</code> <code>--config session_dark_scale=false</code></dt>
+        <dd><p>Amplifier glow does not scale with exposure time and depends steeply on sensor temperature, so a dark taken warm over-subtracts it from a session shot cold. A few lights are calibrated and the dark's glow scale is fitted on top of the exposure ratio. It is used only when the fit is tight and the sensor temperature really differs; it triggers on 3 of 11 local sessions.</p>
+        <p class="fact">On a session at 19 to 21 &deg;C against a 31 &deg;C dark the stack had 10 to 13% less structure at the 32 to 64 pixel scale. After background extraction the finished picture changes by about 2%.</p></dd></div>
       <div><dt>Gain and read noise from your own frames<code>automatic with photometry</code></dt>
         <dd><p>Estimates the camera gain and read noise from a pair of bias frames and a pair of flats, for the noise terms in photometry.</p></dd></div>
       <div><dt>Demosaicing with RCD<code>on by default</code> <code>--debayer-method</code></dt>
@@ -197,6 +203,14 @@
         <dd><p>Measures the colour of each catalogued star in the linear stack, fits it against the star's Gaia colour, and scales the channels so a Sun-like star is white. It needs a sky position for the stack and goes online for the catalogue; <code>--offline</code> turns it off.</p></dd></div>
       <div><dt>Annotation<code>--annotate</code></dt>
         <dd><p>Labels named objects and bright stars on a copy of the preview. Goes online when you enable it; <code>--offline</code> turns it off.</p></dd></div>
+      <div><dt>Does faint structure survive?<code>tools/bench_lsb_injection.py</code></dt>
+        <dd><p>Adds a field of faint, smooth, cirrus-like light to a linear stack at a fraction of the noise, runs the finishing steps on it and on the untouched stack, and reports how much of what was added comes back at each size. It also measures the scatter of blank-sky patches against what independent noise would give, which shows how correlated the noise is.</p>
+        <p class="fact">On a real Omega stack the default finishing kept 91 to 106% of injected light at every size from 16 to 1,024 pixels.</p></dd></div>
+      <div><dt>Resolution from two half-stacks<code>--noise-validate</code> <code>tools/eval_frc.py</code></dt>
+        <dd><p>Two stacks built from odd and even frames share the sky and differ in noise. Where they agree is detail the data really holds: the finest period, and the signal-to-noise at each size, with no ground truth. With a denoised copy it also shows at which sizes a denoiser harms more than it helps.</p></dd></div>
+      <div><dt>Star width across the field<code>tools/stack_optics_census.py</code> <code>tools/psf_census.py</code></dt>
+        <dd><p>Measures star width in a grid over a stack or over individual frames, the width in each colour, and the red-to-green shift of star centres with position.</p>
+        <p class="fact">On five Origin stacks the stars were wider along one sensor axis, 12 to 55% from one edge to the other, in the same direction every time: see the equaliser under Finishing the image.</p></dd></div>
     </dl>
   </div>
 </section>
@@ -209,12 +223,19 @@
         <dd><p>Dynamic background extraction fits a smooth surface to sky samples with a robust local regression, admits patches that follow a gradient, and flattens glow that is cut off by the frame edge. In a galaxy or comet mode it protects the object.</p></dd></div>
       <div><dt>Noise reduction<code>--denoiser wavelet</code> <code>--denoiser nn</code></dt>
         <dd><p>A wavelet denoiser that protects elongated structure such as filaments and spiral arms, with an optional variance-stabilising transform. Chosen after benchmarking the alternatives on ground-truth scenes.</p>
+        <p>It estimates the noise of each band separately, because stacked data has correlated noise; one value for every band left most of it. Where a stack was extended with <code>--full-field</code>, the noisier rims are evened out before either denoiser runs.</p>
         <p>Or a small neural network trained on real Origin sessions with independent noise (Noise2Noise), run on your computer.</p>
         <p class="fact">On five targets it was never trained on, it left a tenth of the wavelet denoiser's error, with star widths unchanged.</p></dd></div>
       <div><dt>Deconvolution<code>--deconvolve rl|rl-sv|tv|sparse|nn</code></dt>
         <dd><p>Richardson-Lucy (global or varying across the field), total variation, and a sparse wavelet method. The point-spread function is estimated from your own stars, and stars are protected from ringing.</p>
         <p><code>nn</code> is a learned deconvolver trained on real Origin sessions against sharper survey images of the same sky; it also removes noise. The automatic settings use it for every session from an Origin, mixed with the learned noise reduction (<code>--config nn_deconv_blend=...</code> sets the mix).</p>
         <p class="fact">On the held-out galaxies, finished stars came out 14-16% narrower than with the default chain, with no dark rings, and 94-100% of the faint sources it shows are confirmed in an independent stack. See <a href="how-it-works.html#learned">learned methods</a>.</p></dd></div>
+      <div><dt>Halo subtraction anchored on Gaia<code>--halo-removal</code> <code>--config halo_removal_method=psf</code></dt>
+        <dd><p>A bright star's wings stay above the sky noise for hundreds of pixels. Each star's halo is modelled from a radial profile measured on your own stack and scaled by the star's Gaia magnitude, then subtracted beyond the core and held back wherever it would remove more light than is there. Because the amount comes from the catalogue, a nebula behind a star is not mistaken for halo. Opt-in; it needs a sky position and the Gaia catalogue (cached), and falls back with a note.</p>
+        <p class="fact">On the Pleiades the wings at 40 pixels fell from 16&ndash;23 sigma to 4&ndash;8 and star cores were untouched; on an Orion star inside nebulosity nothing changed. The inner 20 to 50 pixels of the very brightest star keep some streaks.</p></dd></div>
+      <div><dt>A second pass for a tilted focus<code>--deconvolve nn</code> <code>--config nn_tilt_equalise=true</code></dt>
+        <dd><p>Every Origin stack measured has stars that get wider along one sensor axis. The learned deconvolver flattens most of that; this runs it once more per strip, blended in only as far as each strip's stars reach the width of the sharpest strip's. Opt-in, 15 to 35 seconds.</p>
+        <p class="fact">The widest-to-narrowest ratio went from 1.33 to 1.07 on Omega and 1.59 to 1.08 on the Pleiades, with star brightness kept to within 2%. A second pass on the network's own output is outside what it was trained on, so look at a crop before relying on it.</p></dd></div>
       <div><dt>Starless processing<code>--remove-stars</code> <code>--starless-process</code></dt>
         <dd><p>Removes stars by inpainting, saves a starless copy, and can run the denoising on the starless layer alone with the stars added back exactly.</p></dd></div>
       <div><dt>Stretch<code>--stretch ghs</code> <code>--layered-stretch</code></dt>
@@ -279,6 +300,14 @@
         <p>The two green pixels in each 2&times;2 block give a nearly signal-free noise measurement. It differed from the existing estimate by the same factor (1.24) in every frame, so frame weights would have moved by 0.3%. It found something else instead: the camera's stated gain is about five times off, which was making photometry error bars too small.</p></div>
       <div><h3>Faster medians by sampling</h3>
         <p>A strided or random subsample of the debayering statistics gave errors as large as the correction itself, because the data has structure with a four-pixel period and the per-frame noise is around 1,100 ADU. The fix was to measure once per session instead.</p></div>
+      <div><h3>Per-tile weights in the proper coadd</h3>
+        <p>Weighting each frame by its own star width per part of the field would pay only if frames were sharper in different places from one another. Across six sessions the frame-by-frame variation left after removing each frame's seeing and the field's fixed shape was 0 to 3.7% (the bar was 3%, and two sessions just cleared it), worth about 0.4% in sensitivity. The variation is fixed to the sensor, not to the frame. Not built.</p></div>
+      <div><h3>Sharpening the soft side with a classical pass</h3>
+        <p>A Richardson-Lucy pass with a kernel matched to each strip flattened the star-width gradient (ratio 1.35 to 1.08) for 3.5% more noise, but left dark rings around the faint stars. A network pass blended to the sharpest strip's width replaced it.</p></div>
+      <div><h3>Bigger masks around bright stars for the background</h3>
+        <p>Masking bright stars out to where their wings fade into the noise, instead of a 4-pixel dot, halved the dark ring the background fit digs in a simulation with strong halos. On three real stacks the finished picture changed by 0.1 of 255 levels, because the existing emission mask already covers most of the frame. Off by default.</p></div>
+      <div><h3>Averaging the wavelet denoiser over shifts</h3>
+        <p>Four shifted copies cut noise by 4 to 7% on synthetic scenes and by 0.3% on a real Pleiades crop, for four times the time. Available, off by default.</p></div>
     </div>
   </div>
 </section>
