@@ -40,6 +40,22 @@
 </header>
 
 <main>
+<section id="v2-21">
+  <div class="wrap">
+    <h2>2.21 <small class="when">2 November 2026</small></h2>
+    <div class="releases">
+      <article id="v2-21-0"><h3>2.21.0 <span>2 Nov</span></h3>
+        <ul>
+          <li><strong>The flat that ships with the Origin keeps its detail.</strong> It was smoothed as if it were one noisy frame, which erased the sensor&rsquo;s real pixel pattern. On a 158-frame stack the sky came out 1.8 to 3.7% smoother at the 16-pixel scale.</li>
+          <li><strong>Cold sessions get a better dark.</strong> Amplifier glow depends on temperature, so a dark taken warm over-subtracts it from a session shot cold. A few lights are used to fit the glow scale; it only applies when the fit is clear (3 of 11 local sessions). On a session 11&nbsp;&deg;C colder than its dark the stack had 10 to 13% less large-scale blotchiness.</li>
+          <li><strong>Cleaner edges on extended stacks.</strong> With <code>--full-field</code> the rims are covered by fewer frames and are noisier; both denoisers now even that out first. The wavelet denoiser also estimates each band&rsquo;s noise separately, so it no longer leaves most of the noise in correlated data. The preview JPEG is dithered, so smooth denoised areas do not band.</li>
+          <li><strong>New and optional: halo subtraction anchored on Gaia, and a tilt equaliser.</strong> The first models bright stars&rsquo; wide wings from your own stack and the catalogue and takes them out (Pleiades wings at 40 pixels fell from 16&ndash;23 to 4&ndash;8 sigma, nebulae untouched). The second runs the learned sharpening once more where the stars are wider; every Origin stack measured has stars 12 to 55% wider along one sensor axis. Both are off by default; see <a href="advanced.html#finish">advanced features</a> for the limits.</li>
+          <li><strong>Tools that measure rather than guess.</strong> A frame&rsquo;s <em>effective exposure</em> in the report, the finest detail a stack really holds (from two half-stacks), a test that adds faint fake nebulosity and reports how much of it survives, and star-width maps. The full list and the numbers are in the <a href="https://github.com/hd152/originstack/blob/main/CHANGELOG.md">changelog</a>.</li>
+        </ul>
+      </article>
+    </div>
+  </div>
+</section>
 <section id="v2-20">
   <div class="wrap">
     <h2>2.20 <small class="when">1 November 2026</small></h2>
