@@ -6,6 +6,8 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+## [2.21.0] - 2026-11-02
+
 Image-quality work from a research survey of the whole pipeline: two calibration/denoising repairs
 and a per-session dark correction that change results by default, an opt-in Gaia-anchored halo
 remover and a PSF-tilt equaliser, and measuring tools. Most gains are modest on sky-noise-limited
