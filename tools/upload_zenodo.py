@@ -5,6 +5,7 @@
     python tools/upload_zenodo.py MANIFEST.json --publish       # publish every draft of the manifest
     python tools/upload_zenodo.py MANIFEST.json --publish NAME  # publish one
     python tools/upload_zenodo.py MANIFEST.json --status        # what each record's draft looks like
+    python tools/upload_zenodo.py MANIFEST.json --drafts-only   # create the drafts (reserved DOIs), no files
 
 The manifest lists the records::
 
@@ -167,8 +168,12 @@ def check_manifest(m: dict) -> List[str]:
     return out
 
 
-def upload_record(api: Zenodo, rec: dict, state: dict, state_path: str, log=print) -> int:
-    """Create (or reuse) the draft of ``rec``, set its metadata, upload what is not there yet."""
+def upload_record(api: Zenodo, rec: dict, state: dict, state_path: str, log=print,
+                  files: bool = True) -> int:
+    """Create (or reuse) the draft of ``rec``, set its metadata, upload what is not there yet.
+
+    ``files=False`` stops after the metadata: the draft then exists (with its reserved DOI) but holds
+    no files yet."""
     name = rec['name']
     st = state.setdefault(name, {})
     if 'id' not in st:
@@ -181,7 +186,13 @@ def upload_record(api: Zenodo, rec: dict, state: dict, state_path: str, log=prin
     if dep.get('submitted'):
         raise RuntimeError(f'{name}: record {dep_id} is already published; not touching it')
     st['bucket'] = dep['links']['bucket']
-    api.set_metadata(dep_id, rec['metadata'])
+    updated = api.set_metadata(dep_id, rec['metadata'])
+    doi = ((updated.get('metadata') or {}).get('prereserve_doi') or {}).get('doi')
+    if doi:
+        st['reserved_doi'] = doi
+    save_state(state_path, state)
+    if not files:
+        return dep_id
     present = {f['filename']: f for f in api.files(dep_id)}
     for path in rec['files']:
         base = os.path.basename(path)
@@ -225,6 +236,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument('--publish', nargs='*', metavar='NAME',
                     help='publish the named records (all of them when none are named); IRREVERSIBLE')
     ap.add_argument('--check', action='store_true', help='validate the manifest and exit (no network)')
+    ap.add_argument('--drafts-only', action='store_true',
+                    help="create each record's draft and set its metadata, but upload no files")
     a = ap.parse_args(argv)
     with open(a.manifest, encoding='utf-8') as fh:
         manifest = json.load(fh)
@@ -274,6 +287,14 @@ def main(argv: Optional[List[str]] = None) -> int:
             state[r['name']]['published'] = True
             save_state(state_path, state)
             print(f"  {r['name']}: published, DOI {state[r['name']]['doi']}")
+        return 0
+
+    if a.drafts_only:
+        for r in records:
+            upload_record(api, r, state, state_path, files=False)
+            st = state[r['name']]
+            print(f"  {r['name']}: draft {st['id']}  DOI {st.get('reserved_doi', '?')}  {st.get('html', '')}")
+        print('\nDrafts exist (no files uploaded, nothing published).')
         return 0
 
     for r in records:

@@ -59,7 +59,7 @@ class FakeZenodo:
         if method == 'GET' and len(parts) == 4:
             return _Resp(dep)
         if method == 'PUT' and len(parts) == 4:
-            dep['metadata'] = json.loads(body)['metadata']
+            dep['metadata'] = dict(json.loads(body)['metadata'], prereserve_doi={'doi': f'10.5281/zenodo.{dep["id"]}'})
             return _Resp(dep)
         if method == 'GET' and parts[4] == 'files':
             return _Resp(list(dep['files'].values()))
@@ -98,7 +98,8 @@ def test_upload_creates_a_draft_and_verifies(setup):
     rec, fake, api, state_path = setup
     state = {}
     dep_id = uz.upload_record(api, rec, state, state_path, log=lambda *_: None)
-    assert fake.deps[dep_id]['metadata'] == META and not fake.deps[dep_id]['submitted']
+    assert all(fake.deps[dep_id]['metadata'][k] == v for k, v in META.items())
+    assert not fake.deps[dep_id]['submitted']
     assert set(fake.deps[dep_id]['files']) == {'a.zip', 'b.zip'}
     assert uz.verify_record(api, rec, dep_id) == []
     assert json.loads(Path(state_path).read_text())['one']['id'] == dep_id
@@ -170,3 +171,21 @@ def test_retry_on_a_transient_error_then_success(monkeypatch):
         raise urllib.error.HTTPError(req.full_url, 403, 'no', {}, io.BytesIO(b'forbidden'))
     with pytest.raises(RuntimeError, match='HTTP 403'):
         uz.Zenodo('SECRET', opener=hard).get(5)
+
+
+def test_drafts_only_creates_drafts_with_reserved_dois_and_uploads_nothing(setup, tmp_path, monkeypatch, capsys):
+    rec, fake, api, state_path = setup
+    man = tmp_path / 'm.json'
+    man.write_text(json.dumps({'records': [rec]}))
+    monkeypatch.setenv('ZENODO_TOKEN', 'SECRET')
+    monkeypatch.setattr(uz.urllib.request, 'urlopen', fake)
+    assert uz.main([str(man), '--drafts-only']) == 0
+    st = json.loads(Path(state_path).read_text())['one']
+    assert st['reserved_doi'].startswith('10.5281/zenodo.')
+    dep = fake.deps[st['id']]
+    assert dep['files'] == {} and not dep['submitted'] and dep['metadata']['title'] == 'T'
+    assert not [c for c in fake.calls if c[1].startswith('/files/')]
+    assert 'nothing published' in capsys.readouterr().out
+    assert uz.main([str(man)]) == 0                                     # a normal run then uploads into the same draft
+    assert set(fake.deps[st['id']]['files']) == {'a.zip', 'b.zip'}
+    assert len(fake.deps) == 1
