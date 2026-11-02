@@ -2897,8 +2897,10 @@ def build_parser() -> argparse.ArgumentParser:
         dbe_halpha_mask=False,
         # Background sampling masks bright stars out to where their wing sinks below
         # Config.WING_MASK_K pixel sigmas (background.wing_aware_star_mask), not just the
-        # 4 px core. `--config bg_wing_mask=false` restores the compact mask.
-        bg_wing_mask=True,
+        # 4 px core. Off: on Pleiades, Orion and Omega it changed the preview by ~0.1/255
+        # (the emission mask already covers 62-74% of those frames); strong synthetic halos
+        # roughly halve DBE's dark moat. `--config bg_wing_mask=true` turns it on.
+        bg_wing_mask=False,
         # --denoiser wavelet averages over this many grid shifts (cycle spinning, 1-8) for that
         # many times the step's time. Off (1): 4 shifts cut sky noise 4-7% on synthetic scenes but
         # only 0.3% on a real Pleiades crop (31.15 -> 31.05 ADU). `--config wavelet_cycle_spins=4`.

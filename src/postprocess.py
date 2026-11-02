@@ -354,7 +354,7 @@ def _postprocess_early(stacked: np.ndarray, args: argparse.Namespace,
                 pp_star_mask = generate_star_mask(_pp_lum.shape, _pp_sources, fwhm=4.0)
                 if args.verbose:
                     safe_print(f"    Post-processing star mask: {len(_pp_sources)} stars")
-                if getattr(args, 'bg_wing_mask', True):
+                if getattr(args, 'bg_wing_mask', False):
                     _bg_star_mask = wing_aware_star_mask(
                         _pp_lum, _pp_sources, pp_star_mask, verbose=args.verbose)
         except Exception:

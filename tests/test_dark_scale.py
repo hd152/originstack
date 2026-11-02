@@ -104,7 +104,11 @@ def test_opt_out_and_temperature_model_and_short_sessions(tmp_path):
 
 
 def test_implausible_or_noisy_fits_are_refused():
-    assert decide_dark_scale([-0.95] * 6, [0.02] * 6) is None          # |delta| too large
+    assert decide_dark_scale([-1.3] * 6, [0.02] * 6) is None           # would add the dark back
+    assert decide_dark_scale([0.95] * 6, [0.02] * 6) is None           # more glow than the dark has
+    cold = decide_dark_scale([-0.93] * 6, [0.08] * 6)                  # Markarian, 19-21 C
+    assert cold is not None and -0.93 < cold['used'] < -0.9
+    assert decide_dark_scale([-1.1] * 6, [0.02] * 6)['used'] == -1.0   # clamped: scale 0, not negative
     assert decide_dark_scale([-0.4] * 6, [0.15] * 6) is None           # loosely determined
     assert decide_dark_scale([-0.9, -0.1, -0.5, 0.2, -0.7, 0.1], [0.02] * 6) is None  # probes disagree
     assert decide_dark_scale([-0.4] * 3, [0.02] * 3) is None           # too few probes
