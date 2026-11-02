@@ -43,6 +43,16 @@ not `__name__`/root; **OS002** module-level optional-dependency imports in `src/
 **OS004** (warn) every native `#[pyfunction]` needs a test reference; **OS006** (warn) no broad `except Exception: pass` (log at debug instead); **OS005** (warn, `--git`)
 bump `ext/astro_native/Cargo.toml` when the crate source changes.
 
+### Sample sessions and maintenance
+The twelve public sample sessions (Zenodo, CC BY 4.0; page `docs/sample-sessions.html`) double as a regression corpus:
+```bash
+python tools/check_samples.py SAMPLES_DIR [--only 01,11]   # stack and compare with tools/data/samples_baseline.json
+python tools/check_samples.py SAMPLES_DIR --update          # accept new values after an intended change
+python tools/make_sample_session.py SESSION OUT --max-lights 45 --select best
+python tools/upload_zenodo.py MANIFEST.json                 # private drafts; --publish is irreversible
+```
+Releases, the sample-set procedure and the known limits: [dev-notes/maintenance.md](dev-notes/maintenance.md).
+
 ### Run the stacker
 ```bash
 python originstack.py -d lights/ -o stacked.fits
