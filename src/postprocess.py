@@ -1070,6 +1070,26 @@ def postprocess_stack(
                 stacked = (np.float32(_blend) * stacked + np.float32(1.0 - _blend) * _den).astype(np.float32)
                 del _den
             del _pre_nn
+            if _nn_deconv and getattr(args, 'nn_tilt_equalise', False):
+                # The stars are wider along one sensor axis (a tilted PSF, 12-55% on every Origin
+                # stack measured); the deconvolver flattens part of it. A second pass per strip,
+                # stronger where the stars are wider (src/psf_field.py).
+                from src.background import _pixel_noise_sigma
+                from src.psf_field import equalise_tilt
+
+                def _second_pass(seg, strength):
+                    return nn_denoise(seg, strength=strength, model_path=_nn_path,
+                                      restore_sigma=nn_restore, fwhm_range=_fwhm_range,
+                                      star_restore_frac=float(getattr(args, 'nn_deconv_star_restore_frac', 0.4)))
+                _eq_start = time.time()
+                stacked, _eq = equalise_tilt(stacked, _second_pass,
+                                             float(_pixel_noise_sigma(luminance(stacked).astype(np.float32))))
+                if _eq is None:
+                    safe_print("    PSF tilt equalisation: stars not tilted enough (or too few measured) -- skipped")
+                else:
+                    safe_print(f"    PSF tilt equalisation along {_eq['axis']}: strip FWHM {_eq['strip_fwhm']} "
+                               f"-> {_eq['target']} px, blends {_eq['blends']} "
+                               f"({format_time(time.time() - _eq_start)})")
             if _rel is not None:
                 stacked = noise_restore(stacked, _rel, _ped)
             # The preview stretch is solved from the sky noise; keep it at the noise the

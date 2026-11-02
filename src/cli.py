@@ -3009,6 +3009,9 @@ def build_parser() -> argparse.ArgumentParser:
         denoise_nn=False,
         nn_denoise_strength=1.0,
         nn_chroma_nr=False,
+        # --deconvolve nn: a second network pass per strip along the star-width gradient (tilted PSF),
+        # stronger where the stars are wider (psf_field.equalise_tilt). `--config nn_tilt_equalise=true`.
+        nn_tilt_equalise=False,
         nn_restore_sigma=4.0,
         deconvolve_nn=False,     # --deconvolve nn (src/data/nn_deconv.npz at the nn step)
         nn_deconv_restore_sigma=4.0,
