@@ -79,7 +79,8 @@ def fit_glow_delta(cal_blocks: np.ndarray, glow_blocks: np.ndarray
 def decide_dark_scale(deltas: List[float], ses: List[float]) -> Optional[Dict[str, float]]:
     """Session verdict from the per-probe fits, or None to leave the scale alone.
 
-    Accepted only when the median ``delta`` is physical (|delta| < ``DARK_SCALE_MAX_DELTA``),
+    Accepted only when the median ``delta`` is physical (between ``DARK_SCALE_MIN_DELTA`` and
+    ``DARK_SCALE_MAX_DELTA``),
     each fit is tight (median se < ``DARK_SCALE_MAX_SE``) and the probes agree (std below
     ``DARK_SCALE_MAX_SPREAD``). The accepted value is shrunk toward zero by
     ``tau^2 / (tau^2 + se^2)`` and dropped when under ``DARK_SCALE_MIN_APPLY`` (the usual
@@ -90,11 +91,11 @@ def decide_dark_scale(deltas: List[float], ses: List[float]) -> Optional[Dict[st
     se = float(np.median(ses))
     delta = float(np.median(d))
     spread = float(np.std(d))
-    if (abs(delta) >= Config.DARK_SCALE_MAX_DELTA or se >= Config.DARK_SCALE_MAX_SE
-            or spread >= Config.DARK_SCALE_MAX_SPREAD):
+    if (not Config.DARK_SCALE_MIN_DELTA < delta < Config.DARK_SCALE_MAX_DELTA
+            or se >= Config.DARK_SCALE_MAX_SE or spread >= Config.DARK_SCALE_MAX_SPREAD):
         return None
     tau2 = Config.DARK_SCALE_PRIOR_SD ** 2
-    used = delta * tau2 / (tau2 + se ** 2)
+    used = max(delta * tau2 / (tau2 + se ** 2), -1.0)      # a scale below 0 would add the glow back
     if abs(used) < Config.DARK_SCALE_MIN_APPLY:
         return None
     return {'delta': delta, 'se': se, 'spread': spread, 'used': float(used), 'n': len(deltas)}

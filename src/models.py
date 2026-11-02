@@ -163,10 +163,12 @@ class Config:
     DARK_SCALE_MIN_FRAMES = 6        # shorter sessions keep the exposure-ratio scale
     DARK_SCALE_MIN_PROBES = 4        # fits that must succeed before a verdict
     DARK_SCALE_BLOCK = 64            # px: block medians (stars and noise fall out)
-    DARK_SCALE_MAX_DELTA = 0.8       # |fractional change| beyond this is not glow, it is a bad fit
+    DARK_SCALE_MAX_DELTA = 0.8       # a correction above +0.8 is not glow, it is a bad fit
+    DARK_SCALE_MIN_DELTA = -1.15     # below -1 the dark would be added back: refuse (a scale of 0 is -1)
     DARK_SCALE_MAX_SE = 0.1          # median standard error of the fit
     DARK_SCALE_MAX_SPREAD = 0.1      # std of the per-probe fits
-    DARK_SCALE_PRIOR_SD = 0.3        # shrinkage prior: delta * tau^2 / (tau^2 + se^2)
+    DARK_SCALE_PRIOR_SD = 1.0        # shrinkage prior: delta * tau^2 / (tau^2 + se^2); weak, since a cold
+                                     # session's delta is near -1 (Markarian 19-21 C: -0.93 +/- 0.08)
     DARK_SCALE_MIN_APPLY = 0.02      # smaller corrections are left out (warm sessions: unchanged)
     WING_MASK_K = 0.5            # Star-wing mask for background sampling: a star is masked out
                                  # to where its radial profile falls below K x the pixel noise
