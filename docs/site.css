@@ -472,3 +472,12 @@ h2 .when { font-family: var(--text); font-weight: 400; font-size: 1rem; color: v
 .ba .ba-frame.js-off .ba-top { clip-path: inset(0 65% 0 0); }
 .step-time { color: var(--slate); font-size: .95rem; }
 .ba + .measure { margin-top: 18px; }
+
+/* ---------- collapsible technical details on the home page ---------- */
+details.tech { border: 1px solid var(--line); background: #fff; margin-top: 18px; }
+details.tech > summary { cursor: pointer; padding: 16px 20px; font-weight: 600; font-size: 1.1rem; list-style-position: inside; }
+details.tech > summary:hover { background: rgba(0, 0, 0, .03); }
+details.tech[open] > summary { border-bottom: 1px solid var(--line); }
+details.tech > :not(summary) { margin-inline: 20px; }
+details.tech > :last-child { margin-bottom: 20px; }
+details.tech > summary + * { margin-top: 20px; }
