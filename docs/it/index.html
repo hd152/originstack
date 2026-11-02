@@ -97,11 +97,10 @@
     <p class="lede">Indica a OriginStack la cartella salvata dal tuo Celestron Origin, la cartella dei frame di uno Seestar S50 o S50 Pro, o i frame di qualsiasi camera a colori, e premi Avvia. Calibra, allinea e integra, poi rifinisce anche l'immagine: gradienti rimossi, colori calibrati sulle stelle di Gaia, rumore ridotto, stelle ristrette e risultato stirato, con impostazioni scelte per il tuo soggetto. Funziona sul tuo computer e non richiede un account; si collega a internet solo per i dati dei cataloghi stellari e i nomi dei soggetti, e <code>--offline</code> disattiva anche questo.</p>
 
     <div class="actions">
-      <a data-goatcounter-click="download-hero-win" class="btn primary" id="download" href="https://github.com/hd152/originstack/releases/latest">Scarica per Windows</a> <a data-goatcounter-click="source-github-index" class="btn quiet" href="https://github.com/hd152/originstack">Vedi il codice sorgente su GitHub</a>
+      <a data-goatcounter-click="download-hero-win" class="btn primary" id="download" href="https://github.com/hd152/originstack/releases/latest">Scarica per Windows</a> <a data-goatcounter-click="source-github-index" class="btn quiet" href="https://github.com/hd152/originstack">Vedi il codice sorgente su GitHub</a> <a data-goatcounter-click="download-hero-msstore" class="btn quiet" id="store-btn" href="https://apps.microsoft.com/detail/9p7j005gdttn">Scaricalo da Microsoft Store</a>
     </div>
     <p class="platforms">Tutti i download: <a data-goatcounter-click="download-list-win" href="https://github.com/hd152/originstack/releases/latest" data-asset="-setup\.exe$">Windows</a> &middot; <a data-goatcounter-click="download-list-win-portable" href="https://github.com/hd152/originstack/releases/latest" data-asset="-windows-x64-portable\.exe$">Windows (portatile)</a> &middot; <a data-goatcounter-click="download-list-mac-arm64" href="https://github.com/hd152/originstack/releases/latest" data-asset="-macos-arm64\.zip$">Mac (Apple silicon)</a> &middot; <a data-goatcounter-click="download-list-mac-x86_64" href="https://github.com/hd152/originstack/releases/latest" data-asset="-macos-x86_64\.zip$">Mac (Intel)</a> &middot; <a data-goatcounter-click="download-list-linux" href="https://github.com/hd152/originstack/releases/latest" data-asset="-linux-x64\.tar\.gz$">Linux</a>
     </p>
-    <p class="platforms"><a data-goatcounter-click="download-list-msstore" href="https://apps.microsoft.com/detail/9p7j005gdttn">Microsoft Store</a></p>
     <p class="fine" id="fine-win">Windows 10 o 11, 64 bit, gratuito e open source (GPLv3). Il programma di installazione non è ancora firmato digitalmente, quindi SmartScreen potrebbe avvisarti: scegli Ulteriori informazioni, poi Esegui comunque.</p>
     <p class="fine" id="fine-mac" hidden>macOS, gratuito e open source (GPLv3). La versione per Apple silicon richiede macOS 14 o successivo. L'app non è ancora firmata da Apple, quindi macOS blocca il primo avvio: fai Ctrl-clic su OriginStack in Applicazioni e scegli Apri, oppure consentilo in Impostazioni di Sistema, Privacy e sicurezza, Apri comunque. <a href="#mac">Dettagli</a></p>
     <p class="fine" id="fine-linux" hidden>Linux x86-64 con glibc 2.35 o più recente (Ubuntu 22.04, Debian 12, Fedora 36 e successivi), gratuito e open source (GPLv3). Estrai l'archivio ed esegui <code>./install.sh</code>. <a href="#get">Dettagli</a></p>
@@ -486,6 +485,7 @@ python desktop_app.py</pre>
   dl.textContent = T.download.replace('{os}', label);
   dl.setAttribute('data-goatcounter-click', 'download-hero-' + plat);
   if (plat !== 'win') {
+    document.getElementById('store-btn').hidden = true;
     document.getElementById('fine-win').hidden = true;
     document.getElementById(plat === 'linux' ? 'fine-linux' : 'fine-mac').hidden = false;
   }

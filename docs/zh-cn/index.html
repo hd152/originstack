@@ -95,11 +95,10 @@
     <p class="lede">把 OriginStack 指向 Celestron Origin 保存的文件夹、Seestar S50 或 S50 Pro 的帧文件夹，或任意彩色相机的帧，然后点击开始。它会完成校准、对齐和叠加，随后把图像也一并处理好：去除梯度、根据 Gaia 恒星校准颜色、降噪、收缩星点并完成拉伸，所有设置都会根据你的目标自动选择。它在你自己的电脑上运行，无需账户；只有获取星表数据和目标名称时才会联网，<code>--offline</code> 连这些也能关闭。</p>
 
     <div class="actions">
-      <a data-goatcounter-click="download-hero-win" class="btn primary" id="download" href="https://github.com/hd152/originstack/releases/latest">下载 Windows 版</a> <a data-goatcounter-click="source-github-index" class="btn quiet" href="https://github.com/hd152/originstack">在 GitHub 上查看源代码</a>
+      <a data-goatcounter-click="download-hero-win" class="btn primary" id="download" href="https://github.com/hd152/originstack/releases/latest">下载 Windows 版</a> <a data-goatcounter-click="source-github-index" class="btn quiet" href="https://github.com/hd152/originstack">在 GitHub 上查看源代码</a> <a data-goatcounter-click="download-hero-msstore" class="btn quiet" id="store-btn" href="https://apps.microsoft.com/detail/9p7j005gdttn">从 Microsoft Store 获取</a>
     </div>
     <p class="platforms">全部下载：<a data-goatcounter-click="download-list-win" href="https://github.com/hd152/originstack/releases/latest" data-asset="-setup\.exe$">Windows</a> &middot; <a data-goatcounter-click="download-list-win-portable" href="https://github.com/hd152/originstack/releases/latest" data-asset="-windows-x64-portable\.exe$">Windows（便携版）</a> &middot; <a data-goatcounter-click="download-list-mac-arm64" href="https://github.com/hd152/originstack/releases/latest" data-asset="-macos-arm64\.zip$">Mac（Apple 芯片）</a> &middot; <a data-goatcounter-click="download-list-mac-x86_64" href="https://github.com/hd152/originstack/releases/latest" data-asset="-macos-x86_64\.zip$">Mac（Intel）</a> &middot; <a data-goatcounter-click="download-list-linux" href="https://github.com/hd152/originstack/releases/latest" data-asset="-linux-x64\.tar\.gz$">Linux</a>
     </p>
-    <p class="platforms"><a data-goatcounter-click="download-list-msstore" href="https://apps.microsoft.com/detail/9p7j005gdttn">Microsoft Store</a></p>
     <p class="fine" id="fine-win">Windows 10 或 11，64 位，免费，开源（GPLv3）。安装程序尚未进行代码签名，因此 SmartScreen 可能会发出警告：请选择“更多信息”，然后选择“仍要运行”。</p>
     <p class="fine" id="fine-mac" hidden>macOS，免费，开源（GPLv3）。Apple 芯片版本需要 macOS 14 或更高版本。应用尚未经过 Apple 签名，因此 macOS 会阻止首次启动：在“应用程序”中按住 Control 点按 OriginStack 并选择“打开”，或在“系统设置”&gt;“隐私与安全性”中点按“仍要打开”。<a href="#mac">详情</a></p>
     <p class="fine" id="fine-linux" hidden>Linux x86-64，需要 glibc 2.35 或更新版本（Ubuntu 22.04、Debian 12、Fedora 36 及更高版本），免费，开源（GPLv3）。解压后运行 <code>./install.sh</code>。<a href="#get">详情</a></p>
@@ -484,6 +483,7 @@ python desktop_app.py</pre>
   dl.textContent = T.download.replace('{os}', label);
   dl.setAttribute('data-goatcounter-click', 'download-hero-' + plat);
   if (plat !== 'win') {
+    document.getElementById('store-btn').hidden = true;
     document.getElementById('fine-win').hidden = true;
     document.getElementById(plat === 'linux' ? 'fine-linux' : 'fine-mac').hidden = false;
   }
