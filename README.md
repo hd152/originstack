@@ -10,6 +10,7 @@ From a night of raw frames to a finished image on your own computer: no account,
 
 <p align="center">
   <a href="https://github.com/hd152/originstack/releases/latest"><b>⬇ Download for Windows, Mac or Linux</b></a> ·
+  <a href="https://apps.microsoft.com/detail/9p7j005gdttn">Microsoft Store</a> ·
   <a href="https://originstack.site/">Website</a> ·
   <a href="https://originstack.site/origin-vs-originstack.html">Ten before/afters</a> ·
   <a href="https://github.com/hd152/originstack/discussions">Questions</a>
@@ -25,7 +26,7 @@ From a night of raw frames to a finished image on your own computer: no account,
 
 ## Get started
 
-1. **Download** the [latest release](https://github.com/hd152/originstack/releases/latest): `OriginStack-<version>-setup.exe` for Windows, the `macos-arm64` (Apple silicon) or `macos-x86_64` (Intel) zip for a Mac, or the Linux tarball. No Python needed.
+1. **Download** the [latest release](https://github.com/hd152/originstack/releases/latest): `OriginStack-<version>-setup.exe` for Windows, the `macos-arm64` (Apple silicon) or `macos-x86_64` (Intel) zip for a Mac, or the Linux tarball. No Python needed. On Windows you can instead install it from the [Microsoft Store](https://apps.microsoft.com/detail/9p7j005gdttn).
 2. **Copy a session folder off the Origin** to your computer: the folder the telescope saved for one target, with its FITS frames, kept as it is ([what's in a session folder](https://originstack.site/stack-celestron-origin.html)).
 3. **Open OriginStack, pick that folder, press Start.** It calibrates, aligns and stacks, then removes gradients, sets colour from Gaia stars, reduces noise and stretches the result, with settings chosen for your target.
 
