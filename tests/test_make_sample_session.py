@@ -84,3 +84,21 @@ def test_verify_catches_a_leftover(tmp_path):
     rep = ms.build(str(src), str(dst), 4)
     (dst / 'notes.json').write_text(json.dumps({'where': f'{abs(LAT):.3f}'}))
     assert any('contains' in p for p in ms.verify(str(src), str(dst), rep))
+
+
+def test_pick_best_spread_takes_the_best_of_each_time_bin():
+    names = [f'Light{i:04d}.fits' for i in range(1, 21)]
+    scores = {n: float(i) for i, n in enumerate(names)}
+    scores[names[1]] = 99.0                    # bin 0 (frames 0-3 of 5 bins)
+    scores[names[7]] = 98.0                    # bin 1
+    got = ms.pick_best_spread(names, scores, 5)
+    assert len(got) == 5 and got == sorted(got)
+    assert names[1] in got and names[7] in got
+    assert got[-1] == names[19]                # the last bin's best is its last frame
+    # spread over the night: one per bin, never two from the same bin
+    bins = [i // 4 for i in (names.index(g) for g in got)]
+    assert bins == [0, 1, 2, 3, 4]
+    assert ms.pick_best_spread(names[:3], scores, 5) == names[:3]
+    assert ms.pick_best_spread(names, {}, 4) == [names[0], names[5], names[10], names[15]]   # no scores: first of each bin
+    scores_nan = {names[0]: float('nan'), names[1]: 1.0}
+    assert ms.pick_best_spread(names[:4], scores_nan, 1) == [names[1]]

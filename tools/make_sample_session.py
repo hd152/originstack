@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Copy an Origin session folder into a shareable sample, with the observer's location removed.
 
-    python tools/make_sample_session.py SESSION_DIR OUT_DIR [--max-lights 50]
+    python tools/make_sample_session.py SESSION_DIR OUT_DIR [--max-lights 50] [--select even|best]
 
-Copies the lights (evenly spread if the session has more than ``--max-lights``) and the
+Copies the lights (``--select even``, the default: evenly spread when the session has more than
+``--max-lights``; ``--select best``: the best-scoring light of each of that many time bins) and the
 calibration frames, then scrubs the copies:
 
 * FITS headers lose the site (LATITUDE, LONGITUD, ALTITUDE, SITE*, OBSGEO-*, GEO*) and the
@@ -31,6 +32,7 @@ import shutil
 import sys
 from typing import Iterable, List, Optional
 
+import numpy as np
 from astropy.io import fits
 
 SCRUB_EXACT = {'LATITUDE', 'LONGITUD', 'LONGITUDE', 'ALTITUDE', 'AIRMASS', 'ELEVATIO', 'ELEVATION',
@@ -78,6 +80,41 @@ def pick_evenly(names: List[str], n: int) -> List[str]:
     return [names[round(i * (len(names) - 1) / (n - 1))] for i in range(n)] if n > 1 else names[:1]
 
 
+def pick_best_spread(names: List[str], scores: dict, n: int) -> List[str]:
+    """``n`` names, one per consecutive time bin: the best-scoring light of each bin.
+
+    ``names`` are in capture order. Splitting them into ``n`` bins and taking the best of each keeps
+    the session's spread over the night (the field rotates, the sky changes) while leaving out the
+    soft, cloudy or trailed frames an even spread would include. ``scores`` maps a name to its
+    quality score (higher is better); a name without one (or NaN) loses to any scored name. All the
+    names when there are no more than ``n``."""
+    if len(names) <= n:
+        return list(names)
+    out: List[str] = []
+    for chunk in np.array_split(np.arange(len(names)), n):
+        def key(i):
+            v = scores.get(names[i])
+            return float('-inf') if v is None or v != v else float(v)
+        out.append(names[max(chunk, key=key)])
+    return out
+
+
+def score_lights(src: str, names: List[str], workers: int = 6) -> dict:
+    """Quality score of every named light, with the same metric ``--quality-sweep`` uses
+    (``quality_sweep._score_one``: half-resolution luminance proxy, no calibration needed)."""
+    from concurrent.futures import ProcessPoolExecutor
+
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from src.quality_sweep import _score_one
+    paths = [os.path.join(src, n) for n in names]
+    out = {}
+    with ProcessPoolExecutor(max_workers=workers) as ex:
+        for n, (_p, m, _err) in zip(names, ex.map(_score_one, paths, chunksize=4)):
+            if m and m.get('score') is not None:
+                out[n] = float(m['score'])
+    return out
+
+
 def _data_digest(path: str) -> str:
     with fits.open(path, do_not_scale_image_data=True, memmap=False) as hdul:
         return hashlib.sha256(hdul[0].data.tobytes()).hexdigest()
@@ -87,10 +124,14 @@ def _is_light(name: str) -> bool:
     return name.lower().startswith('light') and name.lower().endswith(_FITS_EXT)
 
 
-def build(src: str, dst: str, max_lights: int) -> dict:
+def build(src: str, dst: str, max_lights: int, select: str = 'even') -> dict:
     os.makedirs(dst, exist_ok=True)
     names = sorted(os.listdir(src))
-    lights = pick_evenly([n for n in names if _is_light(n)], max_lights)
+    all_lights = [n for n in names if _is_light(n)]
+    if select == 'best' and len(all_lights) > max_lights:
+        lights = pick_best_spread(all_lights, score_lights(src, all_lights), max_lights)
+    else:
+        lights = pick_evenly(all_lights, max_lights)
     others = [n for n in names if not _is_light(n)
               and (n.lower().endswith(_FITS_EXT) or n.lower().endswith('.json'))]
     report = {'lights': len(lights), 'fits': 0, 'removed': set(), 'digests': {}}
@@ -152,10 +193,13 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     ap.add_argument('session')
     ap.add_argument('out')
     ap.add_argument('--max-lights', type=int, default=50)
+    ap.add_argument('--select', choices=('even', 'best'), default='even',
+                    help="even: lights spread evenly over the session; best: the best-scoring light of each\n"
+                         "of --max-lights consecutive time bins (same metric as --quality-sweep)")
     a = ap.parse_args(argv)
     if os.path.exists(a.out) and os.listdir(a.out):
         sys.exit(f'{a.out} is not empty')
-    rep = build(a.session, a.out, a.max_lights)
+    rep = build(a.session, a.out, a.max_lights, a.select)
     problems = verify(a.session, a.out, rep)
     sys.stdout.write(f"{rep['lights']} lights, {rep['fits']} FITS files; removed header cards: "
                      f"{', '.join(sorted(rep['removed'])) or 'none'}\n")
