@@ -1077,7 +1077,8 @@ Notes:
 OriginStack is free. If it saves you time, you can leave a tip on
 [Ko-fi](https://ko-fi.com/originstack); the desktop app links there too ("Support
 OriginStack" in its header). Bug reports and sample sessions that show a problem help
-just as much: [open an issue](https://github.com/hd152/originstack/issues).
+just as much: [open an issue](https://github.com/hd152/originstack/issues). For anything that does not fit an issue, write to
+[originstack@originstack.site](mailto:originstack@originstack.site).
 
 ## License
 
