@@ -30,7 +30,7 @@ From a night of raw frames to a finished image on your own computer: no account,
 2. **Copy a session folder off the Origin** to your computer: the folder the telescope saved for one target, with its FITS frames, kept as it is ([what's in a session folder](https://originstack.site/stack-celestron-origin.html)).
 3. **Open OriginStack, pick that folder, press Start.** It calibrates, aligns and stacks, then removes gradients, sets colour from Gaia stars, reduces noise and stretches the result, with settings chosen for your target.
 
-No Origin session to hand? [Try the free sample](https://originstack.site/try-sample-data.html): 41 frames of the Whirlpool Galaxy, with the steps and the result to expect.
+No Origin session to hand? [Try the free sample](https://originstack.site/try-sample-data.html): 41 frames of the Whirlpool Galaxy, with the steps and the result to expect. Want more to practise on or test with? [Twelve free raw sample sessions](https://originstack.site/sample-sessions.html), one of each kind of target (galaxies, nebulae, a comet, clusters, a narrowband OIII session), 42 to 45 frames each, on Zenodo under CC BY 4.0.
 
 ![The OriginStack window during a run: session folder and settings on the left, the live preview and recent frames on the right](docs/img/app-running-1200.webp)
 
