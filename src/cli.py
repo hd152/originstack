@@ -3038,6 +3038,10 @@ def build_parser() -> argparse.ArgumentParser:
         pre_gradient_removal=False,
         drizzle_pixfrac=1.0,
         halo_removal=False,
+        # --halo-removal: 'gaussian' (one Gaussian per bright star) or 'psf' (Gaia-anchored
+        # extended PSF, src/halo_model.py; needs the stack WCS and a Gaia query, which the local
+        # cache answers). `--config halo_removal_method=psf`; falls back to gaussian with a note.
+        halo_removal_method='gaussian',
         remove_stars=False,   # opt-in: --remove-stars writes the starless sidecar
         starless_process=False,
         layered_stretch=False,

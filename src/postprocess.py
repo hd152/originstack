@@ -388,12 +388,31 @@ def _postprocess_early(stacked: np.ndarray, args: argparse.Namespace,
 
     # Star halo removal (before background extraction)
     if getattr(args, 'halo_removal', False) and _pp_sources is not None and len(_pp_sources) > 0:
-        _halo_fwhm = float(np.median(
-            [f.metrics.get('fwhm', 4.0) for f in final
-             if f.metrics and f.metrics.get('fwhm', 0) > 0]) or 4.0)
-        print(f"\n  Removing star halos (fwhm={_halo_fwhm:.1f}px)...")
+        _halo_fwhm = _stack_fwhm(stacked, _pp_sources, final)     # NaN on --from-stack before
         _halo_start = time.time()
-        stacked = remove_star_halos(stacked, _pp_sources, fwhm=_halo_fwhm)
+        _halo_done = False
+        if getattr(args, 'halo_removal_method', 'gaussian') == 'psf':
+            print(f"\n  Removing star halos (Gaia-anchored extended PSF, fwhm={_halo_fwhm:.1f}px)...")
+            from src.halo_model import subtract_halos
+            from src.pipeline import stack_header_for_phase4
+            _halo_hdr = stack_header_for_phase4(args)
+            if _halo_hdr is None:
+                safe_print("    no stack WCS -- using the Gaussian halo model instead")
+            else:
+                stacked, _halo_info = subtract_halos(stacked, _halo_hdr, _halo_fwhm)
+                if _halo_info is not None and 'declined' in _halo_info:
+                    safe_print(f"    PSF halo model not used ({_halo_info['declined']}) -- "
+                               f"using the Gaussian halo model instead")
+                else:
+                    _halo_done = True
+                    if args.verbose and _halo_info:
+                        for _c, _v in _halo_info['channels'].items():
+                            safe_print(f"    {'RGB'[_c]}: {_v['stars']} halo-bearing stars, flux scale "
+                                       f"scatter {_v['scatter_dex']:.2f} dex")
+        else:
+            print(f"\n  Removing star halos (fwhm={_halo_fwhm:.1f}px)...")
+        if not _halo_done:
+            stacked = remove_star_halos(stacked, _pp_sources, fwhm=_halo_fwhm)
         safe_print(f"  Star halo removal ({format_time(time.time() - _halo_start)})")
         stacked = _sanitize(stacked, "halo removal")
 

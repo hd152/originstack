@@ -140,6 +140,7 @@ files from different sessions have landed in the wrong PR before). So:
 | `difference_imaging.py` / `transient_triage.py` | ZOGY subtraction + detection (`--transient-detect REF.fits`); CNN triage (`--transient-triage`; numpy forward pass reading the bundled ONNX, native tract kernel in a `triage`-feature build) |
 | `photometry_core.py` | `aperture_photometry_batch`, WCS helpers (`_celestial_wcs`, `_pixel_coords`, `_field_centre_and_radius`) shared by photometry, colour calibration, annotation, mosaic |
 | `camera_profile.py` | Camera from the FITS `CAMERA` keyword; per-model constants in `src/data/camera_profiles/<model>.json` (raw gain per ISO, colour slopes), gain checked on two of the session's lights before photometry (`resolve_camera` -> `args._camera`, `verify_gain`). Details: [camera-profile](dev-notes/camera-profile.md) |
+| `halo_model.py` | Gaia-anchored extended-PSF halo subtraction (`--halo-removal` + `--config halo_removal_method=psf`): flux scale from Gaia, radial PSF by weighted least squares, per-sector cap; [halo-model](dev-notes/halo-model.md) |
 | `photometry.py` / `photometry_timeseries.py` / `lightcurve_analysis.py` / `gain_ptc.py` | `--photometry`; `--photometry-timeseries`; `--lightcurve-analysis`; PTC gain from bias/flat pairs |
 | `observing_geometry.py` | Alt/az, airmass, parallactic angle (closed-form fallbacks, no IERS needed) |
 | `plate_solve.py` / `local_solve.py` | `--plate-solve` backend dispatch; built-in Gaia-tile solver |

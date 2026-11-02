@@ -520,6 +520,13 @@ def _stack_wcs_header(args):
     return hdr
 
 
+def stack_header_for_phase4(args):
+    """The header with the stack's WCS for Phase 4 steps that need the sky position (the halo
+    model): ``--from-stack`` keeps the input FITS header on ``args._stack_header``; a full run
+    has the settled WCS cards."""
+    return getattr(args, '_stack_header', None) or _stack_wcs_header(args)
+
+
 def _colour_calibrate_stack(args, stacked: np.ndarray, *also, header=None) -> None:
     """Gaia colour calibration of the linear stack, in place (``stacked`` and any
     other arrays in ``also`` -- the linear FITS copy). Remembers the scales on
@@ -2077,6 +2084,7 @@ def postprocess_from_stack(stack_path: str, output_path: str,
         safe_print("  Settings: command line only (no <stem>_config.toml next to the "
                    "stack, so --auto's per-target choices are not available)")
 
+    args._stack_header = header
     prepare_linear_for_phase4(args, stacked, header)
     _load_noise_rel(args, stack_path, stacked.shape[:2])
 
