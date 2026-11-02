@@ -34,6 +34,14 @@ Consequences:
   with the relative kernel, `psf_deconvolution.relative_kernel`, from the local PSF to the median
   width), or `--deconvolve-svpsf` with the NN. Not built: noise amplification on the soft side
   (deconvolving 5.4 -> 3.5 px needs gains of 20+ at 0.35 cycles/px) and untested artifacts.
+- **Tried and not shipped (2026-11-02): a column-adaptive equalising pass after the NN deconvolver.**
+  Six overlapping column strips of the Omega `--deconvolve nn` output, each Richardson-Lucy (10
+  iterations) with `relative_kernel` from the strip's local width (linear fit of the column medians)
+  to the sharpest column's width. It flattens the gradient (columns 3.42 3.46 3.13 2.57 -> 2.35 2.40
+  2.22 2.30, max/min 1.35 -> 1.08) for +3.5% sky noise, but leaves dark rings around the faint stars on
+  the soft side (classical RL ringing on already-sharpened data). A network-side fix is the next
+  thing to try: normalise the star scale per strip (`nn_denoise.scale_factor`) and run the
+  deconvolver per strip with a feathered join.
 - A radial CA model is marginal at 0.15-0.25 px; not built.
 
 Caveats: five stacks, one camera unit; cells with fewer than six unsaturated stars are dropped;
