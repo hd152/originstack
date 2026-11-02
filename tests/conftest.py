@@ -109,3 +109,16 @@ def tk_root():
     desktop_app._apply_theme(root)
     yield root
     root.destroy()
+
+
+@pytest.fixture(autouse=True)
+def _isolated_app_settings(tmp_path, monkeypatch):
+    """The desktop app's settings file (language, last folders) is the user's real one.
+
+    Tests that build the app read it: ``App()`` restores the last-used folder and scans it
+    (``discover_frames`` over a real session library), which stalled
+    ``test_no_check_started_when_disabled`` for good on a machine with a saved folder, and a
+    test that saved a setting wrote into it. Every test gets an empty file of its own; the ones
+    that need a particular file patch ``_settings_path`` again, over this."""
+    import src.i18n as i18n
+    monkeypatch.setattr(i18n, '_settings_path', lambda: tmp_path / '_app_settings.json')

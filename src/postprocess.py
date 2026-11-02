@@ -22,6 +22,7 @@ from src.background import (
     remove_sky_residual,
     sky_floor_normalize,
     wavelet_background_extraction,
+    wing_aware_star_mask,
 )
 from src.debayer import luminance
 from src.denoising import (
@@ -322,6 +323,7 @@ def _postprocess_early(stacked: np.ndarray, args: argparse.Namespace,
     # Detect stars once — reused by background extraction, wavelet, NLM, and deconvolution
     pp_star_mask = None
     _pp_sources = None
+    _bg_star_mask = None   # star mask for background *sampling* only (wing-aware)
     if sigma_clipped_stats is not None:
         try:
             _pp_lum = luminance(stacked)
@@ -331,8 +333,13 @@ def _postprocess_early(stacked: np.ndarray, args: argparse.Namespace,
                 pp_star_mask = generate_star_mask(_pp_lum.shape, _pp_sources, fwhm=4.0)
                 if args.verbose:
                     safe_print(f"    Post-processing star mask: {len(_pp_sources)} stars")
+                if getattr(args, 'bg_wing_mask', False):
+                    _bg_star_mask = wing_aware_star_mask(
+                        _pp_lum, _pp_sources, pp_star_mask, verbose=args.verbose)
         except Exception:
             pass
+    if _bg_star_mask is None:
+        _bg_star_mask = pp_star_mask
 
     # Field aberration / optical-tilt inspector (on the linear stack, before any
     # denoise/deconvolution reshapes the stars). Runs on the shared _pp_sources.
@@ -518,7 +525,7 @@ def _postprocess_early(stacked: np.ndarray, args: argparse.Namespace,
             _diffuse_threshold = getattr(args, 'dbe_diffuse_threshold_sigma', 1.0)
             stacked = dynamic_background_extraction(
                 stacked, patch_size=dbe_patch, clip_sigma=args.bg_clip_sigma,
-                verbose=args.verbose, star_mask=pp_star_mask,
+                verbose=args.verbose, star_mask=_bg_star_mask,
                 use_entropy_weights=_entropy_bg,
                 exclusion_mask=_bg_excl_mask,
                 diffuse_threshold_sigma=_diffuse_threshold,
@@ -534,7 +541,7 @@ def _postprocess_early(stacked: np.ndarray, args: argparse.Namespace,
             _diffuse_threshold = getattr(args, 'dbe_diffuse_threshold_sigma', 1.0)
             stacked = wavelet_background_extraction(
                 stacked, patch_size=dbe_patch, clip_sigma=args.bg_clip_sigma,
-                n_scales=wavelet_scales, verbose=args.verbose, star_mask=pp_star_mask,
+                n_scales=wavelet_scales, verbose=args.verbose, star_mask=_bg_star_mask,
                 use_entropy_weights=_entropy_bg,
                 exclusion_mask=_bg_excl_mask,
                 diffuse_threshold_sigma=_diffuse_threshold,
@@ -546,7 +553,7 @@ def _postprocess_early(stacked: np.ndarray, args: argparse.Namespace,
                   f"(mesh={args.bg_mesh_size}, sigma={args.bg_clip_sigma})...")
             stacked = apply_background_extraction(
                 stacked, mesh_size=args.bg_mesh_size, filter_size=args.bg_filter_size,
-                clip_sigma=args.bg_clip_sigma, verbose=args.verbose, star_mask=pp_star_mask,
+                clip_sigma=args.bg_clip_sigma, verbose=args.verbose, star_mask=_bg_star_mask,
                 exclusion_mask=_bg_excl_mask)
             safe_print(f"  ✓ Background extraction ({format_time(time.time() - bg_start)})")
         stacked = _sanitize(stacked, "background extraction")

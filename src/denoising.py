@@ -55,6 +55,21 @@ def _bayesshrink_threshold(coeffs: np.ndarray, sigma_noise: float) -> float:
 
 
 
+def _band_noise_sigma(coeffs: np.ndarray, mult: float, floor: float) -> float:
+    """Noise sigma of one wavelet subband: ``MAD / 0.6745`` of its own coefficients
+    (Johnstone & Silverman 1997, level-dependent thresholds for correlated noise).
+
+    ``floor`` is the white-noise value (finest diagonal band) already scaled by ``mult``:
+    correlation only moves noise power into other bands, and signal in a band can only
+    inflate its MAD, so a band that reads below the floor is a small-sample accident, not
+    quieter noise. MAD of a signal-rich band over-reads slightly (more shrinkage there);
+    ``_bayesshrink_threshold`` then sees a smaller signal variance, which errs towards
+    smoothing rather than towards leaving noise.
+    """
+    mad = float(np.median(np.abs(coeffs - np.median(coeffs)))) / 0.6745
+    return max(mad * mult, floor)
+
+
 def _structure_tensor_coherence(plane: np.ndarray, sigma: float = 1.5) -> np.ndarray:
     """Local structure-tensor coherence, ``(lambda1-lambda2)/(lambda1+lambda2)``
     of the Gaussian-windowed gradient outer-product tensor. Near 1 on a
@@ -89,7 +104,8 @@ def directional_wavelet_denoise(img: np.ndarray, levels: int = 4,
                                 star_mask: Optional[np.ndarray] = None,
                                 protect_strength: float = 0.6,
                                 coherence_sigma: float = 1.5,
-                                variance_stabilize: bool = False) -> np.ndarray:
+                                variance_stabilize: bool = False,
+                                band_sigma: bool = True) -> np.ndarray:
     """Directional (curvelet/shearlet-*inspired*) adaptive wavelet
     denoising -- ``--denoiser curvelet``.
 
@@ -125,6 +141,13 @@ def directional_wavelet_denoise(img: np.ndarray, levels: int = 4,
     luma plane before thresholding and inverts it after (luma only: it's the
     plane whose noise is genuinely photon-limited, which is what the
     Poisson+Gaussian model behind the transform assumes).
+
+    ``band_sigma`` estimates the noise of every subband (level x orientation)
+    from that band's own MAD (``_band_noise_sigma``) instead of reusing the
+    finest diagonal band's value for all of them. That reuse is right only for
+    white noise; stacks carry correlated noise (resampling, debayering: lag-1
+    correlation ~0.4 on Origin stacks), whose power sits in the coarser bands,
+    so the one sigma under-thresholded them. ``False`` restores the single sigma.
     """
     h, w = img.shape[0], img.shape[1]
     src = img.astype(np.float64)
@@ -153,7 +176,9 @@ def directional_wavelet_denoise(img: np.ndarray, levels: int = 4,
         for detail_level in coeffs[1:]:
             new_detail = []
             for d in detail_level:
-                base_threshold = _bayesshrink_threshold(d, sigma_noise)
+                sigma_band = (_band_noise_sigma(d, chroma_mult, sigma_noise)
+                              if band_sigma else sigma_noise)
+                base_threshold = _bayesshrink_threshold(d, sigma_band)
                 if use_coherence and np.isfinite(base_threshold):
                     coh = _resize_to(coherence, d.shape)
                     local_threshold = np.maximum(
