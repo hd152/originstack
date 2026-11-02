@@ -293,10 +293,14 @@ Eight built-in presets set a group of parameters at once (any flag you pass stil
 - **Differential light curves** (`--photometry-timeseries`) — aperture-photometers a fixed Gaia star list on every registered sub and ensemble-calibrates, writing per-frame + per-star CSVs with a variability flag; `--photometry-target "RA,DEC"` reports one star
 - **Banding removal** (`--banding-removal`) — per-row/column offsets removed from each calibrated Bayer frame before debayering, per colour plane, only where significant; a clean frame is left essentially untouched
 - **Session diagnostics report** (`--session-report`) — `<output>_session.png` + `.csv`: FWHM, transparency, SNR, background, drift, field rotation, ellipticity, residual and temperature against time, with the drift rate, any periodic tracking error, the rotation rate and any focus-vs-temperature drift printed
-- **Noise validation** (`--noise-validate`) — stacks the odd and even frames separately; their difference is an empirical noise map (`<output>_noise.fits`) and their local correlation shows which structure is repeatable (`<output>_consistency.fits`)
+- **Noise validation** (`--noise-validate`) — stacks the odd and even frames separately (and prints the finest detail the halves repeatably agree on, by Fourier ring correlation); their difference is an empirical noise map (`<output>_noise.fits`) and their local correlation shows which structure is repeatable (`<output>_consistency.fits`)
 - **Moving objects** (`--moving-objects`, `--moving-objects-stack`) — links per-frame residuals into asteroid-like tracks by voting in velocity space; optionally stacks a window along each track so a mover too faint for any one frame comes up out of the noise
 - **Light-curve analysis** (`--lightcurve-analysis`, with `--photometry-timeseries`) — Lomb-Scargle period search with a false-alarm probability and a box-least-squares + trapezoid transit fit with errors and a BIC test
 - **AAVSO reports** (`--aavso-report`, with `--photometry-timeseries`) — writes `<output>_aavso.txt` in the AAVSO Extended Format for WebObs upload: comparison stars from the AAVSO VSP chart (outliers such as saturated stars rejected), a per-frame ensemble zero point on the green channel (TG band), a check star, mid-exposure JD and optional time bins (`--aavso-bin MINUTES`). Name the star with `--aavso-star "SS Cyg"` (or `--photometry-target RA,DEC`) and set `--aavso-obscode`. On an Orion Nebula session (130 × 20 s), AAVSO comparison stars of V 10–13.6, each measured against the others, came out at TG − V +0.004 ± 0.035 mag; in 5-minute bins the errors were 0.015–0.04 mag at V 11–13. `tools/aavso_report.py` writes the report afterwards from an existing run
+- **Halo subtraction anchored on Gaia** (`--halo-removal` with `--config halo_removal_method=psf`, opt-in) — bright stars' wings (100 sigma at 20 px on the Pleiades) are modelled from an empirical PSF scaled by each star's Gaia magnitude and subtracted beyond the core, capped sector by sector at the light actually present; a nebula behind a star is not mistaken for halo. Needs the stack WCS and a Gaia query (cached, so `--from-stack` works offline); otherwise it says so and uses the Gaussian remover
+- **PSF tilt equalisation** (`--deconvolve nn` with `--config nn_tilt_equalise=true`, opt-in) — Origin stacks have star width falling along one sensor axis (left edge 12-55% wider); a second network pass per strip brings each strip to the sharpest strip's width without going beyond it. About 15-35 s
+- **Per-session dark glow scale** (on by default; `--config session_dark_scale=false`) — fits the dark's amp-glow scale on a few lights when the session's sensor temperature differs from the dark's, and applies it on top of the exposure ratio; it triggers on cold sessions only
+- **Measuring tools** (`tools/`) — `bench_lsb_injection.py` injects faint extended light and reports how much survives Phase 4 (plus blank-sky aperture curves), `eval_frc.py` and `--noise-validate` give Fourier-ring-correlation resolution from two half-stacks, `psf_census.py` and `stack_optics_census.py` measure PSF variation, colour widths and lateral CA
 - **Bayer-aware drizzle** (`--cfa-drizzle`, opt-in) — recombines each frame's *measured* colour samples instead of debayer-interpolated ones (native kernel, 15.7× the numpy path). On well-sampled data it trades 13% lower luma noise for 2× colour noise and no sharpness gain, so it is meant for undersampled data
 - **Comet nucleus tracking** — dual-registered stacks (`_comet.fits`)
 - **HDR combining** — blends short/long exposure stacks for high-dynamic-range targets
@@ -764,7 +768,7 @@ python originstack.py -d <dir> -o <output.fits> [options]
 | `--quality-sweep [--apply]` | Recursively flag poor lights across a collection (dry-run by default) |
 | `--keep-checkpoint` | Save raw pre-post-processing stack for re-processing |
 | `--quality-report PATH` | Write per-frame quality metrics to CSV |
-| `--frame-report` | Write `<output>_frames.csv` / `.json`: per light, kept or rejected, the gate and plain reason, notes for outliers, key metrics (changes no result) |
+| `--frame-report` | Write `<output>_frames.csv` / `.json`: per light, kept or rejected, the gate and plain reason, notes for outliers, key metrics incl. effective exposure `t_eff` (changes no result) |
 | `--dry-run` | Discover frames, show parameters, estimate resources — no processing |
 | `--health-check` | Analyse calibration and frames without stacking |
 | `--debug KIND[,..]` | Debug artefacts: registration, diagnostic, intermediates, masks |
@@ -775,6 +779,21 @@ python originstack.py -d <dir> -o <output.fits> [options]
 For the full CLI reference with all flags and defaults, see [PROJECT_SPEC.md](PROJECT_SPEC.md).
 
 ---
+
+## Settings without a flag (`--config KEY=VALUE`)
+
+These are read from a `--config` file or `--config KEY=VALUE` (repeatable); `--auto` and the
+desktop app's saved `<stem>_config.toml` carry them too.
+
+| Key | Default | Effect |
+|-----|---------|--------|
+| `halo_removal_method` | `gaussian` | With `--halo-removal`: `psf` = Gaia-anchored extended-PSF subtraction |
+| `nn_tilt_equalise` | `false` | With `--deconvolve nn`: second network pass per strip along a star-width gradient |
+| `deconvolve_target_ratio` | unset | With `--deconvolve rl`: deconvolve to this fraction of the measured PSF width (e.g. `0.8`) instead of to a point |
+| `session_dark_scale` | `true` | Fit the dark's glow scale per session (Phase 1) |
+| `noise_map_denoise` | `true` | Flatten the noise by the `--full-field` coverage map before the wavelet / learned denoiser |
+| `bg_wing_mask` | `false` | Mask bright stars' wings, not just their cores, when sampling the background |
+| `wavelet_cycle_spins` | `1` | `--denoiser wavelet` averaged over this many grid shifts (1-8; costs that many times the time) |
 
 ## Performance
 

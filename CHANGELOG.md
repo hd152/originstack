@@ -6,6 +6,59 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+Image-quality work from a research survey of the whole pipeline: two calibration/denoising repairs
+and a per-session dark correction that change results by default, an opt-in Gaia-anchored halo
+remover and a PSF-tilt equaliser, and measuring tools. Most gains are modest on sky-noise-limited
+Origin data; the numbers below are what was measured.
+
+### Changed (results differ from 2.20.0)
+- **A single pre-averaged flat is blurred 4 px, not 15.** The Origin ships one library flat; the
+  n-frame rule treated it as one noisy frame and erased its real pixel-response pattern. On the
+  158-frame Sunflower stack 1.8-3.7% less sky structure at 16 px (all 36 comparisons lower).
+  Flats of two or more frames are smoothed as before.
+- **`--denoiser wavelet` estimates the noise per band.** It used the finest diagonal band's value
+  for every band, which is right only for white noise; Origin stacks have correlated noise
+  (lag-1 about 0.4), so most of it was left. The default Origin path (the learned denoiser) is
+  unaffected.
+- **Per-session dark glow scale.** A few lights are calibrated and the dark's glow scale is fitted
+  on top of the exposure ratio, applied only when it is well determined (it triggers on 3 of 11
+  local sessions). Markarian's Chain (19-21 C against a 31 C dark): 10-13% less 32-64 px sky
+  structure in the linear stack; the final preview changes by about 2% because background
+  extraction absorbs it. `--config session_dark_scale=false` turns it off. A checkpoint made
+  before this version is rebuilt (a Phase 1 setting changed).
+- **The wavelet and learned denoisers flatten the noise by the `--full-field` coverage map**
+  first (shallow rims are about 1.4x noisier than the one sigma they assume). `--from-stack` reads
+  `<stem>_coverage.fits`. Stacks of uniform depth are unchanged. `--config noise_map_denoise=false`
+  turns it off.
+- **The preview JPEG is dithered** (seeded triangular noise, clipped black and white untouched) so
+  smooth denoised regions do not band. The PNG exports are unchanged.
+
+### Added
+- **`--halo-removal` with `--config halo_removal_method=psf`**: Gaia-anchored extended-PSF halo
+  subtraction (flux scale from unsaturated Gaia stars, empirical radial PSF, per-sector cap).
+  Pleiades wings at 40 px 16-23 sigma -> 4-8; star cores and a nebula behind a star are untouched.
+  Falls back to the Gaussian remover with a note without a WCS or catalogue. Opt-in.
+- **`--config nn_tilt_equalise=true`** (with `--deconvolve nn`): every Origin stack measured has
+  star width falling along one sensor axis (left edge 12-55% wider); the network is run once more
+  per strip, blended to the sharpest strip's width. Column max/min Omega 1.33 -> 1.07, Pleiades
+  1.59 -> 1.08. 15-35 s. Opt-in.
+- **`--config deconvolve_target_ratio=0.8`** (with `--deconvolve rl`): deconvolve to a narrower
+  target PSF instead of a point, so there is nothing to ring; `-v` prints a consistency check.
+- **Frame report and FITS header:** a `t_eff` column (seeing, sky and transparency combined; a
+  note under 0.25) and `TEFFTIME` / `TEFFRATIO` keys: the integration time in median-quality
+  seconds.
+- **`--noise-validate`** also prints the finest detail the stack repeatably holds (Fourier ring
+  correlation of the odd/even halves) and the SNR by spatial period.
+- **Tools:** `tools/bench_lsb_injection.py` (inject faint extended light, report how much survives
+  Phase 4, plus blank-sky aperture curves), `tools/eval_frc.py`, `tools/psf_census.py`,
+  `tools/stack_optics_census.py`.
+- Off by default, kept for experiments: `--config bg_wing_mask=true` (brightness-scaled star masks
+  for background sampling; changed the preview by 0.1/255 on three real stacks) and
+  `--config wavelet_cycle_spins=4` (4-7% less noise on synthetic scenes, 0.3% on real data).
+
+### Fixed
+- `--halo-removal` ran with a NaN star width on `--from-stack`.
+
 ## [2.20.0] - 2026-11-01
 
 The learned deconvolver now works on other cameras: it rescales to the star width it was trained

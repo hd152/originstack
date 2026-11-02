@@ -97,12 +97,14 @@ files from different sessions have landed in the wrong PR before). So:
 | `xisf_writer.py` | Minimal XISF 1.0 writer |
 | `frame_discovery.py` | `discover_frames`, `classify_frame`, `select_matching_darks` |
 | `robust_pca.py` | Robust-PCA masters (`--master-method robust_pca`), `--flat-from-lights` (downsampled per CFA plane) |
+| `dark_scale.py` | Per-session dark glow scale (`masters['dark_scale_adjust']`, `--config session_dark_scale`): quadratic + delta x glow fit on 64 px block medians of ~12 calibrated lights; delta = fit coefficient / exposure ratio (the research's "-0.67" on Markarian was the raw coefficient; delta is -0.93), accepted for -1.15 < delta < 0.8 with small SE and spread, scale clamped at 0 |
 | `dark_temp_model.py` | Per-pixel dark-vs-temperature polynomial (`--dark-temp-model`) |
 | `vignette_calib.py` | Per-instrument vignetting map, apply side (`--vignette-map`; built by `tools/build_vignette_map.py`) |
 | `debayer.py` | Calibration, hot pixels (Bayer statistical fix with star-support rule), RCD (default) / Malvar / Menon debayer, white balance, session-constant CFA equalisation (`--no-session-cfa-eq`), `--spike-reject`, `luminance()` (0.299/0.587/0.114, native for f32; use it rather than writing the expression out) |
 | `banding.py` | Row/column banding removal (`--banding-removal`) |
 | `trail_reject.py` | Satellite/aircraft trail rejection (`--trail-reject`), Phase 1 |
 | `local_normalize.py` | Per-frame additive background matching before rejection (`--local-normalize`). Still exists; only the old Phase 4 local-normalisation *step* was removed |
+| `effective_exposure.py` | DES-style per-frame effective exposure `t_eff = (FWHM_fid/FWHM)^2 (B_fid/B) transparency^2` (fiducials = session medians); `TEFFTIME`/`TEFFRATIO` header keys, frame-report column and low-value note; diagnostic only |
 | `quality.py` | `compute_quality_metrics`, FWHM, `estimate_bortle` (heuristic) |
 | `star_detect.py` / `matched_filter.py` | `detect_stars_matched_filter` (the detector; native + numpy); point-source matched filter (`--matched-filter`) |
 | `quality_sweep.py` | `--quality-sweep`: score every light in a folder tree |
@@ -119,6 +121,7 @@ files from different sessions have landed in the wrong PR before). So:
 | `merge.py` | `--merge` and the hierarchical combine (`merge_previous_stacks`) |
 | `mosaic.py` | Multi-panel stitching (`--mosaic`) |
 | `stream_stack.py` / `live_stack.py` | Two-pass O(1)-memory stack (`--stream`); real-time stacking (`--live`) |
+| `frc.py` | Fourier ring correlation of two half-stacks, SSNR, Wiener-from-halves, per-scale denoiser risk (Noise2Inverse style), method-noise check; `--noise-validate` prints the split-half resolution, `tools/eval_frc.py` |
 | `noise_validation.py` / `noise_model.py` | Odd/even noise maps (`--noise-validate`); measured gain + correlated-noise model for photometry |
 | `moving_objects.py` | Mover detection / tracked stack (`--moving-objects[-stack]`) |
 | `session_report.py` / `session_info.py` | Tracking/trend report (`--session-report`); parse capture-app `info.json`, stack WCS |
@@ -218,6 +221,9 @@ files from different sessions have landed in the wrong PR before). So:
 - Translations were machine-drafted (2026-10) and not reviewed by native speakers.
 
 **Domain conventions worth knowing**
+- A single-file calibration master (Origin ships one library flat) is a pre-averaged master, not one noisy frame: `cli._flat_smooth_sigma` blurs it `Config.FLAT_SINGLE_MASTER_SIGMA` (4 px), the n-frame rule (`15 // sqrt(n)`) only from n = 2. The 15 px it gave at n = 1 erased the flat's real pixel pattern.
+- The wavelet and NN denoisers assume one noise sigma: with `--full-field` they flatten the noise by `args._noise_rel` (coverage count, `denoising.noise_flatten`/`noise_restore`; `--from-stack` reads `<stem>_coverage.fits`). The wavelet denoiser takes each band's own sigma (`_band_noise_sigma`): a correlated-noise stack leaves most noise otherwise.
+- Phase 4 steps that need the sky position (`halo_model`) read `pipeline.stack_header_for_phase4(args)` (`args._stack_header` for `--from-stack`, else the settled stack WCS) and fall back with a note.
 - Origin FITS have RA increasing with +x (not textbook east-left); `info.json`'s solve describes the session's *first* sub. `pipeline._settle_stack_wcs` maps it through that sub's transform + crop, then refines with `local_solve` (`--no-wcs-refine`); the result is `args._stack_wcs`. A WCS on the `(3, H, W)` cube must be built with `naxis=2`.
 - Catalogue TAP queries must be ordered (`ORDER BY phot_g_mean_mag`); `TOP n` alone returns an arbitrary subset per call.
 - Origin `EGAIN` is ~5x too high; photometry uses the measured gain from `noise_model` / PTC.
