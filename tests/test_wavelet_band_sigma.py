@@ -75,3 +75,26 @@ def test_band_sigma_reads_each_band_and_floors_at_white_noise_value():
     quiet = np.zeros((64, 64))
     assert _band_noise_sigma(quiet, 1.0, 0.7) == 0.7
     assert _band_noise_sigma(co[-3][2], 2.0, 2 * white) >= 2 * white
+
+
+def test_cycle_spinning_removes_more_noise_and_keeps_shape_and_flux():
+    rng = np.random.default_rng(6)
+    img, truth, sky = _scene(rng, 0.53)
+    single = directional_wavelet_denoise(img)
+    spun = directional_wavelet_denoise(img, cycle_spins=4)
+    assert spun.shape == single.shape and spun.dtype == np.float32
+    assert _sky_rms(spun, truth, sky) < _sky_rms(single, truth, sky)
+    blob = truth > 0.3
+    slope = np.polyfit(truth[blob], spun.astype(np.float64).mean(axis=2)[blob], 1)[0]
+    assert 0.9 < slope < 1.1
+
+
+def test_cycle_spins_one_is_the_plain_pass_and_star_mask_is_kept():
+    rng = np.random.default_rng(7)
+    img, _truth, _sky = _scene(rng, 0.53)
+    assert np.array_equal(directional_wavelet_denoise(img),
+                          directional_wavelet_denoise(img, cycle_spins=1))
+    mask = np.zeros(img.shape[:2], np.float32)
+    mask[100:120, 100:120] = 1.0
+    out = directional_wavelet_denoise(img, cycle_spins=4, star_mask=mask)
+    assert np.array_equal(out[100:120, 100:120], img[100:120, 100:120])

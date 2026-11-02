@@ -11,9 +11,11 @@ import numpy as np
 
 from src.io_fits import (
     preview_jpeg_bytes,
+    render_preview_rgb_float,
     render_preview_rgb_uint8,
     render_preview_uint8,
     save_preview_rgb,
+    write_final_images,
     write_preview_jpeg,
 )
 from src.ui_events import UIEvents
@@ -223,7 +225,7 @@ class TestRestretch(unittest.TestCase):
         self.assertNotEqual(before, after)
         # Same bytes the normal writer produces for that stretch.
         ref = os.path.join(self._tmp.name, 'ref.jpg')
-        write_preview_jpeg(render_preview_rgb_uint8(self.rgb, stretch='linear',
+        write_final_images(render_preview_rgb_float(self.rgb, stretch='linear',
                                                     color='channel'), ref)
         self.assertEqual(after, open(ref, 'rb').read())
         self.assertEqual(Image.open(self.path).size, (160, 128))

@@ -2901,6 +2901,16 @@ def build_parser() -> argparse.ArgumentParser:
         # (the emission mask already covers 62-74% of those frames); strong synthetic halos
         # roughly halve DBE's dark moat. `--config bg_wing_mask=true` turns it on.
         bg_wing_mask=False,
+        # --denoiser wavelet averages over this many grid shifts (cycle spinning, 1-8) for that
+        # many times the step's time. Off (1): 4 shifts cut sky noise 4-7% on synthetic scenes but
+        # only 0.3% on a real Pleiades crop (31.15 -> 31.05 ADU). `--config wavelet_cycle_spins=4`.
+        wavelet_cycle_spins=1,
+        # The wavelet and NN denoisers assume one noise sigma; --full-field's shallow rims are
+        # noisier. They flatten the noise by the coverage map first (denoising.noise_flatten).
+        noise_map_denoise=True,
+        # --deconvolve (Richardson-Lucy): deconvolve to a PSF this fraction of the measured width
+        # instead of to a point (psf_deconvolution.relative_kernel), e.g. 0.8; None = the plain kernel.
+        deconvolve_target_ratio=None,
         # Phase 1 fits the dark's glow scale on a few lights (dark_scale.py) and applies it on top
         # of the exposure ratio when the session was shot at another sensor temperature than the
         # dark. `--config session_dark_scale=false` keeps the plain exposure ratio.
@@ -3028,6 +3038,10 @@ def build_parser() -> argparse.ArgumentParser:
         pre_gradient_removal=False,
         drizzle_pixfrac=1.0,
         halo_removal=False,
+        # --halo-removal: 'gaussian' (one Gaussian per bright star) or 'psf' (Gaia-anchored
+        # extended PSF, src/halo_model.py; needs the stack WCS and a Gaia query, which the local
+        # cache answers). `--config halo_removal_method=psf`; falls back to gaussian with a note.
+        halo_removal_method='gaussian',
         remove_stars=False,   # opt-in: --remove-stars writes the starless sidecar
         starless_process=False,
         layered_stretch=False,

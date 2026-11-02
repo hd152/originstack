@@ -108,6 +108,7 @@ _QUIET_OFF = (
     'remove_stars',            # writes <output>_starless.fits
     'nmf_separate',            # writes _star_component/_nebula_component.fits
     'photometric_calibration',  # Gaia/VizieR network queries, per-channel scalar
+    'halo_removal',            # halo_removal_method=psf queries Gaia (cached)
     'annotate',
     'verbose',
     'aberration_report',       # writes <output>_aberration.png

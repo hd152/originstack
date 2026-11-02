@@ -633,6 +633,79 @@ def richardson_lucy_deconvolve(img: np.ndarray, psf: np.ndarray,
     return result.astype(np.float32)
 
 
+def relative_kernel(psf: np.ndarray, target_fwhm: float, wiener: float = 1e-4) -> np.ndarray:
+    """The kernel ``s`` with ``psf = target * s``: what is left to undo to reach a narrower PSF.
+
+    Deconvolving with the full measured PSF aims at a delta function, whose finite-resolution
+    version rings around every star; deconvolving with ``s`` instead aims at ``target`` (a
+    Gaussian of ``target_fwhm`` pixels, well sampled), which needs no ringing by construction
+    (Magain, Courbin & Sohy 1998, "Deconvolution with correct sampling"). For a Gaussian
+    stack PSF of FWHM 4.4 px and a 3.5 px target, ``s`` is 2.7 px wide: a milder problem than
+    the 4.4 px one. Found by Wiener-regularised division in Fourier space, then clipped at zero
+    and renormalised (RL needs a positive kernel with unit sum)."""
+    half = psf.shape[0] // 2
+    yy, xx = np.mgrid[-half:half + 1, -half:half + 1]
+    # Gaussian-equivalent FWHM from the second moment (sigma^2 = <r^2> / 2)
+    fwhm_psf = float(np.sqrt(np.sum(psf * (yy * yy + xx * xx)) / np.sum(psf) / 2.0) * 2.355)
+    if target_fwhm >= fwhm_psf:
+        raise ValueError("target FWHM must be narrower than the PSF")
+    r = make_synthetic_psf(target_fwhm, psf_size=psf.shape[0], model='gaussian')
+    pf = np.fft.fft2(np.fft.ifftshift(psf / psf.sum()))
+    rf = np.fft.fft2(np.fft.ifftshift(r))
+    sf = pf * np.conj(rf) / (np.abs(rf) ** 2 + wiener * float(np.abs(rf).max()) ** 2)
+    s = np.fft.fftshift(np.real(np.fft.ifft2(sf)))
+    s = np.clip(s, 0.0, None)
+    # the relative kernel is as wide as sqrt(fwhm^2 - target^2) (Gaussians); the regularised division leaves
+    # noisy tails far outside that, which would widen it: keep ~4 sigma of it
+    reach = min(float(half), max(3.0, 1.7 * float(np.sqrt(fwhm_psf ** 2 - target_fwhm ** 2))))
+    s[(yy * yy + xx * xx) > reach * reach] = 0.0
+    return (s / s.sum()).astype(np.float64)
+
+
+def clipped_core_mask(lum: np.ndarray, radius: float, level: float = 0.98) -> Optional[np.ndarray]:
+    """Soft mask over saturated star cores: pixels at ``level`` of the maximum (a clipped core is
+    a plateau at the sensor's limit, where no deconvolution can know the true profile),
+    dilated by ``radius`` pixels and feathered. None when there are none."""
+    from scipy import ndimage
+    top = float(lum.max())
+    if top <= 0:
+        return None
+    core = lum >= level * top
+    if not core.any():
+        return None
+    r = max(2, int(np.ceil(radius)))
+    grown = ndimage.binary_dilation(core, iterations=r)
+    soft = ndimage.gaussian_filter(grown.astype(np.float32), max(1.0, r * 0.4))
+    return np.clip(soft / max(float(soft.max()), 1e-6), 0.0, 1.0).astype(np.float32)
+
+
+def deconvolution_residual(before: np.ndarray, after: np.ndarray, kernel: np.ndarray,
+                           sky_sigma: float) -> dict:
+    """Is the deconvolved image consistent with the data? chi-square of ``(before - kernel * after)``.
+
+    Convolving the result back with the kernel must reproduce the input within its noise.
+    Reported as the reduced chi-square ``mean(resid^2) / sky_sigma^2`` on the luminance, on sky
+    (pixels near the median) and on the brightest pixels (stars and nuclei). On sky a value near 1
+    means the iteration stopped before fitting noise; well below 1, noise has been fitted
+    (too many iterations); well above, structure was invented or removed. Near stars it is
+    larger by the model's misfit and tells where the PSF is wrong."""
+    signal = _scipy_signal()
+    y = luminance(before).astype(np.float64)
+    x = luminance(after).astype(np.float64)
+    m = signal.fftconvolve(x, kernel, mode='same')
+    resid = (y - m) / max(float(sky_sigma), 1e-12)
+    med = float(np.median(y))
+    mad = 1.4826 * float(np.median(np.abs(y - med)))
+    sky = np.abs(y - med) < 2.5 * max(mad, 1e-12)
+    bright = y > np.percentile(y, 99.5)
+    inner = np.zeros(y.shape, bool)
+    h = kernel.shape[0] // 2
+    inner[h:-h, h:-h] = True                          # the convolution's edge is not a measurement
+    return {'chi2_all': float(np.mean(resid[inner] ** 2)),
+            'chi2_sky': float(np.mean(resid[sky & inner] ** 2)),
+            'chi2_bright': float(np.mean(resid[bright & inner] ** 2))}
+
+
 def _shift_sources(sources, dx: float, dy: float):
     """Return a copy of a star catalogue with centroids shifted by (-dx, -dy)
     (into a sub-image whose top-left is at (dx, dy) in the full frame)."""
