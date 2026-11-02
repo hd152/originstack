@@ -17,6 +17,7 @@ exactly after the forward pass; ``strength`` blends towards the input.
 from __future__ import annotations
 
 import os
+from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, Optional, Tuple
 
 import numpy as np
@@ -37,6 +38,7 @@ DECONV_MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'da
 BG_BLOCK = 64          # background mesh cell (px); the surface is smooth on this scale
 ASINH_SOFT = 4.0       # network input = asinh(z / ASINH_SOFT): linear near the sky, compressed on stars
 TILE = 384             # forward-pass tile (px), a multiple of 4 (two 2x poolings)
+TILE_WORKERS = 2          # tiles in flight (denoise_z); the convolutions already use every core
 MARGIN = 32            # context on each side of a tile; > the network's receptive-field radius (~24 px)
 LEAK = 0.1             # LeakyReLU slope
 RESTORE_SIGMA = 4.0    # px; low-frequency restore of faint extended light (nn_denoise)
@@ -186,19 +188,36 @@ def forward(x: np.ndarray, w: Dict[str, np.ndarray]) -> np.ndarray:
     return out + w['out.bias'][:, None, None]
 
 
-def denoise_z(z: np.ndarray, w: Dict[str, np.ndarray]) -> np.ndarray:
-    """Denoise noise-unit data (H, W, C) tile by tile; returns the same shape."""
+def denoise_z(z: np.ndarray, w: Dict[str, np.ndarray], workers: Optional[int] = None) -> np.ndarray:
+    """Denoise noise-unit data (H, W, C) tile by tile; returns the same shape.
+
+    Tiles are independent, so ``workers`` of them run at once (default ``TILE_WORKERS``):
+    the native convolutions release the GIL and spread over all cores, but the
+    pool/upsample/concat glue between them is single-threaded, and a second tile in
+    flight fills those gaps. Each tile's arithmetic is unchanged, so the result does not
+    depend on ``workers``."""
     h, wd, _ = z.shape
     ph, pw = (-h) % TILE, (-wd) % TILE
     zp = np.pad(z, ((MARGIN, MARGIN + ph), (MARGIN, MARGIN + pw), (0, 0)), mode='reflect')
     out = np.empty_like(z)
-    for y0 in range(0, h, TILE):
-        for x0 in range(0, wd, TILE):
-            t = zp[y0:y0 + TILE + 2 * MARGIN, x0:x0 + TILE + 2 * MARGIN]
-            pred = forward(to_input(t).transpose(2, 0, 1).astype(np.float32), w).transpose(1, 2, 0)
-            res = (t + pred * output_scale(t))[MARGIN:MARGIN + TILE, MARGIN:MARGIN + TILE]
-            hh, ww = min(TILE, h - y0), min(TILE, wd - x0)
-            out[y0:y0 + hh, x0:x0 + ww] = res[:hh, :ww]
+
+    def one(pos):
+        y0, x0 = pos
+        t = zp[y0:y0 + TILE + 2 * MARGIN, x0:x0 + TILE + 2 * MARGIN]
+        pred = forward(to_input(t).transpose(2, 0, 1).astype(np.float32), w).transpose(1, 2, 0)
+        res = (t + pred * output_scale(t))[MARGIN:MARGIN + TILE, MARGIN:MARGIN + TILE]
+        hh, ww = min(TILE, h - y0), min(TILE, wd - x0)
+        out[y0:y0 + hh, x0:x0 + ww] = res[:hh, :ww]    # tiles write disjoint blocks
+
+    tiles = [(y0, x0) for y0 in range(0, h, TILE) for x0 in range(0, wd, TILE)]
+    n = max(1, min(int(workers or TILE_WORKERS), len(tiles)))
+    if n == 1:
+        for pos in tiles:
+            one(pos)
+    else:
+        with ThreadPoolExecutor(max_workers=n, thread_name_prefix='nn-tile') as pool:
+            for _ in pool.map(one, tiles):    # re-raises a tile's exception
+                pass
     return out
 
 
