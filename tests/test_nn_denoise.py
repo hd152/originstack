@@ -213,7 +213,7 @@ def test_phase4_runs_the_deconvolver_at_the_nn_step(monkeypatch):
     args = parse_args(['-d', '.', '--deconvolve', 'nn', '--skip-step', 'background'])
     args._diagnostic_dir = None
     pp.postprocess_stack(img, args, [], ProcessingStats())
-    assert calls == [(ndm.DECONV_MODEL_PATH, 4.0), (None, 4.0)]   # deconvolver, then the blend's denoiser
+    assert sorted(calls, key=str) == sorted([(ndm.DECONV_MODEL_PATH, 4.0), (None, 4.0)], key=str)   # deconvolver + the blend's denoiser (run side by side)
 
 
 def test_nn_deconv_blend_mixes_in_the_denoiser(monkeypatch):
@@ -240,7 +240,7 @@ def test_nn_deconv_blend_mixes_in_the_denoiser(monkeypatch):
     args._diagnostic_dir = None
     args.nn_deconv_blend = 0.25
     pp.postprocess_stack(img, args, [], ProcessingStats())
-    assert calls == [ndm.DECONV_MODEL_PATH, None]
+    assert sorted(calls, key=str) == sorted([ndm.DECONV_MODEL_PATH, None], key=str)   # the two passes run concurrently: order is not fixed
     out = seen['nn deconvolution']
     assert out.dtype == np.float32 and np.allclose(out, 0.25 * 10 + 0.75 * 20)
 
