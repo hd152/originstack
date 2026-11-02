@@ -238,6 +238,7 @@ Details in the linked notes.
 - Subsampled sigma-clipped medians for CFA equalisation (period-4 structure biases them).
 - RCD per-Bayer-site stages (stops vectorising); RCD strips without a buffer pool.
 - `--cfa-drizzle` as a default; kernel-regression merge of Bayer samples (stars wider and noisier than RCD + proper coadd); demosaic-free luminance; ubercal flat from stars (unconstrained on the local sessions) ([siril-comparison](dev-notes/siril-comparison.md), [native-kernels](dev-notes/native-kernels.md)).
+- Radial lateral-CA model: `tools/stack_optics_census.py` measured a 0.15-0.25 px R-G shift at the corner (B-G under 0.1) against 3-5 px stars ([stack-optics](dev-notes/stack-optics.md)). The same census found a clean horizontal FWHM gradient (12-55%) in every stack that `--deconvolve nn` only partly removes.
 - Per-frame lacosmic as a noise reducer (it was smoothing; fixed noise model now) ([siril-comparison](dev-notes/siril-comparison.md)).
 - Proper coadd outside the core in `--full-field` (normalised convolution, per-tile, MTF filter, Wiener) ([module-notes](dev-notes/module-notes.md)).
 - Widening `--use-gpu` coverage (fewer VRAM-bound workers); GPU stays opt-in.
