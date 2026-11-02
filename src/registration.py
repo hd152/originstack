@@ -12,7 +12,7 @@ import numpy as np
 import scipy.fft as sfft
 from scipy import ndimage
 
-from src.background import _gaussian_blur
+from src.background import _gaussian_blur, gaussian_filter_ds
 from src.gpu_context import get_gpu
 from src.models import Config, FrameInfo, ProcessingStats
 from src.utils import get_logger, progress_disabled, safe_print, tqdm
@@ -2305,7 +2305,7 @@ def _star_suppressed(lum: np.ndarray, smooth_sigma: float) -> np.ndarray:
     small = ndimage.median_filter(small, size=9, mode='nearest')
     full = np.repeat(np.repeat(small, f, axis=0), f, axis=1)
     full = np.pad(full, ((0, H - hb * f), (0, W - wb * f)), mode='edge')
-    return _gaussian_blur(full, smooth_sigma)
+    return gaussian_filter_ds(full, smooth_sigma)
 
 
 def find_extended_source_ellipse(
@@ -2348,7 +2348,9 @@ def find_extended_source_ellipse(
     lum64 = lum.astype(np.float64)
     if smooth_sigma is None:
         smooth_sigma = max(20.0, min(H, W) / 50.0)
-    lum_smooth = _gaussian_blur(lum64, smooth_sigma)
+    # sigma >= 20 px: evaluated on a 4x block-downsampled copy (background.gaussian_filter_ds),
+    # ~16x less work; the field has no detail near that scale
+    lum_smooth = gaussian_filter_ds(lum64, smooth_sigma)
 
     border = max(4, int(min(H, W) * 0.05))
     edge = np.concatenate([
