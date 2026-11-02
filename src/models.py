@@ -159,6 +159,25 @@ class Config:
     DBE_OUTLIER_ITERS = 3         # IRLS reweighting passes in the surface fit
     DBE_MIN_SAMPLES = 20          # Min accepted patches before falling back to mesh
     DBE_MAX_SAMPLES = 4000        # Sample cap (local regression is O(N) per eval point)
+    DARK_SCALE_PROBE_FRAMES = 12     # dark_scale.py: lights calibrated to fit the session's dark glow scale
+    DARK_SCALE_MIN_FRAMES = 6        # shorter sessions keep the exposure-ratio scale
+    DARK_SCALE_MIN_PROBES = 4        # fits that must succeed before a verdict
+    DARK_SCALE_BLOCK = 64            # px: block medians (stars and noise fall out)
+    DARK_SCALE_MAX_DELTA = 0.8       # |fractional change| beyond this is not glow, it is a bad fit
+    DARK_SCALE_MAX_SE = 0.1          # median standard error of the fit
+    DARK_SCALE_MAX_SPREAD = 0.1      # std of the per-probe fits
+    DARK_SCALE_PRIOR_SD = 0.3        # shrinkage prior: delta * tau^2 / (tau^2 + se^2)
+    DARK_SCALE_MIN_APPLY = 0.02      # smaller corrections are left out (warm sessions: unchanged)
+    WING_MASK_K = 0.5            # Star-wing mask for background sampling: a star is masked out
+                                 # to where its radial profile falls below K x the pixel noise
+                                 # (background._star_wing_radius). A bright star's r^-2.5 wing
+                                 # (Infante-Sainz+ 2020) stays well above the 0.01 sigma a
+                                 # background patch median resolves long after the fixed
+                                 # 4 px FWHM mask has ended
+    WING_MASK_MAX_RADIUS = 120   # px: profile window / mask radius cap
+    WING_MASK_MAX_STARS = 120    # brightest stars profiled (cost ~10 ms each)
+    WING_MASK_MIN_PEAK_SIGMA = 15.0  # skip stars whose core is below this x pixel noise
+    WING_MASK_MAX_AREA_FRAC = 0.20   # stop widening masks once their summed disc area passes this
     DBE_DENSE_FIELD_THRESH = 0.70 # Emission-mask coverage above which dense-field fallback is used
     DBE_FIT_SIGMA_PATCHES = 1.25  # Local-regression Gaussian bandwidth, in units of patch_size
     DBE_HALPHA_SIGMA = 3.0        # H-alpha excess mask threshold (dbe_halpha_mask; --auto, emission nebulae)
@@ -255,6 +274,14 @@ class Config:
                                      # 2910s/~48.5min pre-optimization. Bounded, not
                                      # adaptive-early-exit beyond the tolerance below)
     ROBUST_PCA_TOL = 1e-7           # Relative Frobenius-norm residual convergence tolerance
+    FLAT_SINGLE_MASTER_SIGMA = 4    # Gaussian sigma (px, per Bayer plane) for a flat that is ONE
+                                     # file (a pre-averaged library master, n_flat == 1). The
+                                     # n-frame rule max(1, 15 // int(sqrt(n))) gives 15 at
+                                     # n == 1, blurring an already-clean master like one raw
+                                     # frame and erasing its real pixel-response pattern
+                                     # (r = 0.22-0.37 with the lights' sensor-locked pattern).
+                                     # 158-frame Sunflower A/B: 1.8-3.7% less 16 px sky
+                                     # structure at 4, all 36 ratios < 1
     FLAT_FROM_LIGHTS_DOWNSAMPLE = 4 # --flat-from-lights only (never real bias/dark/flat
                                      # robust_pca): block-averages each of the 4 Bayer
                                      # sub-planes by this factor before decomposition,

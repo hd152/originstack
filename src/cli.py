@@ -529,6 +529,19 @@ def _load_calibration_dir(args: argparse.Namespace) -> dict:
     return extra
 
 
+def _flat_smooth_sigma(n_flat: int) -> float:
+    """Per-Bayer-plane Gaussian sigma applied to the master flat.
+
+    Averaging n frames already cuts the pixel noise by sqrt(n), so the blur shrinks with n.
+    A single file is the exception: it is normally a pre-averaged library master (Origin ships
+    one), not one noisy frame, and the n == 1 value of the rule (15 px) wipes out its real
+    pixel-response pattern -- ``Config.FLAT_SINGLE_MASTER_SIGMA`` keeps it.
+    """
+    if n_flat <= 1:
+        return Config.FLAT_SINGLE_MASTER_SIGMA
+    return max(1, 15 // max(1, int(np.sqrt(n_flat))))
+
+
 def _build_masters(frames: dict, stats: "ProcessingStats | None" = None,
                    args: "argparse.Namespace | None" = None) -> dict:
     """Build, filter, and smooth master bias/dark/flat from the frame lists in *frames*.
@@ -592,8 +605,8 @@ def _build_masters(frames: dict, stats: "ProcessingStats | None" = None,
     else:
         masters['bias'] = None
 
+    _dark_from_model = False
     if frames.get('dark'):
-        _dark_from_model = False
         _use_dark_model = getattr(args, 'dark_temp_model', False)
         if not _use_dark_model and getattr(args, 'auto', False) and \
                 'dark_temp_model' not in getattr(args, '_explicit_cli_dests', set()):
@@ -695,7 +708,7 @@ def _build_masters(frames: dict, stats: "ProcessingStats | None" = None,
         masters['dark'] = _gaussian_blur(masters['dark'].astype(np.float32), sigma_d)
     if masters.get('flat') is not None:
         n_flat = len(frames['flat'])
-        sigma_f = max(1, 15 // max(1, int(np.sqrt(n_flat))))
+        sigma_f = _flat_smooth_sigma(n_flat)
         flat_raw = masters['flat'].astype(np.float32)
         _hdrs = [f.header for k in ('light', 'flat') for f in (frames.get(k) or [])[:1]]
         if flat_raw.ndim == 2 and any(mono_reason(h) for h in _hdrs):
@@ -760,6 +773,9 @@ def _build_masters(frames: dict, stats: "ProcessingStats | None" = None,
         stats.calibration_time = time.time() - _build_start
 
     _drop_mismatched_masters(masters, frames)
+    masters['dark_from_temp_model'] = _dark_from_model
+    from src.dark_scale import apply_session_dark_scale
+    apply_session_dark_scale(masters, lights, args)
     return masters
 
 
@@ -2879,6 +2895,14 @@ def build_parser() -> argparse.ArgumentParser:
         # DBE's colour (H-alpha excess) emission mask; --auto turns it on for
         # emission nebulae (background._halpha_excess_mask).
         dbe_halpha_mask=False,
+        # Background sampling masks bright stars out to where their wing sinks below
+        # Config.WING_MASK_K pixel sigmas (background.wing_aware_star_mask), not just the
+        # 4 px core. `--config bg_wing_mask=false` restores the compact mask.
+        bg_wing_mask=True,
+        # Phase 1 fits the dark's glow scale on a few lights (dark_scale.py) and applies it on top
+        # of the exposure ratio when the session was shot at another sensor temperature than the
+        # dark. `--config session_dark_scale=false` keeps the plain exposure ratio.
+        session_dark_scale=True,
         # Primary luma denoiser when --denoiser is left at 'auto' and no
         # preset/--auto overrides it: directional (curvelet-inspired)
         # adaptive wavelet. At protect_strength=0.6 it's a strict superset

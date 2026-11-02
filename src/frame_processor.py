@@ -334,6 +334,7 @@ def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[n
                         dark_scale = light_exptime / dark_exptime
                     else:
                         dark_scale = 1.0
+                    dark_scale *= masters.get('dark_scale_adjust') or 1.0   # dark_scale.py
                     data_g = data_g - dark_g * dark_scale
                     if bias_g is not None and bias_g.shape == data_g.shape:
                         data_g = data_g + bias_g * dark_scale
@@ -380,6 +381,7 @@ def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[n
                     dark_scale = light_exptime / dark_exptime
                 else:
                     dark_scale = 1.0
+                dark_scale *= masters.get('dark_scale_adjust') or 1.0   # dark_scale.py
 
             flat_norm = masters.get('_flat_norm')  # pre-computed by caller when possible
             if flat_norm is None:

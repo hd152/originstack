@@ -24,7 +24,7 @@ _P1_GROUPS = ('Frames & calibration (Phase 1)',)
 _P23_GROUPS = ('Registration & stacking (Phases 2-3)', 'Comet mode')
 _P1_EXTRA = ('cal_dir', 'vignette_map', 'use_gpu', 'gpu_phase1', 'auto', 'preset',
              'advanced_metrics', 'banding_amount', 'banding_sigma', 'pre_gradient_removal',
-             'max_ellipticity')
+             'max_ellipticity', 'session_dark_scale')
 _P23_EXTRA = ('consensus_ref', 'drizzle_psf_wiener_k', 'esd_max_outliers', 'esd_significance',
               'ibp_relax', 'ivw_gain', 'linear_fit_iters', 'linear_fit_sigma_high',
               'linear_fit_sigma_low', 'masked_correlation', 'moving_objects_threshold',

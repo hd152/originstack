@@ -108,6 +108,21 @@ def consistency_map(a: np.ndarray, b: np.ndarray, smooth: float = 2.0, window: i
     return np.clip(cov / np.sqrt(va * vb), 0.0, 1.0).astype(np.float32)
 
 
+def split_half_resolution(a: np.ndarray, b: np.ndarray) -> Dict[str, Any]:
+    """Fourier ring correlation of the halves' luminance (``src/frc.py``): the finest spatial
+    period (pixels) the stack repeatably holds (FRC falls under 1/7), and the full-stack SNR
+    at a few scales. ``period`` is None when the halves agree out to Nyquist."""
+    from src.frc import fourier_ring_correlation, resolution_period, ssnr_from_frc
+    freq, frc = fourier_ring_correlation(luminance(a).astype(np.float64),
+                                         luminance(b).astype(np.float64))
+    snr = ssnr_from_frc(frc)['full']
+    at = {}
+    for period in (64, 16, 8, 4):                      # pixels per cycle
+        j = int(np.argmin(np.abs(freq - 1.0 / period)))
+        at[period] = float(snr[j])
+    return {'freq': freq, 'frc': frc, 'period': resolution_period(freq, frc), 'snr_at_period': at}
+
+
 def validate_noise(frames: np.ndarray, frame_noise: Optional[float] = None,
                    block: int = 64) -> Dict[str, Any]:
     """Run the split-half analysis on an (N, H, W, C) stack of aligned frames.
@@ -131,6 +146,10 @@ def validate_noise(frames: np.ndarray, frame_noise: Optional[float] = None,
     med = [float(np.median(sigma[:, :, c])) for c in range(sigma.shape[2])]
     out = {'sigma': sigma, 'consistency': cons, 'median_sigma': med, 'n': na + nb,
            'half_sizes': (na, nb)}
+    try:
+        out['frc'] = split_half_resolution(a, b)
+    except Exception:      # a measurement on top of the noise map must never lose it
+        pass
     if frame_noise and frame_noise > 0:
         expected = frame_noise / np.sqrt(na + nb)
         out['correlation_factor'] = float(np.mean(med) / expected)
@@ -149,6 +168,13 @@ def format_summary(r: Dict[str, Any]) -> str:
                 "noisier than the per-frame estimate predicts")
         parts.append(f"    vs per-frame noise / sqrt(N) = {r['expected_sigma']:.1f}: "
                      f"factor {f:.2f} -> {note}")
+    fr = r.get('frc')
+    if fr is not None:
+        per = fr['period']
+        snr = ", ".join(f"{p} px: {v:.1f}" for p, v in fr['snr_at_period'].items())
+        parts.append("    split-half resolution (FRC = 1/7): "
+                     + (f"{per:.1f} px period" if per else "halves agree to Nyquist")
+                     + f"; full-stack SNR by spatial period -- {snr}")
     c = r['consistency']
     parts.append(f"    structure repeatable between halves over {100 * float((c > 0.5).mean()):.1f}% "
                  f"of the frame (local correlation > 0.5)")

@@ -1007,6 +1007,106 @@ def _halpha_excess_mask(rgb: np.ndarray, smooth_sigma: float,
     return mask.astype(np.float32)
 
 
+def _pixel_noise_sigma(lum: np.ndarray) -> float:
+    """Per-pixel noise of a luminance plane: MAD of the plane minus its 8 px Gaussian blur.
+
+    The blur removes gradients and nebulosity but almost none of the pixel noise (stack noise
+    is correlated over 1-2 px), so unlike a global sigma-clipped std it does not read a
+    gradient as noise. Stars are rare enough for the MAD to ignore."""
+    hp = lum - _gaussian_blur(np.ascontiguousarray(lum, dtype=np.float32), 8.0)
+    s = np.asarray(hp[::3, ::3], dtype=np.float64)
+    return 1.4826 * float(np.median(np.abs(s - np.median(s))))
+
+
+def _star_wing_radius(lum: np.ndarray, cy: float, cx: float, sigma: float,
+                      k: float, max_radius: int, min_radius: float, step: int = 2) -> float:
+    """Radius (px) at which a star's wing sinks below ``k * sigma`` above the local sky.
+
+    Annular medians of ``lum`` around (cy, cx) in ``step`` px bins (robust to neighbouring
+    stars covering less than half an annulus); the local sky is the median of the outer
+    fifth of the bins, so a linear gradient (which averages out in an annulus) and the
+    pedestal drop out. The radius is where the excess first stays under the threshold for
+    three bins in a row; ``max_radius`` if it never does."""
+    H, W = lum.shape
+    R = int(max_radius) // step * step
+    y0, y1 = max(0, int(cy) - R), min(H, int(cy) + R + 1)
+    x0, x1 = max(0, int(cx) - R), min(W, int(cx) + R + 1)
+    r = np.hypot(np.arange(y0, y1)[:, None] - cy, np.arange(x0, x1)[None, :] - cx)
+    sel = r < R
+    rb = (r[sel] / step).astype(np.int64)
+    v = np.asarray(lum[y0:y1, x0:x1], dtype=np.float64)[sel]
+    nb = R // step
+    counts = np.bincount(rb, minlength=nb)[:nb]
+    ok = counts >= 8
+    if ok.sum() < 10:
+        return float(min_radius)
+    v_sorted = v[np.lexsort((v, rb))]
+    starts = np.cumsum(np.bincount(rb, minlength=nb + 1))[:nb] - counts
+    med = np.full(nb, np.nan)
+    med[ok] = v_sorted[(starts + counts // 2)[ok]]
+    valid = np.flatnonzero(ok)
+    sky = float(np.median(med[valid[-max(3, len(valid) // 5):]]))
+    below = ~((med - sky) >= k * sigma)         # NaN (off-frame) bins count as below
+    for b in range(int(min_radius // step), nb - 2):
+        if below[b] and below[b + 1] and below[b + 2]:
+            return float(max(min_radius, b * step))
+    return float(R)
+
+
+def wing_aware_star_mask(lum: np.ndarray, sources, base_mask: Optional[np.ndarray] = None,
+                         noise: Optional[float] = None, verbose: bool = False) -> np.ndarray:
+    """Star mask for background *sampling* with a radius that grows with the star's brightness.
+
+    The mask DBE normally gets (``quality.generate_star_mask``) is a 4 px FWHM blob at every
+    star. A bright star's wing falls only as ~r^-2.5, so tens of pixels out it is still far
+    above what a background patch median resolves: the patches around it sample wing light
+    as sky, the fitted surface bumps up there, and the subtraction digs a dark moat. Here each
+    bright star is masked to where its own measured profile reaches ``Config.WING_MASK_K``
+    pixel sigmas (``_star_wing_radius``), the brightest first, until the discs' summed area
+    reaches ``Config.WING_MASK_MAX_AREA_FRAC`` of the frame. Returns ``base_mask`` (or zeros)
+    with those discs added; for background sampling only -- denoising and deconvolution keep
+    the compact mask."""
+    H, W = lum.shape
+    out = (np.array(base_mask, dtype=np.float32, copy=True) if base_mask is not None
+           else np.zeros((H, W), dtype=np.float32))
+    if sources is None or len(sources) == 0:
+        return out
+    sigma = float(noise) if noise else _pixel_noise_sigma(lum)
+    if not np.isfinite(sigma) or sigma <= 0:
+        return out
+    k = Config.WING_MASK_K
+    max_r = min(int(Config.WING_MASK_MAX_RADIUS), min(H, W) // 2)
+    min_r = 4.0
+    budget = Config.WING_MASK_MAX_AREA_FRAC * H * W
+    area = 0.0
+    n_wide = 0
+    order = np.argsort(-np.asarray(sources['flux'], dtype=np.float64))[:Config.WING_MASK_MAX_STARS]
+    for i in order:
+        cy, cx = float(sources['ycentroid'][i]), float(sources['xcentroid'][i])
+        iy, ix = int(round(cy)), int(round(cx))
+        if not (0 <= iy < H and 0 <= ix < W):
+            continue
+        near = lum[max(0, iy - 12):iy + 13, max(0, ix - 12):ix + 13]
+        if lum[iy, ix] - np.median(near) < Config.WING_MASK_MIN_PEAK_SIGMA * sigma:
+            continue
+        rad = _star_wing_radius(lum, cy, cx, sigma, k, max_r, min_r)
+        if rad <= min_r + 2.0:
+            continue
+        area += np.pi * rad * rad
+        if area > budget:
+            break
+        y0, y1 = max(0, int(cy - rad) - 2), min(H, int(cy + rad) + 3)
+        x0, x1 = max(0, int(cx - rad) - 2), min(W, int(cx + rad) + 3)
+        rr = np.hypot(np.arange(y0, y1)[:, None] - cy, np.arange(x0, x1)[None, :] - cx)
+        np.maximum(out[y0:y1, x0:x1], np.clip(rad + 1.0 - rr, 0.0, 1.0).astype(np.float32),
+                   out=out[y0:y1, x0:x1])
+        n_wide += 1
+    if verbose and n_wide:
+        safe_print(f"    Wing-aware star mask: {n_wide} bright stars masked beyond their cores "
+                   f"(+{100.0 * (np.mean(out >= 0.5) - (np.mean(base_mask >= 0.5) if base_mask is not None else 0.0)):.1f}% of frame)")
+    return out
+
+
 # ============ Dynamic Background Extraction (DBE) =========
 
 
