@@ -329,11 +329,22 @@ def scale_factor(fwhm: Optional[float], fwhm_range: Tuple[float, float]) -> floa
     return 1.0 if f > SCALE_MAX_UP else f
 
 
+def _per_channel(fn, n: int) -> list:
+    """``[fn(0), ..., fn(n-1)]`` with the channels in threads: scipy's ndimage filters and
+    resamplers release the GIL, and each channel is independent, so the result is the same
+    as the serial loop."""
+    if n <= 1:
+        return [fn(c) for c in range(n)]
+    with ThreadPoolExecutor(max_workers=n, thread_name_prefix='nn-chan') as pool:
+        return list(pool.map(fn, range(n)))
+
+
 def _rescale(a: np.ndarray, shape: Tuple[int, int]) -> np.ndarray:
     """Cubic-spline resample of an (H, W, C) array to ``shape`` (H', W')."""
     zy, zx = shape[0] / a.shape[0], shape[1] / a.shape[1]
-    return np.stack([ndi.zoom(a[..., c], (zy, zx), order=3, mode='reflect', grid_mode=True)
-                     for c in range(a.shape[2])], axis=-1).astype(np.float32)
+    return np.stack(_per_channel(lambda c: ndi.zoom(a[..., c], (zy, zx), order=3, mode='reflect',
+                                                   grid_mode=True), a.shape[2]),
+                    axis=-1).astype(np.float32)
 
 
 def nn_denoise(img: np.ndarray, strength: float = 1.0, model_path: Optional[str] = None,
@@ -389,12 +400,13 @@ def nn_denoise(img: np.ndarray, strength: float = 1.0, model_path: Optional[str]
         lo, hi = STAR_RESTORE_FWHM
         ramp = float(np.clip((hi - fw) / (hi - lo), 0.0, 1.0)) if fw else 0.0
         smask = star_mask(src, fw) * np.float32(ramp) if ramp > 0 else None
-        for c in range(res.shape[2]):
+        def restored(c):
             if smask is None:
-                den[..., c] += ndi.gaussian_filter(res[..., c], restore_sigma, mode='reflect')
-            else:
-                den[..., c] += (ndi.gaussian_filter(res[..., c] * (1 - smask), restore_sigma, mode='reflect')
-                                + ndi.gaussian_filter(res[..., c] * smask, star_restore_frac * fw, mode='reflect'))
+                return ndi.gaussian_filter(res[..., c], restore_sigma, mode='reflect')
+            return (ndi.gaussian_filter(res[..., c] * (1 - smask), restore_sigma, mode='reflect')
+                    + ndi.gaussian_filter(res[..., c] * smask, star_restore_frac * fw, mode='reflect'))
+        for c, low in enumerate(_per_channel(restored, res.shape[2])):
+            den[..., c] += low
     if src.shape[2] == 3 and np.array_equal(src[..., 0], src[..., 1]) and np.array_equal(src[..., 0], src[..., 2]):
         # a monochrome stack (replicated planes): the network's three outputs differ (up to
         # ~200 ADU on LCO M51 stars) and would put false colour on a grey image
