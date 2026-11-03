@@ -1,0 +1,147 @@
+{
+ "note": "OriginStack 2.21.0; stacked with -v on the unzipped Zenodo sessions",
+ "sessions": {
+  "01_face-on_spiral_galaxy_M51_Whirlpool": {
+   "accepted": 45,
+   "frame_fwhm": 2.7,
+   "integration_min": 13.0,
+   "seconds": 61.0,
+   "stack_fwhm": 2.85,
+   "stack_noise": 176.42,
+   "target": "Whirlpool Galaxy",
+   "target_type": "Galaxy",
+   "total": 45,
+   "warnings": 0
+  },
+  "02_large_galaxy_NGC253_Sculptor": {
+   "accepted": 45,
+   "frame_fwhm": 3.6,
+   "integration_min": 7.2,
+   "seconds": 125.5,
+   "stack_fwhm": 2.75,
+   "stack_noise": 61.04,
+   "target": "Sculptor Galaxy",
+   "target_type": "Galaxy",
+   "total": 45,
+   "warnings": 2
+  },
+  "03_galaxy_group_Stephans_Quintet": {
+   "accepted": 45,
+   "frame_fwhm": 3.9,
+   "integration_min": 7.5,
+   "seconds": 134.5,
+   "stack_fwhm": 2.25,
+   "stack_noise": 55.02,
+   "target": "Stephan's Quintet",
+   "target_type": "Galaxy",
+   "total": 45,
+   "warnings": 1
+  },
+  "04_emission_nebula_Flame": {
+   "accepted": 45,
+   "frame_fwhm": 3.9,
+   "integration_min": 7.5,
+   "seconds": 68.9,
+   "stack_fwhm": 2.92,
+   "stack_noise": 56.15,
+   "target": "Flame Nebula",
+   "target_type": "Emission Nebula",
+   "total": 45,
+   "warnings": 0
+  },
+  "05_reflection_nebula_NGC7023_Iris": {
+   "accepted": 45,
+   "frame_fwhm": 5.0,
+   "integration_min": 7.2,
+   "seconds": 64.8,
+   "stack_fwhm": 3.23,
+   "stack_noise": 65.08,
+   "target": "Iris Nebula",
+   "target_type": "Reflection Nebula",
+   "total": 45,
+   "warnings": 1
+  },
+  "06_supernova_remnant_Eastern_Veil_NGC6995": {
+   "accepted": 45,
+   "frame_fwhm": 3.2,
+   "integration_min": 7.5,
+   "seconds": 68.3,
+   "stack_fwhm": 2.82,
+   "stack_noise": 26.26,
+   "target": "Eastern Veil Nebula",
+   "target_type": "Emission Nebula",
+   "total": 45,
+   "warnings": 0
+  },
+  "07_planetary_nebula_M27_Dumbbell": {
+   "accepted": 40,
+   "frame_fwhm": 5.0,
+   "integration_min": 6.5,
+   "seconds": 86.5,
+   "stack_fwhm": 5.12,
+   "stack_noise": 26.48,
+   "target": "Dumbbell Nebula",
+   "target_type": "Planetary Nebula",
+   "total": 42,
+   "warnings": 0
+  },
+  "08_globular_cluster_M13_Hercules": {
+   "accepted": 45,
+   "frame_fwhm": 5.0,
+   "integration_min": 11.2,
+   "seconds": 94.5,
+   "stack_fwhm": 4.02,
+   "stack_noise": 96.83,
+   "target": "Great Hercules Cluster",
+   "target_type": "Globular Cluster",
+   "total": 45,
+   "warnings": 0
+  },
+  "09_open_cluster_M37": {
+   "accepted": 45,
+   "frame_fwhm": 6.8,
+   "integration_min": 22.5,
+   "seconds": 80.6,
+   "stack_fwhm": 5.12,
+   "stack_noise": 132.49,
+   "target": "Messier 37",
+   "target_type": "Star Field",
+   "total": 45,
+   "warnings": 1
+  },
+  "10_wide_field_Sagittarius_Star_Cloud": {
+   "accepted": 45,
+   "frame_fwhm": 7.5,
+   "integration_min": 3.8,
+   "seconds": 70.3,
+   "stack_fwhm": 2.48,
+   "stack_noise": 139.25,
+   "target": "Sagittarius Star Cloud",
+   "target_type": "Wide Field",
+   "total": 45,
+   "warnings": 1
+  },
+  "11_comet_C2025_R2_SWAN": {
+   "accepted": 45,
+   "frame_fwhm": 6.2,
+   "integration_min": 7.5,
+   "seconds": 76.7,
+   "stack_fwhm": 2.61,
+   "stack_noise": 105.75,
+   "total": 45,
+   "warnings": 0
+  },
+  "12_narrowband_OIII_Lagoon": {
+   "accepted": 42,
+   "frame_fwhm": 10.7,
+   "integration_min": 17.5,
+   "seconds": 60.9,
+   "stack_fwhm": 6.88,
+   "stack_noise": 85.13,
+   "target": "Lagoon Nebula",
+   "target_type": "Emission Nebula",
+   "total": 45,
+   "warnings": 0
+  }
+ }
+}
