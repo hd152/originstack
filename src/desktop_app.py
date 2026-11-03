@@ -663,9 +663,14 @@ class SetupForm(ttk.Frame):
         self._toggle_btn = ttk.Button(bar, text='', command=self._toggle_advanced)
         self._toggle_btn.pack(side='left', fill='x', expand=True)
         self.search_var = tk.StringVar(value='')
-        ttk.Entry(bar, textvariable=self.search_var, width=22).pack(side='right', padx=(8, 0))
+        ttk.Entry(bar, textvariable=self.search_var, width=30).pack(side='right', padx=(8, 0))
         ttk.Label(bar, text=_('Search settings'), style='Dim.TLabel').pack(side='right')
         self.search_var.trace_add('write', lambda *_: self._on_search())
+        # Lists only what differs from the defaults (the same set the "N changed" count and the
+        # dots mark), across all groups: the quick way to see what a session is really using.
+        self.changed_only_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(bar, text=_('Only changed'), variable=self.changed_only_var,
+                        command=self._on_changed_only).pack(side='right', padx=(0, 10))
 
         # A sidebar of group names, not a Notebook of horizontal tabs: this
         # form has 8 groups with names like "Registration & stacking
@@ -730,6 +735,7 @@ class SetupForm(ttk.Frame):
         ``read_form`` is unaffected -- only visibility changes."""
         expert = self.expert_var.get()
         terms = self.search_var.get().lower().split()
+        only_changed = self.changed_only_var.get()
         matches: Dict[str, int] = {g: 0 for g in self.schema}
         for info in self._fields.values():
             if info['group'] is None:
@@ -738,6 +744,8 @@ class SetupForm(ttk.Frame):
                 visible = all(t in info['haystack'] for t in terms)
             else:
                 visible = expert or not info['expert']
+            if only_changed:
+                visible = visible and self._is_changed(info['dest'])
             if visible:
                 matches[info['group']] += 1
             for w in info['widgets']:
@@ -748,13 +756,13 @@ class SetupForm(ttk.Frame):
 
         for lbl in self._nav_labels.values():
             lbl.pack_forget()
-        if terms:
+        if terms or only_changed:
             visible_groups = [g for g in self.schema if matches[g]]
         else:
             visible_groups = [g for g in self.schema if expert or not _is_expert_group(g)]
         for g, lbl in self._nav_labels.items():
             if g in visible_groups:
-                lbl.configure(text=f'{_(g)}  ({matches[g]})' if terms else _(g))
+                lbl.configure(text=f'{_(g)}  ({matches[g]})' if terms or only_changed else _(g))
                 lbl.pack(fill='x')
 
         if not visible_groups:
@@ -766,6 +774,13 @@ class SetupForm(ttk.Frame):
         self._no_match.pack_forget()
         self._show_group(self._current_group if self._current_group in visible_groups
                          else visible_groups[0])
+
+    def _on_changed_only(self) -> None:
+        if self.changed_only_var.get() and not self._advanced_shown:
+            self._toggle_advanced()
+        if self.changed_only_var.get():
+            self.expert_var.set(True)       # a changed expert option must not hide behind the toggle
+        self._refresh_expert()
 
     def _on_search(self) -> None:
         if self.search_var.get().strip() and not self._advanced_shown:
@@ -881,6 +896,8 @@ class SetupForm(ttk.Frame):
             hint.grid(row=row + 1, column=1, columnspan=4, sticky='w')
             widgets.append(hint)
             rows_used += 1
+        if hint is not None and _tip:
+            _Tooltip(hint, _tip)       # the one-line description is shortened; the tip has all of it
         if hint is not None:
             if parent not in self._hints:
                 self._hints[parent] = []
@@ -900,7 +917,7 @@ class SetupForm(ttk.Frame):
         self._labels[dest] = _field_label_ui(field)
         var.trace_add('write', lambda *_: self._notify_change())
         self._fields[dest] = {
-            'widgets': widgets, 'group': group, 'dot': dot, 'reset': reset,
+            'dest': dest, 'widgets': widgets, 'group': group, 'dot': dot, 'reset': reset,
             'expert': _is_expert_field(field) or (group is not None and _is_expert_group(group)),
             # Not the full help: it mentions related features ("drizzle"
             # appears in the help of half the registration options), so a

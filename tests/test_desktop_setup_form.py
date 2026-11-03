@@ -213,3 +213,18 @@ def test_hidden_aliases_do_not_replace_the_visible_option():
     assert argv == ['--full-field', '0.7']
     from src.cli import parse_args
     assert parse_args(['-d', '.'] + argv).full_field == 0.7
+
+
+def test_only_changed_lists_just_the_changed_settings(form, tk_root):
+    import tkinter as tk
+
+    from src import desktop_app as da
+    dest = next(d for d, f in form._fields.items()
+                if f['group'] is not None and d not in da._PICKER_DESTS
+                and d not in da._NO_CHANGE_MARK and isinstance(form.vars[d], tk.BooleanVar))
+    form.vars[dest].set(not form.vars[dest].get())
+    form.changed_only_var.set(True)
+    form._on_changed_only()
+    tk_root.update_idletasks()
+    shown = [d for d, f in form._fields.items() if f['group'] is not None and _visible(form, d)]
+    assert shown == [dest]
