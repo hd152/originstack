@@ -51,3 +51,23 @@ def test_a_real_wm_dropfiles_reaches_the_callback(tk_root, tmp_path):
     user32.SendMessageW(hwnd, 0x0233, h, 0)
     tk_root.update()                                       # runs the after_idle hand-over
     assert got == [names]
+
+
+@pytest.mark.skipif(sys.platform != 'win32', reason='Windows shell drop')
+def test_hooking_a_window_twice_keeps_the_first_procedure_alive(tk_root):
+    """The second hook chains to the first one's thunk; losing that thunk crashed the next message
+    (an access violation in the desktop-app tests, which build several apps on one root)."""
+    import ctypes
+    import gc
+    from ctypes import wintypes
+
+    from src import drop_files
+    assert enable_file_drop(tk_root, lambda paths: None)
+    assert enable_file_drop(tk_root, lambda paths: None)
+    hwnd = ctypes.windll.user32.GetParent(tk_root.winfo_id()) or tk_root.winfo_id()
+    assert len(drop_files._keep[hwnd]) >= 2
+    gc.collect()
+    user32 = ctypes.windll.user32
+    user32.SendMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+    user32.SendMessageW(hwnd, 0x0000, 0, 0)    # WM_NULL goes down the whole chain
+    tk_root.update()
