@@ -257,3 +257,374 @@ pub(crate) fn nn_conv3x3_portable<'py>(
     let arr = numpy::ndarray::Array3::from_shape_vec((o_n, h, wd), out).expect("shape mismatch building output");
     Ok(arr.into_pyarray(py))
 }
+
+// ── Whole U-Net forward pass in one call (src/nn_denoise.py::forward) ────────────────────────
+
+/// Width of the zero padding block: every activation row is `ceil(w / 16) * 16 + 2` floats, so
+/// both conv kernels (8 and 16 pixels per step) read whole vectors without a bounds test.
+const NN_WALIGN: usize = 16;
+
+/// Output channels per block of the FMA kernel (6 x 2 vectors = 12 accumulators + 2 input
+/// vectors + 1 weight broadcast fit the 16 ymm registers; every channel count of the shipped
+/// networks, 24 / 48 / 96, divides by 6).
+const NN_OB_FMA: usize = 6;
+
+/// A (c, h, w) activation stored zero-padded by one pixel on every side (and to NN_WALIGN on the
+/// right), the layout the conv kernels read. Layers write straight into the next layer's input,
+/// so the forward pass has no separate padding or copy passes.
+struct NnAct {
+    c: usize,
+    h: usize,
+    w: usize,
+    hp: usize,
+    wp: usize,
+    data: Vec<f32>,
+}
+
+/// Activation buffers recycled between layers, tiles and calls; emptied by `nn_release_buffers`.
+static NN_POOL: std::sync::Mutex<Vec<Vec<f32>>> = std::sync::Mutex::new(Vec::new());
+
+/// Most buffers kept for reuse (a forward pass holds at most ~6 at once, two tiles in flight).
+const NN_POOL_MAX: usize = 24;
+
+impl Drop for NnAct {
+    fn drop(&mut self) {
+        let v = std::mem::take(&mut self.data);
+        let mut pool = NN_POOL.lock().unwrap_or_else(|e| e.into_inner());
+        if pool.len() < NN_POOL_MAX {
+            pool.push(v);
+        }
+    }
+}
+
+/// Free the activation buffers `nn_forward` keeps for reuse (call when a run of tiles is done).
+#[pyfunction]
+pub(crate) fn nn_release_buffers() {
+    NN_POOL.lock().unwrap_or_else(|e| e.into_inner()).clear();
+}
+
+impl NnAct {
+    fn new(c: usize, h: usize, w: usize) -> Self {
+        let (hp, wp) = (h + 2, w.div_ceil(NN_WALIGN) * NN_WALIGN + 2);
+        let n = c * hp * wp;
+        // A recycled buffer is cleared with a memset: much cheaper than faulting in fresh pages
+        // (~300 MB per 448 px tile, and page faults serialise on the process address space).
+        let recycled = {
+            let mut pool = NN_POOL.lock().unwrap_or_else(|e| e.into_inner());
+            let best = (0..pool.len()).filter(|&i| pool[i].capacity() >= n && pool[i].capacity() <= n * 2 + 4096)
+                .min_by_key(|&i| pool[i].capacity());
+            best.map(|i| pool.swap_remove(i))
+        };
+        let data = match recycled {
+            Some(mut v) => {
+                v.clear();
+                v.resize(n, 0.0);
+                v
+            }
+            None => vec![0f32; n],
+        };
+        NnAct { c, h, w, hp, wp, data }
+    }
+
+    /// Offset of pixel (y, x) of channel `ci` (interior coordinates).
+    #[inline(always)]
+    fn at(&self, ci: usize, y: usize, x: usize) -> usize {
+        (ci * self.hp + y + 1) * self.wp + x + 1
+    }
+}
+
+/// One conv layer's weights reordered for a kernel: tap-major (c, 9, o_pad), bias padded.
+struct NnLayer {
+    c: usize,
+    o_n: usize,
+    o_pad: usize,
+    wt: Vec<f32>,
+    bp: Vec<f32>,
+}
+
+fn nn_layer(w: &numpy::ndarray::ArrayView4<f32>, b: &numpy::ndarray::ArrayView1<f32>, ob: usize) -> PyResult<NnLayer> {
+    let (o_n, c) = (w.shape()[0], w.shape()[1]);
+    if w.shape()[2] != 3 || w.shape()[3] != 3 || b.len() != o_n {
+        return Err(pyo3::exceptions::PyValueError::new_err("conv weight shape mismatch"));
+    }
+    let o_pad = o_n.div_ceil(ob) * ob;
+    let mut wt = vec![0f32; c * 9 * o_pad];
+    for o in 0..o_n {
+        for ci in 0..c {
+            for ky in 0..3 {
+                for kx in 0..3 {
+                    wt[(ci * 9 + ky * 3 + kx) * o_pad + o] = w[[o, ci, ky, kx]];
+                }
+            }
+        }
+    }
+    let mut bp = vec![0f32; o_pad];
+    for o in 0..o_n {
+        bp[o] = b[o];
+    }
+    Ok(NnLayer { c, o_n, o_pad, wt, bp })
+}
+
+/// FMA row kernel: output row `y`, all channels, 6 channels x 16 pixels per register block.
+/// Same layout contract as `nn_conv_row_avx2` but the taps are accumulated with fused
+/// multiply-add, so results differ from the mul-then-add kernels in the last bits (and from a
+/// CPU without FMA); see `nn_forward`.
+///
+/// # Safety
+/// The CPU must support AVX2 and FMA; `xp` (c, hp, wp with wp >= ceil16(wd) + 2), `wt`
+/// (c, 9, o_pad) and `b` (o_pad) must be sized from `g` with `o_pad` a multiple of `NN_OB_FMA`.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn nn_conv_row_fma(xp: &[f32], wt: &[f32], b: &[f32], g: &NnConvGeom, y: usize, out_row: &mut [f32]) {
+    use std::arch::x86_64::*;
+    debug_assert!(xp.len() >= g.c * g.hp * g.wp && wt.len() >= g.c * 9 * g.o_pad && y + 2 < g.hp);
+    debug_assert!(g.o_pad % NN_OB_FMA == 0 && g.wp >= g.wd.div_ceil(16) * 16 + 2);
+    let (xptr, wptr) = (xp.as_ptr(), wt.as_ptr());
+    let mut x0 = 0;
+    while x0 < g.wd {
+        let n = (g.wd - x0).min(16);
+        let mut o0 = 0;
+        while o0 < g.o_n {
+            let mut a = [[_mm256_setzero_ps(); 2]; NN_OB_FMA];
+            for k in 0..NN_OB_FMA {
+                let bv = _mm256_set1_ps(b[o0 + k]);
+                a[k] = [bv, bv];
+            }
+            for ci in 0..g.c {
+                for ky in 0..3 {
+                    let row = xptr.add((ci * g.hp + y + ky) * g.wp + x0);
+                    for kx in 0..3 {
+                        let s0 = _mm256_loadu_ps(row.add(kx));
+                        let s1 = _mm256_loadu_ps(row.add(kx + 8));
+                        let wq = wptr.add((ci * 9 + ky * 3 + kx) * g.o_pad + o0);
+                        for k in 0..NN_OB_FMA {
+                            let wv = _mm256_set1_ps(*wq.add(k));
+                            a[k][0] = _mm256_fmadd_ps(wv, s0, a[k][0]);
+                            a[k][1] = _mm256_fmadd_ps(wv, s1, a[k][1]);
+                        }
+                    }
+                }
+            }
+            let mut tmp = [0f32; 16];
+            for k in 0..NN_OB_FMA.min(g.o_n - o0) {
+                _mm256_storeu_ps(tmp.as_mut_ptr(), a[k][0]);
+                _mm256_storeu_ps(tmp.as_mut_ptr().add(8), a[k][1]);
+                out_row[(o0 + k) * g.wd + x0..(o0 + k) * g.wd + x0 + n].copy_from_slice(&tmp[..n]);
+            }
+            o0 += NN_OB_FMA;
+        }
+        x0 += 16;
+    }
+}
+
+/// Which row kernel a forward pass uses.
+#[derive(Clone, Copy, PartialEq)]
+enum NnKernel {
+    Portable,
+    Avx2,
+    Fma,
+}
+
+/// 3x3 conv + bias (+ LeakyReLU) of `src` into `dst`'s interior, rows in parallel.
+fn nn_conv_layer(src: &NnAct, l: &NnLayer, leak: f32, act: bool, kernel: NnKernel, dst: &mut NnAct) {
+    debug_assert!(src.c == l.c && dst.c == l.o_n && dst.h == src.h && dst.w == src.w);
+    let g = NnConvGeom { c: l.c, hp: src.hp, wp: src.wp, o_n: l.o_n, o_pad: l.o_pad, wd: src.w };
+    let (h, wd, o_n) = (src.h, src.w, l.o_n);
+    let (dhp, dwp) = (dst.hp, dst.wp);
+    let dptr = HpPtr(dst.data.as_mut_ptr());
+    (0..h).into_par_iter().for_each_init(|| vec![0f32; o_n * wd], |row, y| {
+        let row = &mut row[..];
+        match kernel {
+            // SAFETY: the kernel was chosen after run-time feature detection; src, wt and bp are
+            // sized from g (activation rows are padded to NN_WALIGN + 2, o_pad matches the kernel).
+            #[cfg(target_arch = "x86_64")]
+            NnKernel::Fma => unsafe { nn_conv_row_fma(&src.data, &l.wt, &l.bp, &g, y, row) },
+            #[cfg(target_arch = "x86_64")]
+            NnKernel::Avx2 => unsafe { nn_conv_row_avx2(&src.data, &l.wt, &l.bp, &g, y, row) },
+            _ => nn_conv_row_portable(&src.data, &l.wt, &l.bp, &g, y, row),
+        }
+        if act {
+            for v in row.iter_mut() {
+                *v = v.max(leak * *v);
+            }
+        }
+        let dptr = dptr;
+        for o in 0..o_n {
+            // SAFETY: row y of plane o inside dst's interior; each task owns a distinct y.
+            unsafe {
+                std::ptr::copy_nonoverlapping(row.as_ptr().add(o * wd), dptr.0.add((o * dhp + y + 1) * dwp + 1), wd);
+            }
+        }
+    });
+}
+
+/// 2x2 average pool (torch `AvgPool2d(2)`): `((a + b) + c) + d` then `* 0.25`, the order of the
+/// numpy version's four strided adds.
+fn nn_pool2(src: &NnAct) -> NnAct {
+    let mut dst = NnAct::new(src.c, src.h / 2, src.w / 2);
+    let (dh, dw, dhp, dwp) = (dst.h, dst.w, dst.hp, dst.wp);
+    let dptr = HpPtr(dst.data.as_mut_ptr());
+    let q = 0.25f32;
+    (0..dh).into_par_iter().for_each(|y| {
+        let dptr = dptr;
+        for ci in 0..src.c {
+            let r0 = &src.data[src.at(ci, 2 * y, 0)..src.at(ci, 2 * y, 0) + 2 * dw];
+            let r1 = &src.data[src.at(ci, 2 * y + 1, 0)..src.at(ci, 2 * y + 1, 0) + 2 * dw];
+            // SAFETY: row y of plane ci in dst's interior; each task owns a distinct y.
+            let out = unsafe { std::slice::from_raw_parts_mut(dptr.0.add((ci * dhp + y + 1) * dwp + 1), dw) };
+            for x in 0..dw {
+                let mut s = r0[2 * x] + r1[2 * x];
+                s += r0[2 * x + 1];
+                s += r1[2 * x + 1];
+                out[x] = s * q;
+            }
+        }
+    });
+    dst
+}
+
+/// `concat([2x nearest-neighbour upsample of x, skip])` along channels.
+fn nn_up2_cat(x: &NnAct, skip: &NnAct) -> NnAct {
+    debug_assert!(x.h * 2 == skip.h && x.w * 2 == skip.w);
+    let mut dst = NnAct::new(x.c + skip.c, skip.h, skip.w);
+    let (h, w, dhp, dwp) = (dst.h, dst.w, dst.hp, dst.wp);
+    let dptr = HpPtr(dst.data.as_mut_ptr());
+    (0..h).into_par_iter().for_each(|y| {
+        let dptr = dptr;
+        for ci in 0..x.c {
+            let r = &x.data[x.at(ci, y / 2, 0)..x.at(ci, y / 2, 0) + x.w];
+            // SAFETY: row y of plane ci in dst's interior; each task owns a distinct y.
+            let out = unsafe { std::slice::from_raw_parts_mut(dptr.0.add((ci * dhp + y + 1) * dwp + 1), w) };
+            for xx in 0..x.w {
+                out[2 * xx] = r[xx];
+                out[2 * xx + 1] = r[xx];
+            }
+        }
+        for ci in 0..skip.c {
+            let r = &skip.data[skip.at(ci, y, 0)..skip.at(ci, y, 0) + w];
+            // SAFETY: as above, plane x.c + ci.
+            let out = unsafe { std::slice::from_raw_parts_mut(dptr.0.add(((x.c + ci) * dhp + y + 1) * dwp + 1), w) };
+            out.copy_from_slice(r);
+        }
+    });
+    dst
+}
+
+/// The whole U-Net of `src/nn_denoise.py::forward` in one call: x (C, H, W) float32 with H and W
+/// multiples of 4; `w` maps the layer names (`e0a`, `e0b`, `e1a`, `e1b`, `ma`, `mb`, `d1a`,
+/// `d1b`, `d0a`, `d0b`, `out`) + `.weight` / `.bias` to the arrays. Returns (O, H, W).
+///
+/// With `fma` false the convolutions are `nn_conv3x3`'s kernels and the pooling / upsampling are
+/// the numpy glue's arithmetic, so everything but the last 1x1 layer (summed here in channel
+/// order; numpy's einsum uses BLAS) is bit-identical to calling `nn_conv3x3` per layer. With
+/// `fma` true (and a CPU that has it) the convolutions use fused multiply-add: faster, but the
+/// result differs in the last bits and depends on whether the CPU has FMA.
+#[pyfunction]
+#[pyo3(signature = (x, w, leak, fma=false))]
+pub(crate) fn nn_forward<'py>(
+    py: Python<'py>,
+    x: PyReadonlyArray3<'py, f32>,
+    w: &Bound<'py, pyo3::types::PyDict>,
+    leak: f32,
+    fma: bool,
+) -> PyResult<Bound<'py, PyArray3<f32>>> {
+    let bad = |m: &str| pyo3::exceptions::PyValueError::new_err(m.to_string());
+    let xs = x.as_array().shape().to_vec();
+    let (c0, h, wd) = (xs[0], xs[1], xs[2]);
+    if h == 0 || wd == 0 || h % 4 != 0 || wd % 4 != 0 {
+        return Err(bad("H and W must be positive multiples of 4"));
+    }
+    #[cfg(target_arch = "x86_64")]
+    let kernel = if fma && std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma") {
+        NnKernel::Fma
+    } else if std::is_x86_feature_detected!("avx2") {
+        NnKernel::Avx2
+    } else {
+        NnKernel::Portable
+    };
+    #[cfg(not(target_arch = "x86_64"))]
+    let kernel = NnKernel::Portable;
+    let ob = if kernel == NnKernel::Fma { NN_OB_FMA } else { NN_OB };
+    let get = |name: &str| -> PyResult<(PyReadonlyArray4<'py, f32>, PyReadonlyArray1<'py, f32>)> {
+        let wk = w.get_item(format!("{name}.weight"))?.ok_or_else(|| bad(&format!("missing {name}.weight")))?;
+        let bk = w.get_item(format!("{name}.bias"))?.ok_or_else(|| bad(&format!("missing {name}.bias")))?;
+        Ok((wk.extract()?, bk.extract()?))
+    };
+    let layer = |name: &str| -> PyResult<NnLayer> {
+        let (wa, ba) = get(name)?;
+        nn_layer(&wa.as_array(), &ba.as_array(), ob)
+    };
+    let (e0a, e0b, e1a, e1b) = (layer("e0a")?, layer("e0b")?, layer("e1a")?, layer("e1b")?);
+    let (ma, mb, d1a, d1b, d0a, d0b) = (layer("ma")?, layer("mb")?, layer("d1a")?, layer("d1b")?, layer("d0a")?, layer("d0b")?);
+    let (ow, ob_) = get("out")?;
+    let (ow, ob_) = (ow.as_array().to_owned(), ob_.as_array().to_owned());
+    if e0a.c != c0 || ow.shape()[1] != d0b.o_n || ow.shape()[2] != 1 || ow.shape()[3] != 1 {
+        return Err(bad("network shape does not match the input"));
+    }
+    let o_out = ow.shape()[0];
+    let xv = x.as_slice().map_err(|_| bad("x must be contiguous"))?;
+    let out = py.detach(|| {
+        let mut a0 = NnAct::new(c0, h, wd);
+        for ci in 0..c0 {
+            for y in 0..h {
+                let d = a0.at(ci, y, 0);
+                a0.data[d..d + wd].copy_from_slice(&xv[(ci * h + y) * wd..(ci * h + y + 1) * wd]);
+            }
+        }
+        let conv = |src: &NnAct, l: &NnLayer| {
+            let mut dst = NnAct::new(l.o_n, src.h, src.w);
+            nn_conv_layer(src, l, leak, true, kernel, &mut dst);
+            dst
+        };
+        let t = conv(&a0, &e0a);
+        drop(a0);
+        let s0 = conv(&t, &e0b);
+        drop(t);
+        let p0 = nn_pool2(&s0);
+        let t = conv(&p0, &e1a);
+        drop(p0);
+        let s1 = conv(&t, &e1b);
+        drop(t);
+        let p1 = nn_pool2(&s1);
+        let t = conv(&p1, &ma);
+        drop(p1);
+        let m = conv(&t, &mb);
+        drop(t);
+        let cat = nn_up2_cat(&m, &s1);
+        drop((m, s1));
+        let t = conv(&cat, &d1a);
+        drop(cat);
+        let d1 = conv(&t, &d1b);
+        drop(t);
+        let cat = nn_up2_cat(&d1, &s0);
+        drop((d1, s0));
+        let t = conv(&cat, &d0a);
+        drop(cat);
+        let d0 = conv(&t, &d0b);
+        drop(t);
+        // 1x1 output layer: per row, channel-order accumulation (vectorises over x).
+        let mut out = vec![0f32; o_out * h * wd];
+        let optr = HpPtr(out.as_mut_ptr());
+        (0..h).into_par_iter().for_each(|y| {
+            let optr = optr;
+            for o in 0..o_out {
+                // SAFETY: row y of plane o of `out`; each task owns a distinct y.
+                let dst = unsafe { std::slice::from_raw_parts_mut(optr.0.add((o * h + y) * wd), wd) };
+                for ci in 0..d0.c {
+                    let wv = ow[[o, ci, 0, 0]];
+                    let r = &d0.data[d0.at(ci, y, 0)..d0.at(ci, y, 0) + wd];
+                    for xx in 0..wd {
+                        dst[xx] += wv * r[xx];
+                    }
+                }
+                let bv = ob_[o];
+                for v in dst.iter_mut() {
+                    *v += bv;
+                }
+            }
+        });
+        out
+    });
+    let arr = numpy::ndarray::Array3::from_shape_vec((o_out, h, wd), out).expect("shape mismatch building output");
+    Ok(arr.into_pyarray(py))
+}

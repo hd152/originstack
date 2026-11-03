@@ -6,6 +6,7 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+- Faster NN deconvolution / denoising: the whole network now runs in one native call with recycled activation buffers (about 1.5x per tile; the 1536x1920 test image 3.05-3.69 s -> 2.9 s). Output is unchanged to 2e-6.
 - Desktop app: a **Quick look** preview of the stack appears right after registration (the 8 sharpest frames, warped, binned and averaged), instead of an empty preview until Phase 3's combine ends. On a 41-frame session it showed 12 s before the first real stack preview; longer sessions gain more. Nothing changes in the stack or on CLI runs.
 
 ### Desktop app

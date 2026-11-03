@@ -3364,3 +3364,80 @@ def test_nn_denoise_forward_uses_native_and_matches_numpy(monkeypatch):
     monkeypatch.setattr(nd, '_HAS_NATIVE', False)
     ref = nd.forward(x, w)
     np.testing.assert_allclose(got, ref, rtol=1e-4, atol=1e-4 * np.abs(ref).max())
+
+
+def _tiny_net(rng, f=4):
+    shapes = {'e0a': (f, 3), 'e0b': (f, f), 'e1a': (2 * f, f), 'e1b': (2 * f, 2 * f), 'ma': (4 * f, 2 * f),
+              'mb': (4 * f, 4 * f), 'd1a': (2 * f, 6 * f), 'd1b': (2 * f, 2 * f), 'd0a': (f, 3 * f), 'd0b': (f, f)}
+    w = {}
+    for k, (oo, i) in shapes.items():
+        w[k + '.weight'] = rng.normal(0, 0.2, (oo, i, 3, 3)).astype(np.float32)
+        w[k + '.bias'] = rng.normal(0, 0.05, oo).astype(np.float32)
+    w['out.weight'] = rng.normal(0, 0.2, (3, f, 1, 1)).astype(np.float32)
+    w['out.bias'] = rng.normal(0, 0.05, 3).astype(np.float32)
+    return w
+
+
+def _forward_per_layer(x, w):
+    """The pre-nn_forward composition: per-layer native convs and numpy pooling / concat glue."""
+    import src.nn_denoise as nd
+
+    def conv(n, t):
+        return native.nn_conv3x3(np.ascontiguousarray(t), w[n + '.weight'], w[n + '.bias'], nd.LEAK, True)
+    s0 = conv('e0b', conv('e0a', x))
+    s1 = conv('e1b', conv('e1a', nd._pool2(s0)))
+    m = conv('mb', conv('ma', nd._pool2(s1)))
+    d1 = conv('d1b', conv('d1a', nd._up2_cat(m, s1)))
+    d0 = conv('d0b', conv('d0a', nd._up2_cat(d1, s0)))
+    return np.einsum('oc,chw->ohw', w['out.weight'][:, :, 0, 0], d0, optimize=True) + w['out.bias'][:, None, None]
+
+
+@pytest.mark.parametrize('h,w_', [(64, 96), (36, 52), (4, 4), (8, 20)])
+def test_nn_forward_matches_per_layer_composition(h, w_):
+    """Without FMA the whole-network call is the per-layer native convs plus the same pooling /
+    concat arithmetic; only the last 1x1 layer is summed differently (numpy uses BLAS)."""
+    import src.nn_denoise as nd
+    rng = np.random.default_rng(h * 100 + w_)
+    w = _tiny_net(rng)
+    x = rng.normal(size=(3, h, w_)).astype(np.float32)
+    got = native.nn_forward(x, w, nd.LEAK, False)
+    ref = _forward_per_layer(x, w)
+    assert got.shape == ref.shape and got.dtype == np.float32
+    np.testing.assert_allclose(got, ref, rtol=1e-5, atol=1e-5 * np.abs(ref).max())
+
+
+def test_nn_forward_fma_close_to_plain():
+    """The FMA kernel rounds differently (fused), so it is checked with a tolerance."""
+    import src.nn_denoise as nd
+    rng = np.random.default_rng(21)
+    w = _tiny_net(rng, f=6)   # 6 | channel counts: whole FMA blocks as in the shipped networks
+    x = rng.normal(size=(3, 40, 72)).astype(np.float32)
+    plain = native.nn_forward(x, w, nd.LEAK, False)
+    fused = native.nn_forward(x, w, nd.LEAK, True)
+    np.testing.assert_allclose(fused, plain, rtol=1e-4, atol=1e-4 * np.abs(plain).max())
+
+
+def test_nn_forward_rejects_bad_input():
+    import src.nn_denoise as nd
+    w = _tiny_net(np.random.default_rng(2))
+    with pytest.raises(ValueError):
+        native.nn_forward(np.zeros((3, 10, 16), np.float32), w, nd.LEAK)    # H not a multiple of 4
+    with pytest.raises(ValueError):
+        native.nn_forward(np.zeros((2, 16, 16), np.float32), w, nd.LEAK)    # wrong channel count
+    bad = dict(w)
+    del bad['mb.bias']
+    with pytest.raises(ValueError):
+        native.nn_forward(np.zeros((3, 16, 16), np.float32), bad, nd.LEAK)
+
+
+def test_nn_forward_buffers_recycled_without_changing_results():
+    import src.nn_denoise as nd
+    rng = np.random.default_rng(5)
+    w = _tiny_net(rng)
+    x = rng.normal(size=(3, 32, 48)).astype(np.float32)
+    first = native.nn_forward(x, w, nd.LEAK)
+    # a different shape in between leaves dirty recycled buffers behind
+    native.nn_forward(rng.normal(size=(3, 64, 64)).astype(np.float32), w, nd.LEAK)
+    np.testing.assert_array_equal(native.nn_forward(x, w, nd.LEAK), first)
+    native.nn_release_buffers()
+    np.testing.assert_array_equal(native.nn_forward(x, w, nd.LEAK), first)
