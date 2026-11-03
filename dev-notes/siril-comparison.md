@@ -34,3 +34,20 @@ Measured against Siril on Omega/Sunflower/Sculptor (`tools/bench_vs_siril.py --r
 - 1x `--no-proper-coadd` (drizzle's combine has no proper coadd): 1.00-1.01.
 Dark-ring dip around the 40 brightest stars, in each stack's own sky sigma: 1x +0.17 / -0.02, Magic +0.23 / 0.00, Lanczos-3 +0.14 / -0.04 (Fireworks / M66 medians; worst -0.26 to -0.28 on M66 for all three). So `--auto`'s switch to Magic (to avoid Lanczos ringing) bought nothing and cost 10% width; removed. Drizzle stays opt-in: at equal noise it is 5% sharper on M66 and equal on Fireworks, for 4x the pixels, a 43 s combine instead of 9 s, and a learned deconvolver trained at 1x scale. Earlier sky-position (CRVAL) estimates of 22-26 px dithers came from noisy solves: the stack log's dither analysis shows 1.8-3.4 px steps (drift) on these 2026 sessions; the common crop kept 94-95% of the frame.
 
+
+## Astro Pixel Processor 2.0.0-beta48 vs OriginStack vs Siril, Omega (2026-11-03)
+
+Omega_Nebula_2026-08-02_21-37-06 (114 lights, bias/dark/flat), `tools/bench_vs_siril.py`
+with `--external` for APP. APP defaults, linear colour FITS ("NoSt" export, no stretch),
+timed by hand in the GUI, so its time may include GUI overhead; memory/disk not measured.
+
+| | OriginStack | Siril | APP |
+|---|---|---|---|
+| Time without Phase 4 | 56.6 s | 65.7 s | 226.7 s (23 calibrate + 58.2 register + 40.45 normalise + 105 integrate) |
+| Time with Phase 4 | 85.9 s | - | - |
+| Frames stacked | 114 / 114 | 111 / 114 | not reported |
+
+Shared-star width (n=400, ratio OriginStack / other): Siril 0.967 (R/G/B 0.969/0.972/0.971),
+APP 0.978 (R 1.003, G 0.961, B 0.951 -- no sharper than APP in R). Noise at matched star
+width (OriginStack / other): Siril 0.80/0.86/0.89, APP 0.92/0.71/0.69 (R/G/B). Detected star
+counts (OriginStack 3542, Siril 3525, APP 4381) are not a sharpness figure.
