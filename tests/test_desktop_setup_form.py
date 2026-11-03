@@ -228,3 +228,28 @@ def test_only_changed_lists_just_the_changed_settings(form, tk_root):
     tk_root.update_idletasks()
     shown = [d for d, f in form._fields.items() if f['group'] is not None and _visible(form, d)]
     assert shown == [dest]
+
+
+def test_saved_settings_round_trip_and_leave_the_folders_alone(form, tk_root, tmp_path, monkeypatch):
+    import tkinter as tk
+
+    from src import desktop_app as da
+    monkeypatch.setattr('src.i18n._settings_path', lambda: tmp_path / 'settings.json')
+    dest = next(d for d, f in form._fields.items()
+                if f['group'] is not None and d not in da._PICKER_DESTS
+                and d not in da._NO_CHANGE_MARK and d not in form._path_dests
+                and isinstance(form.vars[d], tk.BooleanVar))
+    form.vars['directory'].set(str(tmp_path))
+    form.vars[dest].set(not form.vars[dest].get())
+    assert dest in form.preset_state() and 'directory' not in form.preset_state()
+    assert form.save_preset('night one')
+    form.vars[dest].set(form._initial[dest])               # back to the default
+    form.vars['directory'].set('elsewhere')
+    form.preset_var.set('night one')
+    form._load_preset()
+    assert form.vars[dest].get() != form._initial[dest]
+    assert form.vars['directory'].get() == 'elsewhere'     # the session's folder is not part of it
+    form.apply_preset({})                                  # an empty preset is "all defaults"
+    assert form.vars[dest].get() == form._initial[dest]
+    form._delete_preset()
+    assert 'night one' not in form._presets()

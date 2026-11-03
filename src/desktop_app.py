@@ -632,6 +632,7 @@ class SetupForm(ttk.Frame):
         # reported "galaxy detail lost to denoising" bug: the auto-advisor's
         # galaxy-specific denoiser choice never got a chance to apply.
         self._initial: Dict[str, Any] = {}
+        self._path_dests: set = set()          # fields that hold a folder or file (see preset_state)
         # dest -> {'widgets', 'group', 'expert', 'haystack', 'dot', 'reset'}
         # for every field built (common fields have group None).
         self._fields: Dict[str, Dict[str, Any]] = {}
@@ -655,6 +656,21 @@ class SetupForm(ttk.Frame):
                 self._camera_label.grid(row=row, column=0, columnspan=4, sticky='w', padx=4)
                 self._camera_label.grid_remove()
                 row += 1
+
+        # Named sets of settings, kept in the app's settings file.
+        preset_row = ttk.Frame(self)
+        preset_row.pack(fill='x', pady=(10, 0))
+        ttk.Label(preset_row, text=_('My settings'), style='Dim.TLabel').pack(side='left')
+        self.preset_var = tk.StringVar(value='')
+        self.preset_combo = ttk.Combobox(preset_row, textvariable=self.preset_var,
+                                         state='readonly', width=24)
+        self.preset_combo.pack(side='left', padx=(8, 6))
+        self.preset_combo.bind('<<ComboboxSelected>>', lambda _e: self._load_preset())
+        ttk.Button(preset_row, text=_('Save as…'), command=self._save_preset_dialog).pack(
+            side='left')
+        ttk.Button(preset_row, text=_('Delete'), command=self._delete_preset).pack(
+            side='left', padx=(6, 0))
+        self._refresh_presets()
 
         bar = ttk.Frame(self)
         bar.pack(fill='x', pady=(10, 0))
@@ -876,6 +892,7 @@ class SetupForm(ttk.Frame):
             w.grid(row=row, column=2, sticky='we', pady=(5, 0))
             widget_hint = field.get('widget')
             if widget_hint:
+                self._path_dests.add(dest)
                 b = ttk.Button(parent, text=_('Browse…'),
                                command=lambda d=dest, v=var, h=widget_hint:
                                    self._browse(d, v, h))
@@ -1109,6 +1126,66 @@ class SetupForm(ttk.Frame):
         except Exception:
             self.dir_count_var.set('')
         self.goal.set_suggestion(self.inferred[1], self.inferred[0])
+
+    # ── saved settings ("My settings") ─────────────────────────────────
+
+    @staticmethod
+    def _presets() -> Dict[str, Dict[str, Any]]:
+        from src.desktop_control import load_app_setting
+        data = load_app_setting('setup_presets', {})
+        return data if isinstance(data, dict) else {}
+
+    def _refresh_presets(self, select: str = '') -> None:
+        self.preset_combo['values'] = sorted(self._presets())
+        self.preset_var.set(select)
+
+    def save_preset(self, name: str) -> bool:
+        from src.desktop_control import save_app_setting
+        name = name.strip()
+        if not name:
+            return False
+        presets = self._presets()
+        presets[name] = self.preset_state()
+        save_app_setting('setup_presets', presets)
+        self._refresh_presets(select=name)
+        return True
+
+    def _save_preset_dialog(self) -> None:
+        from tkinter import simpledialog
+        name = simpledialog.askstring(_('Save settings'), _('Name for these settings:'),
+                                      initialvalue=self.preset_var.get(), parent=self)
+        if name:
+            self.save_preset(name)
+
+    def _load_preset(self) -> None:
+        state = self._presets().get(self.preset_var.get())
+        if state is not None:
+            self.apply_preset(state)
+
+    def _delete_preset(self) -> None:
+        from src.desktop_control import save_app_setting
+        presets = self._presets()
+        if presets.pop(self.preset_var.get(), None) is not None:
+            save_app_setting('setup_presets', presets)
+            self._refresh_presets()
+
+    def preset_state(self) -> Dict[str, Any]:
+        """The settings as a saved preset: what differs from the defaults, without the folders and
+        files, which belong to one session."""
+        return {d: v for d, v in self.read_form().items() if d not in self._path_dests}
+
+    def apply_preset(self, state: Dict[str, Any]) -> None:
+        """Put a saved preset on the form: every setting not in it goes back to its default (so a
+        preset is the whole of what it describes, not a patch on the previous one); the folders
+        stay as they are."""
+        for dest, var in self.vars.items():
+            if dest in self._path_dests:
+                continue
+            value = state.get(dest, self._initial.get(dest))
+            try:
+                var.set(value)
+            except tk.TclError:
+                var.set(self._initial.get(dest))
 
     def read_form(self) -> Dict[str, Any]:
         """``{dest: value}`` for fields the user actually changed from their
@@ -1831,8 +1908,11 @@ class App:
                                         selectmode='browse')
         headings = {'frame': _('Frame'), 'score': _('Score'), 'snr': 'SNR',
                     'stars': _('Stars'), 'fwhm': 'FWHM'}
+        self._frame_headings = headings
+        self._frame_sort: Optional[Tuple[str, bool]] = None     # (column, descending)
         for c, w in zip(cols, (170, 60, 60, 50, 60)):
-            self.frames_tree.heading(c, text=headings[c])
+            self.frames_tree.heading(c, text=headings[c],
+                                     command=lambda col=c: self._sort_frames(col))
             self.frames_tree.column(c, width=w, anchor='e' if c != 'frame' else 'w')
         self.frames_tree.tag_configure('bad', foreground=_BAD)
         self.frames_tree.pack(fill='x')
@@ -2343,6 +2423,42 @@ class App:
         window.bind('<Escape>', lambda _event: window.destroy())
         window.focus_set()
 
+    _FRAME_COLS = ('frame', 'score', 'snr', 'stars', 'fwhm')
+
+    def _sorted_frame_rows(self, rows: List[tuple]) -> List[tuple]:
+        """The table's rows in the order its header was last clicked (arrival order until then)."""
+        if self._frame_sort is None:
+            return rows
+        col, desc = self._frame_sort
+        i = self._FRAME_COLS.index(col)
+
+        def key(row):
+            v = row[i]
+            if col == 'frame':
+                return str(v)
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                return float('-inf')
+        return sorted(rows, key=key, reverse=desc)
+
+    def _sort_frames(self, col: str) -> None:
+        """Header click: sort by that column, again to reverse, a third time for arrival order."""
+        cur = self._frame_sort
+        if cur is None or cur[0] != col:
+            # Quality columns read best with the highest first; names alphabetically.
+            self._frame_sort = (col, col != 'frame')
+        elif cur[1] == (col != 'frame'):
+            self._frame_sort = (col, not cur[1])
+        else:
+            self._frame_sort = None
+        for c in self._FRAME_COLS:
+            arrow = ''
+            if self._frame_sort and self._frame_sort[0] == c:
+                arrow = ' ▼' if self._frame_sort[1] else ' ▲'
+            self.frames_tree.heading(c, text=self._frame_headings[c] + arrow)
+        self._frame_rows_shown = []            # rebuilt on the next poll (150 ms)
+
     def _clear_frames_table(self) -> None:
         self._pinned_frame = None
         self._frame_rows_shown = []
@@ -2451,6 +2567,7 @@ class App:
         # recent frames
         rows = [(r['name'], r['score'], r['snr'], r['stars'], r['fwhm'], r['ok'])
                 for r in snap['frames'][-20:]]
+        rows = self._sorted_frame_rows(rows)
         if rows != self._frame_rows_shown:
             self._frame_rows_shown = rows
             self.frames_tree.delete(*self.frames_tree.get_children())

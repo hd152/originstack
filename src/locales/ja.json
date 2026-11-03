@@ -651,5 +651,12 @@
  "With --photometry-timeseries: write <output>_aavso.txt.": "--photometry-timeseries使用時: <output>_aavso.txtを書き出します。",
  "With --photometry-timeseries: write <output>_aavso.txt: the light curve of the target in the AAVSO Extended Format, for WebObs upload. Comparison stars come from the AAVSO VSP chart (network), ensemble-calibrated per frame on the green channel (TG band), with a check star. Target: --aavso-star NAME or --photometry-target RA,DEC.": "--photometry-timeseries使用時: <output>_aavso.txtを書き出します。ターゲットの光度曲線をAAVSO Extended Format形式で出力し、WebObsにアップロードできます。比較星はAAVSO VSPチャート(ネットワーク)から取得し、フレームごとに緑チャンネル(TGバンド)でアンサンブル較正し、チェック星を使います。ターゲット: --aavso-star NAME または --photometry-target RA,DEC。",
  "Write <output>_frames.csv and <output>_frames.json after registration.": "位置合わせ後に<output>_frames.csvと<output>_frames.jsonを書き出します。",
- "Write <output>_frames.csv and <output>_frames.json after registration: for every light, kept or rejected, which gate decided it and why (e.g. \"score 12.0 < 30.0\"), notes for kept frames far off the session median (FWHM, stars, background, ellipticity), and the key metrics. Changes no result. With -v also prints the count per reason.": "位置合わせ後に<output>_frames.csvと<output>_frames.jsonを書き出します。すべてのライトについて、採用か除外か、どのゲートがなぜ判定したか(例: \"score 12.0 < 30.0\")、セッション中央値から大きく外れた採用フレームのメモ(FWHM、星、背景、楕円率)、主要な指標を記録します。結果は変わりません。-vを付けると理由ごとの件数も表示します。"
+ "Write <output>_frames.csv and <output>_frames.json after registration: for every light, kept or rejected, which gate decided it and why (e.g. \"score 12.0 < 30.0\"), notes for kept frames far off the session median (FWHM, stars, background, ellipticity), and the key metrics. Changes no result. With -v also prints the count per reason.": "位置合わせ後に<output>_frames.csvと<output>_frames.jsonを書き出します。すべてのライトについて、採用か除外か、どのゲートがなぜ判定したか(例: \"score 12.0 < 30.0\")、セッション中央値から大きく外れた採用フレームのメモ(FWHM、星、背景、楕円率)、主要な指標を記録します。結果は変わりません。-vを付けると理由ごとの件数も表示します。",
+ "All checks passed": "すべてのチェックに合格しました",
+ "Delete": "削除",
+ "My settings": "マイ設定",
+ "Name for these settings:": "この設定の名前:",
+ "Only changed": "変更した項目のみ",
+ "Save as…": "名前を付けて保存…",
+ "Save settings": "設定を保存"
 }
