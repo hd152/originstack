@@ -6,6 +6,8 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+- Desktop app (Windows): drop a session folder, or a file from it, on the window to set the light frames. Uses the Windows shell's own drop message through ctypes: no new dependency.
+
 ## [2.21.0] - 2026-11-02
 
 Image-quality work from a research survey of the whole pipeline: two calibration/denoising repairs
