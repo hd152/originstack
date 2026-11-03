@@ -6,6 +6,7 @@
     python tools/upload_zenodo.py MANIFEST.json --publish NAME  # publish one
     python tools/upload_zenodo.py MANIFEST.json --status        # what each record's draft looks like
     python tools/upload_zenodo.py MANIFEST.json --drafts-only   # create the drafts (reserved DOIs), no files
+    python tools/upload_zenodo.py MANIFEST.json --refresh-metadata  # new metadata, also on published records
 
 The manifest lists the records::
 
@@ -123,6 +124,10 @@ class Zenodo:
     def publish(self, dep_id: int) -> dict:
         return self._call('POST', f'{self.base}/deposit/depositions/{dep_id}/actions/publish')
 
+    def edit(self, dep_id: int) -> dict:
+        """Reopen a published record for a metadata change (its files stay fixed)."""
+        return self._call('POST', f'{self.base}/deposit/depositions/{dep_id}/actions/edit')
+
 
 def md5_of(path: str, block: int = 1 << 22) -> str:
     h = hashlib.md5()  # noqa: S324 -- Zenodo reports MD5, used only to compare with what it stored
@@ -210,6 +215,30 @@ def upload_record(api: Zenodo, rec: dict, state: dict, state_path: str, log=prin
     return dep_id
 
 
+def published_names(api: Zenodo, state: dict) -> set:
+    """Names of the records in ``state`` that are already published."""
+    return {name for name, st in state.items() if st.get('id') and api.get(st['id']).get('submitted')}
+
+
+def refresh_metadata(api: Zenodo, rec: dict, st: dict, log=print) -> None:
+    """Send the manifest's metadata to a record. A published record is reopened (``edit``), updated and
+    published again: same DOI and files, new metadata. Refuses if the files changed meanwhile."""
+    dep_id = st['id']
+    dep = api.get(dep_id)
+    if dep.get('submitted'):
+        before = {f['filename']: f.get('checksum') for f in api.files(dep_id)}
+        api.edit(dep_id)
+        api.set_metadata(dep_id, rec['metadata'])
+        after = {f['filename']: f.get('checksum') for f in api.files(dep_id)}
+        if before != after:
+            raise RuntimeError(f"{rec['name']}: files differ after reopening; not publishing again")
+        api.publish(dep_id)
+        log(f"  {rec['name']}: published record {dep_id} updated (metadata only)")
+    else:
+        api.set_metadata(dep_id, rec['metadata'])
+        log(f"  {rec['name']}: draft {dep_id} updated")
+
+
 def verify_record(api: Zenodo, rec: dict, dep_id: int) -> List[str]:
     """Differences between the local files and what the draft holds (empty = identical)."""
     remote = {f['filename']: f for f in api.files(dep_id)}
@@ -236,6 +265,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument('--publish', nargs='*', metavar='NAME',
                     help='publish the named records (all of them when none are named); IRREVERSIBLE')
     ap.add_argument('--check', action='store_true', help='validate the manifest and exit (no network)')
+    ap.add_argument('--refresh-metadata', nargs='*', metavar='NAME',
+                    help='send the manifest metadata to the named records (all when none are named), '
+                         'including already published ones (reopened, updated, published again; files untouched)')
     ap.add_argument('--drafts-only', action='store_true',
                     help="create each record's draft and set its metadata, but upload no files")
     a = ap.parse_args(argv)
@@ -273,6 +305,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         chosen = [r for r in records if not a.publish or r['name'] in a.publish]
         if not chosen:
             sys.exit('no such record in the manifest')
+        done = published_names(api, state)
+        for r in chosen:
+            if r['name'] in done:
+                print(f"  {r['name']}: already published")
+        chosen = [r for r in chosen if r['name'] not in done]
+        if not chosen:
+            print('nothing left to publish')
+            return 0
         for r in chosen:
             st = state.get(r['name'])
             if not st:
@@ -289,8 +329,19 @@ def main(argv: Optional[List[str]] = None) -> int:
             print(f"  {r['name']}: published, DOI {state[r['name']]['doi']}")
         return 0
 
+    if a.refresh_metadata is not None:
+        chosen = [r for r in records if not a.refresh_metadata or r['name'] in a.refresh_metadata]
+        for r in chosen:
+            if r['name'] not in state:
+                sys.exit(f"{r['name']}: no record yet")
+            refresh_metadata(api, r, state[r['name']])
+        return 0
+
+    done = published_names(api, state)
     if a.drafts_only:
         for r in records:
+            if r['name'] in done:
+                continue
             upload_record(api, r, state, state_path, files=False)
             st = state[r['name']]
             print(f"  {r['name']}: draft {st['id']}  DOI {st.get('reserved_doi', '?')}  {st.get('html', '')}")
@@ -298,6 +349,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 0
 
     for r in records:
+        if r['name'] in done:
+            print(f"  {r['name']}: already published, left alone")
+            continue
         upload_record(api, r, state, state_path)
         bad = verify_record(api, r, state[r['name']]['id'])
         if bad:
