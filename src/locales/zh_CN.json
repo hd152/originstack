@@ -651,5 +651,12 @@
  "With --photometry-timeseries: write <output>_aavso.txt.": "配合 --photometry-timeseries:写出 <output>_aavso.txt。",
  "With --photometry-timeseries: write <output>_aavso.txt: the light curve of the target in the AAVSO Extended Format, for WebObs upload. Comparison stars come from the AAVSO VSP chart (network), ensemble-calibrated per frame on the green channel (TG band), with a check star. Target: --aavso-star NAME or --photometry-target RA,DEC.": "配合 --photometry-timeseries:写出 <output>_aavso.txt:目标的光变曲线,采用 AAVSO Extended Format 格式,可上传到 WebObs。比较星来自AAVSO VSP星图(网络),在绿色通道(TG波段)上按帧做整体校准,并带有一颗检验星。目标:--aavso-star 名称 或 --photometry-target RA,DEC。",
  "Write <output>_frames.csv and <output>_frames.json after registration.": "配准后写出 <output>_frames.csv 和 <output>_frames.json。",
- "Write <output>_frames.csv and <output>_frames.json after registration: for every light, kept or rejected, which gate decided it and why (e.g. \"score 12.0 < 30.0\"), notes for kept frames far off the session median (FWHM, stars, background, ellipticity), and the key metrics. Changes no result. With -v also prints the count per reason.": "配准后写出 <output>_frames.csv 和 <output>_frames.json:对每个 light,无论保留还是剔除,说明由哪道关卡决定及原因(例如 \"score 12.0 < 30.0\"),并为远离本次观测中位数的保留帧(FWHM、星数、背景、椭圆度)添加备注,以及主要指标。不改变任何结果。使用 -v 时还会打印各原因的数量。"
+ "Write <output>_frames.csv and <output>_frames.json after registration: for every light, kept or rejected, which gate decided it and why (e.g. \"score 12.0 < 30.0\"), notes for kept frames far off the session median (FWHM, stars, background, ellipticity), and the key metrics. Changes no result. With -v also prints the count per reason.": "配准后写出 <output>_frames.csv 和 <output>_frames.json:对每个 light,无论保留还是剔除,说明由哪道关卡决定及原因(例如 \"score 12.0 < 30.0\"),并为远离本次观测中位数的保留帧(FWHM、星数、背景、椭圆度)添加备注,以及主要指标。不改变任何结果。使用 -v 时还会打印各原因的数量。",
+ "A run is in progress. Update when it has finished.": "有任务正在运行。请在完成后再更新。",
+ "Download and install v{version} ({mb:.0f} MB)?\n\nOriginStack closes, the installer runs, and you can start the new version from it.": "下载并安装 v{version}（{mb:.0f} MB）？\n\nOriginStack 将关闭并运行安装程序，之后可从安装程序启动新版本。",
+ "Downloading update… {pct}%": "正在下载更新… {pct}%",
+ "The installer could not be started: {error}": "无法启动安装程序：{error}",
+ "The update could not be downloaded: {error}\n\nThe release page opens instead.": "无法下载更新：{error}\n\n将改为打开发布页面。",
+ "Update": "更新",
+ "Update OriginStack": "更新 OriginStack"
 }

@@ -1476,6 +1476,9 @@ class App:
         self.update_label.pack(side='left', padx=(14, 0), pady=8)
         self.update_label.bind('<Button-1>', lambda _e: self._open_update_url())
         self._update_url = ''
+        self._update_info: Optional[Dict[str, Any]] = None
+        self._update_busy = False
+        self._update_events: queue.Queue = queue.Queue()
         self._start_update_check()
         self.header_status_var = tk.StringVar(value=_('Idle'))
         tk.Label(inner, textvariable=self.header_status_var, background=_PANEL,
@@ -1537,11 +1540,81 @@ class App:
 
     def _show_update(self, info: Dict[str, str]) -> None:
         self._update_url = info['url']
+        self._update_info = info
         self.update_label.configure(text=_('Update available: v{version}', version=info['version']))
 
     def _open_update_url(self) -> None:
-        if self._update_url:
+        from src.self_update import can_install_in_app
+        info = getattr(self, '_update_info', None)
+        if info and can_install_in_app(info) and not self._update_busy:
+            self._install_update(info)
+        elif self._update_url:
             webbrowser.open(self._update_url)
+
+    def _install_update(self, info: Dict[str, Any]) -> None:
+        """Download the installer in the background, then start it and close the app."""
+        from tkinter import messagebox
+        if self.rm.is_running():
+            messagebox.showinfo(_('Update'), _('A run is in progress. Update when it has finished.'))
+            return
+        mb = info['installer_size'] / 1024 ** 2
+        if not messagebox.askyesno(
+                _('Update OriginStack'),
+                _('Download and install v{version} ({mb:.0f} MB)?\n\nOriginStack closes, the '
+                  'installer runs, and you can start the new version from it.',
+                  version=info['version'], mb=mb)):
+            return
+        self._update_busy = True
+        from src import net_query
+        from src.self_update import installer_path
+
+        def _bg() -> None:
+            try:
+                path = net_query.download_update(
+                    info['installer_url'], installer_path(info), info['installer_size'],
+                    info['installer_sha256'],
+                    progress=lambda done, total: self._update_events.put(('progress', done, total)))
+                self._update_events.put(('done', path))
+            except Exception as exc:
+                self._update_events.put(('error', str(exc)))
+        threading.Thread(target=_bg, daemon=True).start()
+        self._poll_update_download(info)
+
+    def _poll_update_download(self, info: Dict[str, Any]) -> None:
+        last = None
+        while True:
+            try:
+                last = self._update_events.get_nowait()
+            except queue.Empty:
+                break
+            if last[0] != 'progress':
+                break
+        if last is None or last[0] == 'progress':
+            if last is not None:
+                self.update_label.configure(text=_('Downloading update… {pct}%',
+                                                   pct=int(100 * last[1] / max(1, last[2]))))
+            self.root.after(200, lambda: self._poll_update_download(info))
+            return
+        self._update_busy = False
+        if last[0] == 'error':
+            self.update_label.configure(text=_('Update available: v{version}', version=info['version']))
+            from tkinter import messagebox
+            messagebox.showerror(_('Update'), _('The update could not be downloaded: {error}\n\n'
+                                                'The release page opens instead.', error=last[1]))
+            webbrowser.open(self._update_url)
+            return
+        from src.self_update import launch_installer
+        try:
+            launch_installer(last[1])
+        except OSError as exc:
+            from tkinter import messagebox
+            messagebox.showerror(_('Update'), _('The installer could not be started: {error}', error=exc))
+            return
+        self.root.after(300, self._shutdown_for_update)
+
+    def _shutdown_for_update(self) -> None:
+        self.root.destroy()
+        _shutdown_and_exit(0)
 
     def _report_menu_at(self, event) -> None:
         """Report a problem: a GitHub issue needs an account, so the same report

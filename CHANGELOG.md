@@ -6,6 +6,8 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+- Desktop app (installed Windows copy): clicking "Update available" downloads the new installer in the app, checks its size and SHA-256 against the release (GitHub hosts only), then closes the app and runs it. Portable, zip, Mac and Linux copies still open the release page.
+
 ## [2.21.0] - 2026-11-02
 
 Image-quality work from a research survey of the whole pipeline: two calibration/denoising repairs
