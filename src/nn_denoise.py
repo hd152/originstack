@@ -41,7 +41,8 @@ BG_BLOCK = 64          # background mesh cell (px); the surface is smooth on thi
 ASINH_SOFT = 4.0       # network input = asinh(z / ASINH_SOFT): linear near the sky, compressed on stars
 TILE = 384             # forward-pass tile (px), a multiple of 4 (two 2x poolings)
 TILE_WORKERS = 2          # tiles in flight (denoise_z); the convolutions already use every core
-MARGIN = 32            # context on each side of a tile; > the network's receptive-field radius (~24 px)
+MARGIN = 24            # context on each side of a tile: the network's receptive-field radius (20 px changes the output)
+MARGIN_REQUIRED = MARGIN   # what tests/test_nn_denoise.py proves sufficient; MARGIN may not go below it
 LEAK = 0.1             # LeakyReLU slope
 # Fused multiply-add convolutions (1.4x faster; rounding then differs in the last bits, and on a CPU
 # without FMA the plain kernel runs). ORIGINSTACK_NN_FMA=0 selects the plain kernel everywhere.

@@ -3406,12 +3406,16 @@ def test_nn_forward_matches_per_layer_composition(h, w_):
     np.testing.assert_allclose(got, ref, rtol=1e-5, atol=1e-5 * np.abs(ref).max())
 
 
-def test_nn_forward_fma_close_to_plain():
-    """The FMA kernel rounds differently (fused), so it is checked with a tolerance."""
+@pytest.mark.parametrize('f', [4, 6])
+@pytest.mark.parametrize('h,w_', [(40, 72), (4, 4), (8, 20), (36, 52), (12, 136)])
+def test_nn_forward_fma_close_to_plain(f, h, w_):
+    """The FMA path rounds differently (fused multiply-add) and folds the nearest upsample into
+    half-resolution 2x2 weights for the two concat layers, so it is checked with a tolerance.
+    f=4 gives channel counts that are not whole 6-channel blocks; widths cover partial blocks."""
     import src.nn_denoise as nd
-    rng = np.random.default_rng(21)
-    w = _tiny_net(rng, f=6)   # 6 | channel counts: whole FMA blocks as in the shipped networks
-    x = rng.normal(size=(3, 40, 72)).astype(np.float32)
+    rng = np.random.default_rng(21 + f + h)
+    w = _tiny_net(rng, f=f)
+    x = rng.normal(size=(3, h, w_)).astype(np.float32)
     plain = native.nn_forward(x, w, nd.LEAK, False)
     fused = native.nn_forward(x, w, nd.LEAK, True)
     np.testing.assert_allclose(fused, plain, rtol=1e-4, atol=1e-4 * np.abs(plain).max())
@@ -3430,14 +3434,17 @@ def test_nn_forward_rejects_bad_input():
         native.nn_forward(np.zeros((3, 16, 16), np.float32), bad, nd.LEAK)
 
 
-def test_nn_forward_buffers_recycled_without_changing_results():
+@pytest.mark.parametrize('fma', [False, True])
+def test_nn_forward_buffers_recycled_without_changing_results(fma):
     import src.nn_denoise as nd
     rng = np.random.default_rng(5)
-    w = _tiny_net(rng)
+    w = _tiny_net(rng, f=6)
     x = rng.normal(size=(3, 32, 48)).astype(np.float32)
-    first = native.nn_forward(x, w, nd.LEAK)
-    # a different shape in between leaves dirty recycled buffers behind
-    native.nn_forward(rng.normal(size=(3, 64, 64)).astype(np.float32), w, nd.LEAK)
-    np.testing.assert_array_equal(native.nn_forward(x, w, nd.LEAK), first)
     native.nn_release_buffers()
-    np.testing.assert_array_equal(native.nn_forward(x, w, nd.LEAK), first)
+    first = native.nn_forward(x, w, nd.LEAK, fma)
+    # other shapes in between leave dirty recycled buffers behind (only the padding ring is re-zeroed)
+    native.nn_forward(rng.normal(size=(3, 64, 64)).astype(np.float32) * 50, w, nd.LEAK, fma)
+    native.nn_forward(rng.normal(size=(3, 16, 100)).astype(np.float32) * 50, w, nd.LEAK, fma)
+    np.testing.assert_array_equal(native.nn_forward(x, w, nd.LEAK, fma), first)
+    native.nn_release_buffers()
+    np.testing.assert_array_equal(native.nn_forward(x, w, nd.LEAK, fma), first)

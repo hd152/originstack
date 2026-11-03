@@ -54,6 +54,24 @@ def test_tiling_matches_one_big_tile(monkeypatch):
     np.testing.assert_allclose(tiled, whole, rtol=1e-4, atol=1e-4)
 
 
+def test_margin_is_the_receptive_field_radius(monkeypatch):
+    """24 px of context per tile side is exactly enough for the shipped networks (a wider margin
+    changes nothing, to the last bit); 20 px is not. Tightening MARGIN further would change results."""
+    rng = np.random.default_rng(11)
+    z = rng.standard_normal((210, 250, 3)).astype(np.float32)
+    for _ in range(25):
+        y, x = rng.integers(8, 200), rng.integers(8, 240)
+        z[y - 1:y + 2, x - 1:x + 2] += rng.uniform(5, 300)
+    monkeypatch.setattr(nd, 'TILE', 96)
+    w = nd.load_weights(nd.DECONV_MODEL_PATH)
+    monkeypatch.setattr(nd, 'MARGIN', 32)
+    wide = nd.denoise_z(z, w)
+    monkeypatch.setattr(nd, 'MARGIN', nd.MARGIN_REQUIRED)
+    np.testing.assert_array_equal(nd.denoise_z(z, w), wide)
+    monkeypatch.setattr(nd, 'MARGIN', 20)
+    assert np.abs(nd.denoise_z(z, w) - wide).max() > 1e-4
+
+
 def test_zero_output_layer_is_identity_and_strength_zero_returns_input(tmp_path):
     w = _random_weights()
     w['out.weight'][:] = 0
