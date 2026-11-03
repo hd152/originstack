@@ -658,5 +658,13 @@
  "Name for these settings:": "Naam voor deze instellingen:",
  "Only changed": "Alleen gewijzigd",
  "Save as…": "Opslaan als…",
- "Save settings": "Instellingen opslaan"
+ "Save settings": "Instellingen opslaan",
+ "A run is in progress. Update when it has finished.": "Er loopt een verwerking. Werk bij als die klaar is.",
+ "Download and install v{version} ({mb:.0f} MB)?\n\nOriginStack closes, the installer runs, and you can start the new version from it.": "v{version} downloaden en installeren ({mb:.0f} MB)?\n\nOriginStack sluit, het installatieprogramma draait en u kunt de nieuwe versie ermee starten.",
+ "Downloading update… {pct}%": "Update downloaden… {pct}%",
+ "The installer could not be started: {error}": "Het installatieprogramma kon niet worden gestart: {error}",
+ "The update could not be downloaded: {error}\n\nThe release page opens instead.": "De update kon niet worden gedownload: {error}\n\nIn plaats daarvan wordt de releasepagina geopend.",
+ "Update": "Update",
+ "Update OriginStack": "OriginStack bijwerken",
+ "Histogram": "Histogram"
 }

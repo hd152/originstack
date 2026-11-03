@@ -658,5 +658,13 @@
  "Name for these settings:": "Nome para estas configurações:",
  "Only changed": "Somente alteradas",
  "Save as…": "Salvar como…",
- "Save settings": "Salvar configurações"
+ "Save settings": "Salvar configurações",
+ "A run is in progress. Update when it has finished.": "Há uma execução em andamento. Atualize quando ela terminar.",
+ "Download and install v{version} ({mb:.0f} MB)?\n\nOriginStack closes, the installer runs, and you can start the new version from it.": "Baixar e instalar a v{version} ({mb:.0f} MB)?\n\nO OriginStack fecha, o instalador é executado e você pode iniciar a nova versão por ele.",
+ "Downloading update… {pct}%": "Baixando a atualização… {pct}%",
+ "The installer could not be started: {error}": "Não foi possível iniciar o instalador: {error}",
+ "The update could not be downloaded: {error}\n\nThe release page opens instead.": "Não foi possível baixar a atualização: {error}\n\nA página da versão é aberta no lugar.",
+ "Update": "Atualização",
+ "Update OriginStack": "Atualizar o OriginStack",
+ "Histogram": "Histograma"
 }

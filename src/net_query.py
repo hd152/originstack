@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import ssl
 import time
 import urllib.error
@@ -601,7 +602,94 @@ def check_for_update(current_version: str, repo: str = "hd152/originstack",
         latest = _parse_version(tag)
         if latest is None or latest <= current:
             return None
-        return {"version": tag.lstrip("vV"), "url": payload.get("html_url") or
+        info = {"version": tag.lstrip("vV"), "url": payload.get("html_url") or
                 f"https://github.com/{repo}/releases/latest"}
+        info.update(_installer_asset(payload.get("assets") or [], repo))
+        return info
     except Exception:
         return None
+
+
+# Where an update installer may come from: GitHub's release downloads, which redirect to its
+# asset hosts. Anything else (a redirect elsewhere, a different repo) is refused.
+_UPDATE_HOSTS = ("github.com", "objects.githubusercontent.com", "release-assets.githubusercontent.com")
+
+
+def _installer_asset(assets: list, repo: str) -> Dict[str, object]:
+    """``installer_url/name/size/sha256`` of the release's ``*-setup.exe``, or {} when it is missing
+    or lacks what verifying it needs (GitHub's per-asset ``sha256:`` digest and a size)."""
+    for a in assets:
+        name = str(a.get("name", ""))
+        url = str(a.get("browser_download_url", ""))
+        digest = str(a.get("digest") or "")
+        size = a.get("size")
+        if not name.endswith("-setup.exe"):
+            continue
+        if not url.startswith(f"https://github.com/{repo}/releases/download/"):
+            continue
+        sha = digest[len("sha256:"):].lower() if digest.startswith("sha256:") else ""
+        if len(sha) != 64 or any(c not in "0123456789abcdef" for c in sha):
+            continue
+        if not isinstance(size, int) or size <= 0:
+            continue
+        return {"installer_url": url, "installer_name": name, "installer_size": size,
+                "installer_sha256": sha}
+    return {}
+
+
+class _HostCheckedRedirect(urllib.request.HTTPRedirectHandler):
+    """Follows a redirect only to https on an allowed update host."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        parts = urllib.parse.urlsplit(newurl)
+        if parts.scheme != "https" or parts.hostname not in _UPDATE_HOSTS:
+            raise urllib.error.URLError(f"update download redirected to a disallowed host: {parts.hostname}")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def download_update(url: str, dest, size: int, sha256: str, progress=None, cancel=None,
+                    timeout: float = 30.0):
+    """Download an update installer to ``dest`` and keep it only if it is exactly ``size`` bytes
+    with the given SHA-256. ``progress(done, total)`` is called per chunk; ``cancel`` is a
+    ``threading.Event``. Raises ``ValueError`` on a bad host, size or hash (nothing is left
+    behind), ``InterruptedError`` when cancelled. Respects ``set_offline()``."""
+    import hashlib
+    from pathlib import Path
+    parts = urllib.parse.urlsplit(url)
+    if parts.scheme != "https" or parts.hostname not in _UPDATE_HOSTS:
+        raise ValueError(f"not an update download host: {parts.hostname}")
+    _require_online(url)
+    dest = Path(dest)
+    part = dest.with_name(dest.name + ".part")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    opener = urllib.request.build_opener(_HostCheckedRedirect, urllib.request.HTTPSHandler(context=_ssl_context()))
+    req = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT})
+    h = hashlib.sha256()
+    done = 0
+    try:
+        with opener.open(req, timeout=timeout) as resp, open(part, "wb") as out:  # nosec B310
+            while True:
+                if cancel is not None and cancel.is_set():
+                    raise InterruptedError("update download cancelled")
+                chunk = resp.read(256 * 1024)
+                if not chunk:
+                    break
+                done += len(chunk)
+                if done > size:
+                    raise ValueError("update download is larger than announced")
+                h.update(chunk)
+                out.write(chunk)
+                if progress is not None:
+                    progress(done, size)
+        if done != size:
+            raise ValueError(f"update download incomplete: {done} of {size} bytes")
+        if h.hexdigest() != sha256.lower():
+            raise ValueError("update download does not match its published SHA-256")
+        os.replace(part, dest)
+    except BaseException:
+        try:
+            part.unlink()
+        except OSError:
+            pass
+        raise
+    return dest

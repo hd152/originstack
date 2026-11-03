@@ -7,6 +7,7 @@ match the `VERSION` file and `v*` git tags.
 ## [Unreleased]
 
 ### Desktop app
+- Desktop app (installed Windows copy): clicking "Update available" downloads the new installer in the app, checks its size and SHA-256 against the release (GitHub hosts only), then closes the app and runs it. Portable, zip, Mac and Linux copies still open the release page.
 - Sharp on scaled Windows displays: the app now opts in to DPI awareness (it was drawn at 96 DPI and stretched), and its window and sidebar sizes follow the scale.
 - Preview toolbar on two rows (the Full screen button was cut off); the Compare box stays greyed out until Compare is ticked.
 - A ready session shows one preflight line instead of five rows; the stale "Ready to start" text is gone while a run goes, and the log gets the height then.

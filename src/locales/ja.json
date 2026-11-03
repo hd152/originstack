@@ -658,5 +658,13 @@
  "Name for these settings:": "この設定の名前:",
  "Only changed": "変更した項目のみ",
  "Save as…": "名前を付けて保存…",
- "Save settings": "設定を保存"
+ "Save settings": "設定を保存",
+ "A run is in progress. Update when it has finished.": "実行中の処理があります。完了してから更新してください。",
+ "Download and install v{version} ({mb:.0f} MB)?\n\nOriginStack closes, the installer runs, and you can start the new version from it.": "v{version} をダウンロードしてインストールしますか（{mb:.0f} MB）？\n\nOriginStack は終了し、インストーラーが実行されます。新しいバージョンはインストーラーから起動できます。",
+ "Downloading update… {pct}%": "アップデートをダウンロード中… {pct}%",
+ "The installer could not be started: {error}": "インストーラーを起動できませんでした: {error}",
+ "The update could not be downloaded: {error}\n\nThe release page opens instead.": "アップデートをダウンロードできませんでした: {error}\n\n代わりにリリースページを開きます。",
+ "Update": "アップデート",
+ "Update OriginStack": "OriginStack を更新",
+ "Histogram": "ヒストグラム"
 }

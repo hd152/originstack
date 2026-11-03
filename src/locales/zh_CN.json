@@ -658,5 +658,13 @@
  "Name for these settings:": "这些设置的名称：",
  "Only changed": "仅显示已更改",
  "Save as…": "另存为…",
- "Save settings": "保存设置"
+ "Save settings": "保存设置",
+ "A run is in progress. Update when it has finished.": "有任务正在运行。请在完成后再更新。",
+ "Download and install v{version} ({mb:.0f} MB)?\n\nOriginStack closes, the installer runs, and you can start the new version from it.": "下载并安装 v{version}（{mb:.0f} MB）？\n\nOriginStack 将关闭并运行安装程序，之后可从安装程序启动新版本。",
+ "Downloading update… {pct}%": "正在下载更新… {pct}%",
+ "The installer could not be started: {error}": "无法启动安装程序：{error}",
+ "The update could not be downloaded: {error}\n\nThe release page opens instead.": "无法下载更新：{error}\n\n将改为打开发布页面。",
+ "Update": "更新",
+ "Update OriginStack": "更新 OriginStack",
+ "Histogram": "直方图"
 }
