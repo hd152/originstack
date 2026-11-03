@@ -229,6 +229,29 @@ def _apply_theme(root: tk.Tk) -> ttk.Style:
     return style
 
 
+_DPI_SCALE = 1.0      # screen DPI / 96, set in main() once the process is DPI-aware
+
+
+def _px(n: int) -> int:
+    """A pixel size designed at 96 DPI, scaled to the screen (fonts scale by themselves)."""
+    return int(round(n * _DPI_SCALE))
+
+
+def _enable_dpi_awareness() -> None:
+    """Opt in to per-monitor DPI on Windows before the first Tk window exists. Without it Windows
+    renders the window at 96 DPI and stretches the bitmap on a scaled display: blurry text."""
+    if sys.platform != 'win32':
+        return
+    import ctypes
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)
+    except (AttributeError, OSError):
+        try:
+            ctypes.windll.user32.SetProcessDPIAware()
+        except (AttributeError, OSError):
+            pass
+
+
 class ScrollableFrame(ttk.Frame):
     """A vertically-scrollable container -- the Setup form (with a field's
     description under it, and the additional options expanded) is taller
@@ -632,6 +655,7 @@ class SetupForm(ttk.Frame):
         # reported "galaxy detail lost to denoising" bug: the auto-advisor's
         # galaxy-specific denoiser choice never got a chance to apply.
         self._initial: Dict[str, Any] = {}
+        self._path_dests: set = set()          # fields that hold a folder or file (see preset_state)
         # dest -> {'widgets', 'group', 'expert', 'haystack', 'dot', 'reset'}
         # for every field built (common fields have group None).
         self._fields: Dict[str, Dict[str, Any]] = {}
@@ -656,6 +680,21 @@ class SetupForm(ttk.Frame):
                 self._camera_label.grid_remove()
                 row += 1
 
+        # Named sets of settings, kept in the app's settings file.
+        preset_row = ttk.Frame(self)
+        preset_row.pack(fill='x', pady=(10, 0))
+        ttk.Label(preset_row, text=_('My settings'), style='Dim.TLabel').pack(side='left')
+        self.preset_var = tk.StringVar(value='')
+        self.preset_combo = ttk.Combobox(preset_row, textvariable=self.preset_var,
+                                         state='readonly', width=24)
+        self.preset_combo.pack(side='left', padx=(8, 6))
+        self.preset_combo.bind('<<ComboboxSelected>>', lambda _e: self._load_preset())
+        ttk.Button(preset_row, text=_('Save as…'), command=self._save_preset_dialog).pack(
+            side='left')
+        ttk.Button(preset_row, text=_('Delete'), command=self._delete_preset).pack(
+            side='left', padx=(6, 0))
+        self._refresh_presets()
+
         bar = ttk.Frame(self)
         bar.pack(fill='x', pady=(10, 0))
         self._bar = bar
@@ -663,9 +702,14 @@ class SetupForm(ttk.Frame):
         self._toggle_btn = ttk.Button(bar, text='', command=self._toggle_advanced)
         self._toggle_btn.pack(side='left', fill='x', expand=True)
         self.search_var = tk.StringVar(value='')
-        ttk.Entry(bar, textvariable=self.search_var, width=22).pack(side='right', padx=(8, 0))
+        ttk.Entry(bar, textvariable=self.search_var, width=30).pack(side='right', padx=(8, 0))
         ttk.Label(bar, text=_('Search settings'), style='Dim.TLabel').pack(side='right')
         self.search_var.trace_add('write', lambda *_: self._on_search())
+        # Lists only what differs from the defaults (the same set the "N changed" count and the
+        # dots mark), across all groups: the quick way to see what a session is really using.
+        self.changed_only_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(bar, text=_('Only changed'), variable=self.changed_only_var,
+                        command=self._on_changed_only).pack(side='right', padx=(0, 10))
 
         # A sidebar of group names, not a Notebook of horizontal tabs: this
         # form has 8 groups with names like "Registration & stacking
@@ -673,7 +717,7 @@ class SetupForm(ttk.Frame):
         # fragments once more than 3-4 fit a half-window pane. A vertical
         # list has room for the full name and scales to more groups later.
         self._advanced_body = ttk.Frame(self)
-        nav = tk.Frame(self._advanced_body, background=_PANEL, width=168)
+        nav = tk.Frame(self._advanced_body, background=_PANEL, width=_px(168))
         nav.pack(side='left', fill='y')
         nav.pack_propagate(False)
         content = ttk.Frame(self._advanced_body)
@@ -689,7 +733,7 @@ class SetupForm(ttk.Frame):
         for group_title in self.schema:
             self._pages[group_title] = ttk.Frame(content)
             lbl = tk.Label(nav, text=_(group_title), background=_PANEL, foreground=_TEXT_DIM,
-                          font=_FONT, anchor='w', justify='left', wraplength=148,
+                          font=_FONT, anchor='w', justify='left', wraplength=_px(148),
                           padx=12, pady=9)
             lbl.bind('<Button-1>', lambda _e, g=group_title: self._show_group(g))
             self._nav_labels[group_title] = lbl
@@ -730,6 +774,7 @@ class SetupForm(ttk.Frame):
         ``read_form`` is unaffected -- only visibility changes."""
         expert = self.expert_var.get()
         terms = self.search_var.get().lower().split()
+        only_changed = self.changed_only_var.get()
         matches: Dict[str, int] = {g: 0 for g in self.schema}
         for info in self._fields.values():
             if info['group'] is None:
@@ -738,6 +783,8 @@ class SetupForm(ttk.Frame):
                 visible = all(t in info['haystack'] for t in terms)
             else:
                 visible = expert or not info['expert']
+            if only_changed:
+                visible = visible and self._is_changed(info['dest'])
             if visible:
                 matches[info['group']] += 1
             for w in info['widgets']:
@@ -748,13 +795,13 @@ class SetupForm(ttk.Frame):
 
         for lbl in self._nav_labels.values():
             lbl.pack_forget()
-        if terms:
+        if terms or only_changed:
             visible_groups = [g for g in self.schema if matches[g]]
         else:
             visible_groups = [g for g in self.schema if expert or not _is_expert_group(g)]
         for g, lbl in self._nav_labels.items():
             if g in visible_groups:
-                lbl.configure(text=f'{_(g)}  ({matches[g]})' if terms else _(g))
+                lbl.configure(text=f'{_(g)}  ({matches[g]})' if terms or only_changed else _(g))
                 lbl.pack(fill='x')
 
         if not visible_groups:
@@ -766,6 +813,13 @@ class SetupForm(ttk.Frame):
         self._no_match.pack_forget()
         self._show_group(self._current_group if self._current_group in visible_groups
                          else visible_groups[0])
+
+    def _on_changed_only(self) -> None:
+        if self.changed_only_var.get() and not self._advanced_shown:
+            self._toggle_advanced()
+        if self.changed_only_var.get():
+            self.expert_var.set(True)       # a changed expert option must not hide behind the toggle
+        self._refresh_expert()
 
     def _on_search(self) -> None:
         if self.search_var.get().strip() and not self._advanced_shown:
@@ -861,6 +915,7 @@ class SetupForm(ttk.Frame):
             w.grid(row=row, column=2, sticky='we', pady=(5, 0))
             widget_hint = field.get('widget')
             if widget_hint:
+                self._path_dests.add(dest)
                 b = ttk.Button(parent, text=_('Browse…'),
                                command=lambda d=dest, v=var, h=widget_hint:
                                    self._browse(d, v, h))
@@ -881,6 +936,8 @@ class SetupForm(ttk.Frame):
             hint.grid(row=row + 1, column=1, columnspan=4, sticky='w')
             widgets.append(hint)
             rows_used += 1
+        if hint is not None and _tip:
+            _Tooltip(hint, _tip)       # the one-line description is shortened; the tip has all of it
         if hint is not None:
             if parent not in self._hints:
                 self._hints[parent] = []
@@ -900,7 +957,7 @@ class SetupForm(ttk.Frame):
         self._labels[dest] = _field_label_ui(field)
         var.trace_add('write', lambda *_: self._notify_change())
         self._fields[dest] = {
-            'widgets': widgets, 'group': group, 'dot': dot, 'reset': reset,
+            'dest': dest, 'widgets': widgets, 'group': group, 'dot': dot, 'reset': reset,
             'expert': _is_expert_field(field) or (group is not None and _is_expert_group(group)),
             # Not the full help: it mentions related features ("drizzle"
             # appears in the help of half the registration options), so a
@@ -1093,6 +1150,66 @@ class SetupForm(ttk.Frame):
             self.dir_count_var.set('')
         self.goal.set_suggestion(self.inferred[1], self.inferred[0])
 
+    # ── saved settings ("My settings") ─────────────────────────────────
+
+    @staticmethod
+    def _presets() -> Dict[str, Dict[str, Any]]:
+        from src.desktop_control import load_app_setting
+        data = load_app_setting('setup_presets', {})
+        return data if isinstance(data, dict) else {}
+
+    def _refresh_presets(self, select: str = '') -> None:
+        self.preset_combo['values'] = sorted(self._presets())
+        self.preset_var.set(select)
+
+    def save_preset(self, name: str) -> bool:
+        from src.desktop_control import save_app_setting
+        name = name.strip()
+        if not name:
+            return False
+        presets = self._presets()
+        presets[name] = self.preset_state()
+        save_app_setting('setup_presets', presets)
+        self._refresh_presets(select=name)
+        return True
+
+    def _save_preset_dialog(self) -> None:
+        from tkinter import simpledialog
+        name = simpledialog.askstring(_('Save settings'), _('Name for these settings:'),
+                                      initialvalue=self.preset_var.get(), parent=self)
+        if name:
+            self.save_preset(name)
+
+    def _load_preset(self) -> None:
+        state = self._presets().get(self.preset_var.get())
+        if state is not None:
+            self.apply_preset(state)
+
+    def _delete_preset(self) -> None:
+        from src.desktop_control import save_app_setting
+        presets = self._presets()
+        if presets.pop(self.preset_var.get(), None) is not None:
+            save_app_setting('setup_presets', presets)
+            self._refresh_presets()
+
+    def preset_state(self) -> Dict[str, Any]:
+        """The settings as a saved preset: what differs from the defaults, without the folders and
+        files, which belong to one session."""
+        return {d: v for d, v in self.read_form().items() if d not in self._path_dests}
+
+    def apply_preset(self, state: Dict[str, Any]) -> None:
+        """Put a saved preset on the form: every setting not in it goes back to its default (so a
+        preset is the whole of what it describes, not a patch on the previous one); the folders
+        stay as they are."""
+        for dest, var in self.vars.items():
+            if dest in self._path_dests:
+                continue
+            value = state.get(dest, self._initial.get(dest))
+            try:
+                var.set(value)
+            except tk.TclError:
+                var.set(self._initial.get(dest))
+
     def read_form(self) -> Dict[str, Any]:
         """``{dest: value}`` for fields the user actually changed from their
         schema default -- ``build_argv_from_form`` already handles blank
@@ -1215,12 +1332,19 @@ class PreviewCanvas(ttk.Frame):
         ttk.Button(toolbar, text=_('Fit'), command=self.fit).pack(side='left')
         ttk.Button(toolbar, text='1:1', width=5, command=self.one_to_one).pack(side='left', padx=4)
         ttk.Label(toolbar, textvariable=self.zoom_var, width=6, style='Dim.TLabel').pack(side='left')
+        self.hist_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(toolbar, text=_('Histogram'), variable=self.hist_var,
+                        command=self._toggle_histogram).pack(side='right')
 
+        # Packed from the bottom up, the image last: the picture takes what is left, instead of
+        # squeezing the caption (and the histogram) out of a short pane.
+        ttk.Label(self, textvariable=self.caption_var, style='Dim.TLabel').pack(
+            side='bottom', anchor='w', pady=(4, 0))
+        self.hist_canvas = tk.Canvas(self, bg=_WELL, height=_px(64), highlightthickness=1,
+                                     highlightbackground=_LINE)       # packed while shown
         self.canvas = tk.Canvas(self, bg=_WELL, highlightthickness=1,
                                 highlightbackground=_LINE)
         self.canvas.pack(fill='both', expand=True)
-        ttk.Label(self, textvariable=self.caption_var, style='Dim.TLabel').pack(
-            anchor='w', pady=(4, 0))
 
         self.canvas.bind('<Configure>', lambda e: self.redraw())
         self.canvas.bind('<MouseWheel>', self._on_wheel)
@@ -1244,6 +1368,44 @@ class PreviewCanvas(ttk.Frame):
             self.fit()
         else:
             self.redraw()
+        self.draw_histogram()
+
+    def _toggle_histogram(self) -> None:
+        if self.hist_var.get():
+            self.hist_canvas.pack(side='bottom', fill='x', pady=(4, 0), before=self.canvas)
+            self.hist_canvas.bind('<Configure>', lambda _e: self.draw_histogram())
+            self.draw_histogram()
+        else:
+            self.hist_canvas.pack_forget()
+
+    @staticmethod
+    def histogram_bins(img, bins: int = 64) -> Any:
+        """Per-channel counts, (3, bins), of the 8-bit picture on screen (stride-sampled to ~250 px)."""
+        import numpy as np
+        a = np.asarray(img)
+        step = max(1, max(a.shape[0], a.shape[1]) // 250)
+        a = a[::step, ::step, :3]
+        return np.stack([np.histogram(a[..., c], bins=bins, range=(0, 256))[0] for c in range(3)])
+
+    def draw_histogram(self) -> None:
+        """Red/green/blue outlines of the shown picture: where the sky sits and whether anything
+        is clipped at either end (the sqrt keeps the sky peak from flattening the rest)."""
+        if not self.hist_var.get():
+            return
+        c = self.hist_canvas
+        c.delete('all')
+        if self._img_a is None:
+            return
+        import numpy as np
+        counts = np.sqrt(self.histogram_bins(self._img_a).astype(float))
+        peak = counts.max() or 1.0
+        w, h = max(c.winfo_width(), 2), max(c.winfo_height(), 2)
+        n = counts.shape[1]
+        for ch, colour in enumerate(('#ff5a5a', '#5adf7a', '#5a9aff')):
+            pts = []
+            for i in range(n):
+                pts += [i * (w - 2) / (n - 1) + 1, h - 2 - counts[ch, i] / peak * (h - 6)]
+            c.create_line(*pts, fill=colour, width=1)
 
     def _photo_bytes(self) -> bytes:
         return self._source_bytes or b''
@@ -1385,8 +1547,11 @@ class App:
         self._diagnostics_open = False
 
         root.title('OriginStack')
-        root.geometry('1400x900')
-        root.minsize(900, 600)
+        # Designed at 96 DPI; on a scaled display the same window in pixels is bigger, but never
+        # larger than the screen.
+        root.geometry('{}x{}'.format(min(_px(1400), int(root.winfo_screenwidth() * 0.96)),
+                                     min(_px(900), int(root.winfo_screenheight() * 0.92))))
+        root.minsize(_px(900), _px(600))
         root_dir = Path(__file__).resolve().parent.parent
         icon = root_dir / 'packaging' / 'icon.ico'
         if sys.platform == 'win32' and icon.exists():
@@ -1447,6 +1612,10 @@ class App:
                 self._vsplit_pinned = True
         self._vpaned.bind('<Configure>', _pin_vsplit, add='+')
         root.after(80, _pin_vsplit)
+
+        # Drop a session folder (or a file from it) on the window to set the light frames.
+        from src.drop_files import enable_file_drop
+        enable_file_drop(root, self._on_files_dropped)
 
         root.protocol('WM_DELETE_WINDOW', self._on_closing)
         root.bind('<Control-Return>', lambda _event: self._on_start())
@@ -1717,10 +1886,16 @@ class App:
             _Tooltip(cb, tip)
             self.export_vars[fmt] = var
         self.readiness_var = tk.StringVar(value=_('Choose a light-frame folder to begin.'))
-        ttk.Label(parent, textvariable=self.readiness_var, style='Dim.TLabel',
-                  wraplength=560).pack(fill='x', pady=(0, 4))
+        self.readiness_label = ttk.Label(parent, textvariable=self.readiness_var, style='Dim.TLabel',
+                                         wraplength=560)
+        self.readiness_label.pack(fill='x', pady=(0, 4))
         self.preflight_frame = ttk.LabelFrame(parent, text=_('PREFLIGHT'))
         self.preflight_frame.pack(fill='x', pady=(0, 6))
+        self._preflight_ok_var = tk.StringVar(value='')
+        self._preflight_ok = ttk.Label(self.preflight_frame, textvariable=self._preflight_ok_var,
+                                       style='Dim.TLabel')
+        self._preflight_grid = ttk.Frame(self.preflight_frame)
+        self._preflight_grid.pack(fill='x')
         self.preflight_vars = {
             key: tk.StringVar(value=f'○ {label}')
             for key, label in (
@@ -1732,12 +1907,13 @@ class App:
             )
         }
         for row, var in enumerate(self.preflight_vars.values()):
-            ttk.Label(self.preflight_frame, textvariable=var, style='Dim.TLabel').grid(
+            ttk.Label(self._preflight_grid, textvariable=var, style='Dim.TLabel').grid(
                 row=row // 2, column=row % 2, sticky='w', padx=8, pady=2)
-        self.preflight_frame.grid_columnconfigure(0, weight=1)
-        self.preflight_frame.grid_columnconfigure(1, weight=1)
+        self._preflight_grid.grid_columnconfigure(0, weight=1)
+        self._preflight_grid.grid_columnconfigure(1, weight=1)
 
         phase_frame = ttk.LabelFrame(parent, text=_('PIPELINE'))
+        self._phase_frame = phase_frame
         phase_frame.pack(fill='x', pady=6)
         self.phase_labels = []
         titles = [f'{i} · {name}' for i, name in
@@ -1752,11 +1928,12 @@ class App:
         self.progress_bar = ttk.Progressbar(phase_frame, mode='determinate')
         self.progress_bar.grid(row=1, column=0, columnspan=4, sticky='we', padx=4, pady=(0, 4))
         self.progress_var = tk.StringVar(value='')
+        # Progress text left, time left right, on one row: a second row left the log no height.
         ttk.Label(phase_frame, textvariable=self.progress_var).grid(
-            row=2, column=0, columnspan=4, sticky='w', padx=4, pady=(0, 4))
+            row=2, column=0, columnspan=3, sticky='w', padx=4, pady=(0, 4))
         self.eta_var = tk.StringVar(value='')
         ttk.Label(phase_frame, textvariable=self.eta_var, style='Dim.TLabel').grid(
-            row=3, column=0, columnspan=4, sticky='e', padx=4, pady=(0, 4))
+            row=2, column=3, sticky='e', padx=4, pady=(0, 4))
 
         # RECENT FRAMES moved to the right column; the whole left column
         # below the pipeline bar is the log now.
@@ -1781,24 +1958,30 @@ class App:
         preview_frame = ttk.LabelFrame(parent, text=_('PREVIEW'))
         preview_frame.pack(fill='both', expand=True, pady=(0, 6))
 
+        # Two rows: on one, the Full screen button was cut off at the default window width and
+        # the milestone names ("Post-processing: before sky floor") did not fit their box.
         vtools = ttk.Frame(preview_frame)
-        vtools.pack(fill='x', pady=4)
+        vtools.pack(fill='x', pady=(4, 0))
         ttk.Label(vtools, text=_('Milestone')).pack(side='left', padx=(0, 4))
         self.view_var = tk.StringVar()
         self.view_combo = ttk.Combobox(vtools, textvariable=self.view_var,
-                                       state='readonly', width=20)
-        self.view_combo.pack(side='left')
+                                       state='readonly', width=34)
+        self.view_combo.pack(side='left', fill='x', expand=True)
         self.view_combo.bind('<<ComboboxSelected>>', self._on_view_selected)
+        ttk.Button(vtools, text=_('Full screen'), command=self._preview_fullscreen).pack(
+            side='right', padx=(8, 0))
+        ctools = ttk.Frame(preview_frame)
+        ctools.pack(fill='x', pady=(2, 4))
         self.compare_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(vtools, text=_('Compare'), variable=self.compare_var,
-                        command=self._on_compare_toggled).pack(side='left', padx=8)
+        ttk.Checkbutton(ctools, text=_('Compare'), variable=self.compare_var,
+                        command=self._on_compare_toggled).pack(side='left', padx=(0, 6))
         self.compare_combo_var = tk.StringVar()
-        self.compare_combo = ttk.Combobox(vtools, textvariable=self.compare_combo_var,
-                                          state='readonly', width=20)
+        self.compare_combo = ttk.Combobox(ctools, textvariable=self.compare_combo_var,
+                                          state='disabled', width=34)
         self.compare_combo.pack(side='left', fill='x', expand=True)
         self.compare_combo.bind('<<ComboboxSelected>>', self._on_compare_selected)
-        ttk.Button(vtools, text=_('Full screen'), command=self._preview_fullscreen).pack(
-            side='right')
+        # Other code switches compare off by setting the variable; keep the box in step with it.
+        self.compare_var.trace_add('write', lambda *_a: self._sync_compare_box())
 
         # Once a run is done: re-stretch its preview JPEG with another stretch
         # (UIEvents.restretch). Hidden until the run has left an image to redo.
@@ -1873,8 +2056,11 @@ class App:
                                         selectmode='browse')
         headings = {'frame': _('Frame'), 'score': _('Score'), 'snr': 'SNR',
                     'stars': _('Stars'), 'fwhm': 'FWHM'}
+        self._frame_headings = headings
+        self._frame_sort: Optional[Tuple[str, bool]] = None     # (column, descending)
         for c, w in zip(cols, (170, 60, 60, 50, 60)):
-            self.frames_tree.heading(c, text=headings[c])
+            self.frames_tree.heading(c, text=headings[c],
+                                     command=lambda col=c: self._sort_frames(col))
             self.frames_tree.column(c, width=w, anchor='e' if c != 'frame' else 'w')
         self.frames_tree.tag_configure('bad', foreground=_BAD)
         self.frames_tree.pack(fill='x')
@@ -1917,6 +2103,10 @@ class App:
         # what is left. Packed top-down, the frames table was packed last and lost its
         # rows whenever the summary grew.
         frames_frame.pack_configure(side='bottom', after=self.summary_frame)
+        # Empty before the first frame arrives: six blank rows were a quarter of the column that
+        # the preview needed. Shown (in the same place) by _refresh once there are rows.
+        self._frames_frame = frames_frame
+        frames_frame.pack_forget()
         self._show_plan = True
 
     def _plan_wrap(self) -> int:
@@ -1946,6 +2136,8 @@ class App:
         self.start_btn.state(['disabled'])
         self.cancel_btn.state(['!disabled'])
         self.status_var.set(_('Running…'))
+        self.readiness_var.set('')
+        self.readiness_label.pack_forget()
         self._shown_log_lines = 0
         self._clear_frames_table()
         self.summary_var.set('')
@@ -1969,6 +2161,7 @@ class App:
             for key, var in self.preflight_vars.items():
                 label = var.get().split(' ', 1)[-1]
                 var.set(self._check_icon(None, label))
+            self._show_preflight_summary()
             return
         counts = self.form._frame_counts
         lights = counts.get('light', 0)
@@ -1988,6 +2181,20 @@ class App:
                 gb=estimated / 1024 ** 3)))
         self.preflight_vars['output'].set(self._check_icon(
             bool(directory), _('Output location')))
+        self._show_preflight_summary()
+
+    def _show_preflight_summary(self) -> None:
+        """One line once every check passes (the five rows took a third of the left column); the
+        full grid again as soon as one needs attention or is not known yet."""
+        if all(v.get().startswith('✓') for v in self.preflight_vars.values()):
+            self._preflight_grid.pack_forget()
+            summary = getattr(self.form, '_data_summary', '')
+            self._preflight_ok_var.set('✓ ' + (_('Ready to start · {summary}', summary=summary)
+                                               if summary else _('All checks passed')))
+            self._preflight_ok.pack(anchor='w', padx=8, pady=2)
+        else:
+            self._preflight_ok.pack_forget()
+            self._preflight_grid.pack(fill='x')
 
     def _reset_run_view(self) -> None:
         if self.rm.is_running():
@@ -2039,8 +2246,14 @@ class App:
         elif not self.form._data_summary:
             self.readiness_var.set(_('No frames found — choose a folder containing light frames.'))
         else:
-            self.readiness_var.set(_('Ready to start · {summary}', summary=self.form._data_summary))
+            self.readiness_var.set('')
         self._update_preflight()
+        # Only a problem or a missing folder gets its own line; a ready session reads
+        # "Ready to start · 35 lights, ..." in the preflight line, which saves a row.
+        if self.readiness_var.get():
+            self.readiness_label.pack(fill='x', pady=(0, 4), before=self.preflight_frame)
+        else:
+            self.readiness_label.pack_forget()
         self._show_plan = True
         self.summary_frame.configure(text=_('THIS RUN'))
         self.summary_label.pack_forget()
@@ -2061,6 +2274,12 @@ class App:
                     self.preview.clear()
             elif self.preview.current_slug == 'example':
                 self.preview.clear()
+
+    def _on_files_dropped(self, paths: List[str]) -> None:
+        from src.drop_files import folder_from_drop
+        folder = folder_from_drop(paths)
+        if folder and not self.rm.is_running():
+            self.form.vars['directory'].set(os.path.normpath(folder))
 
     def _on_cancel(self) -> None:
         # Cooperative, not instant -- takes effect at the next checkpoint
@@ -2172,6 +2391,9 @@ class App:
         if self._pp_pending:
             self._pp_pending = False
             self._run_pp()
+
+    def _sync_compare_box(self) -> None:
+        self.compare_combo.configure(state='readonly' if self.compare_var.get() else 'disabled')
 
     def _on_compare_toggled(self) -> None:
         self.preview.set_compare(self.compare_var.get())
@@ -2359,6 +2581,42 @@ class App:
         window.bind('<Escape>', lambda _event: window.destroy())
         window.focus_set()
 
+    _FRAME_COLS = ('frame', 'score', 'snr', 'stars', 'fwhm')
+
+    def _sorted_frame_rows(self, rows: List[tuple]) -> List[tuple]:
+        """The table's rows in the order its header was last clicked (arrival order until then)."""
+        if self._frame_sort is None:
+            return rows
+        col, desc = self._frame_sort
+        i = self._FRAME_COLS.index(col)
+
+        def key(row):
+            v = row[i]
+            if col == 'frame':
+                return str(v)
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                return float('-inf')
+        return sorted(rows, key=key, reverse=desc)
+
+    def _sort_frames(self, col: str) -> None:
+        """Header click: sort by that column, again to reverse, a third time for arrival order."""
+        cur = self._frame_sort
+        if cur is None or cur[0] != col:
+            # Quality columns read best with the highest first; names alphabetically.
+            self._frame_sort = (col, col != 'frame')
+        elif cur[1] == (col != 'frame'):
+            self._frame_sort = (col, not cur[1])
+        else:
+            self._frame_sort = None
+        for c in self._FRAME_COLS:
+            arrow = ''
+            if self._frame_sort and self._frame_sort[0] == c:
+                arrow = ' ▼' if self._frame_sort[1] else ' ▲'
+            self.frames_tree.heading(c, text=self._frame_headings[c] + arrow)
+        self._frame_rows_shown = []            # rebuilt on the next poll (150 ms)
+
     def _clear_frames_table(self) -> None:
         self._pinned_frame = None
         self._frame_rows_shown = []
@@ -2467,6 +2725,11 @@ class App:
         # recent frames
         rows = [(r['name'], r['score'], r['snr'], r['stars'], r['fwhm'], r['ok'])
                 for r in snap['frames'][-20:]]
+        rows = self._sorted_frame_rows(rows)
+        if rows and not self._frames_frame.winfo_manager():
+            self._frames_frame.pack(fill='x', pady=6, side='bottom', after=self.summary_frame)
+        elif not rows and self._frames_frame.winfo_manager():
+            self._frames_frame.pack_forget()
         if rows != self._frame_rows_shown:
             self._frame_rows_shown = rows
             self.frames_tree.delete(*self.frames_tree.get_children())
@@ -2547,8 +2810,23 @@ class App:
         except Exception:
             pass
 
+    def _shape_left_for_run(self, running: bool) -> None:
+        """While a run goes the log and progress matter and the Setup form does not: give the log
+        the height (the form still scrolls); when it is over, give the form its half back."""
+        if running == getattr(self, '_left_running', False) or not self._vsplit_pinned:
+            return
+        self._left_running = running
+        if running:
+            self.preflight_frame.pack_forget()      # "Ready to start" while it runs is stale
+        else:
+            self.preflight_frame.pack(fill='x', pady=(0, 6), before=self._phase_frame)
+        h = self._vpaned.winfo_height()
+        if h > 1:
+            self._vpaned.sashpos(0, int(h * 0.28) if running else max(h // 2, h - 300))
+
     def _refresh_run_button(self, snap: Optional[Dict[str, Any]] = None) -> None:
         running = self.rm.is_running()
+        self._shape_left_for_run(running)
         if running:
             self.start_btn.state(['disabled'])
             self.header_status_var.set(_('Cancelling…') if self.rm.is_cancelling() else _('Running…'))
@@ -2602,7 +2880,13 @@ def main() -> int:
 
     from src.i18n import resolve_language, set_language
     _set_fonts(set_language(resolve_language()))
+    global _DPI_SCALE
+    _enable_dpi_awareness()
     root = tk.Tk()
+    try:
+        _DPI_SCALE = max(1.0, float(root.winfo_fpixels('1i')) / 96.0)
+    except tk.TclError:
+        _DPI_SCALE = 1.0
     try:
         App(root)
     except Exception as e:

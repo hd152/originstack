@@ -2,6 +2,8 @@
 import os
 from types import SimpleNamespace
 
+import pytest
+
 from src import desktop_control as dc
 
 

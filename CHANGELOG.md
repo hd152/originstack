@@ -6,7 +6,16 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+### Desktop app
 - Desktop app (installed Windows copy): clicking "Update available" downloads the new installer in the app, checks its size and SHA-256 against the release (GitHub hosts only), then closes the app and runs it. Portable, zip, Mac and Linux copies still open the release page.
+- Sharp on scaled Windows displays: the app now opts in to DPI awareness (it was drawn at 96 DPI and stretched), and its window and sidebar sizes follow the scale.
+- Preview toolbar on two rows (the Full screen button was cut off); the Compare box stays greyed out until Compare is ticked.
+- A ready session shows one preflight line instead of five rows; the stale "Ready to start" text is gone while a run goes, and the log gets the height then.
+- The empty Recent frames table is hidden until frames arrive, which gives the preview the room; the table's headings sort.
+- Preview **Histogram** (per-channel, under the image) and the image caption no longer squeezed out of a short pane.
+- Additional options: **Only changed** filter, a wider search box, and the full help as a tooltip on each description line.
+- **My settings**: save the current options under a name and load them for another session (folders are not part of it).
+- Desktop app (Windows): drop a session folder, or a file from it, on the window to set the light frames. Uses the Windows shell's own drop message through ctypes: no new dependency.
 
 ## [2.21.0] - 2026-11-02
 
