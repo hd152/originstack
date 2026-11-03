@@ -6,6 +6,8 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+- Desktop app: a **Quick look** preview of the stack appears right after registration (the 8 sharpest frames, warped, binned and averaged), instead of an empty preview until Phase 3's combine ends. On a 41-frame session it showed 12 s before the first real stack preview; longer sessions gain more. Nothing changes in the stack or on CLI runs.
+
 ### Desktop app
 - Desktop app (installed Windows copy): clicking "Update available" downloads the new installer in the app, checks its size and SHA-256 against the release (GitHub hosts only), then closes the app and runs it. Portable, zip, Mac and Linux copies still open the release page.
 - Sharp on scaled Windows displays: the app now opts in to DPI awareness (it was drawn at 96 DPI and stretched), and its window and sidebar sizes follow the scale.

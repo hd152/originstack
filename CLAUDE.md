@@ -125,6 +125,7 @@ files from different sessions have landed in the wrong PR before). So:
 | `transparency.py` | Per-frame transparency (`--transparency-min`); `to_aligned_yx` is the inverse of `apply_transform` |
 | `distortion.py` | Radial distortion model (`--distortion-model`); null result on Origin data |
 | `stacking.py` | Combines (sigma-clip, percentile, ESD, linear fit, IVW, wavelet, median), drizzle (resample / `--drizzle-method splat`, kernels lanczos/psf/magic, `--super-res-iters`), lacosmic, online sigma-clip, `run_stacking_phase`; the numpy combines share one tile driver (`_tile_grid`, `_combine_tiles`) |
+| `quick_look.py` | Desktop app only (`UIEvents.active`): after registration, mean of the 8 sharpest frames warped into the common crop and binned to preview size, published as the `quick-look` named preview before Phase 3's combine; skipped with elastic registration; never touches the stack, a failure is logged and swallowed (a cancel is not) |
 | `proper_coadd.py` | Zackay-Ofek proper coaddition, on by default (`--no-proper-coadd`) |
 | `cfa_drizzle.py` | Bayer drizzle (`--cfa-drizzle`, opt-in, not recommended for Origin data) |
 | `full_field.py` | Extend the stack beyond the common crop (`--full-field`, on by default at FRAC 0.5; `--no-full-field` / `--full-field 0` off; skipped silently with drizzle, comet mode, elastic registration, uncertainty map) |
