@@ -229,6 +229,29 @@ def _apply_theme(root: tk.Tk) -> ttk.Style:
     return style
 
 
+_DPI_SCALE = 1.0      # screen DPI / 96, set in main() once the process is DPI-aware
+
+
+def _px(n: int) -> int:
+    """A pixel size designed at 96 DPI, scaled to the screen (fonts scale by themselves)."""
+    return int(round(n * _DPI_SCALE))
+
+
+def _enable_dpi_awareness() -> None:
+    """Opt in to per-monitor DPI on Windows before the first Tk window exists. Without it Windows
+    renders the window at 96 DPI and stretches the bitmap on a scaled display: blurry text."""
+    if sys.platform != 'win32':
+        return
+    import ctypes
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)
+    except (AttributeError, OSError):
+        try:
+            ctypes.windll.user32.SetProcessDPIAware()
+        except (AttributeError, OSError):
+            pass
+
+
 class ScrollableFrame(ttk.Frame):
     """A vertically-scrollable container -- the Setup form (with a field's
     description under it, and the additional options expanded) is taller
@@ -694,7 +717,7 @@ class SetupForm(ttk.Frame):
         # fragments once more than 3-4 fit a half-window pane. A vertical
         # list has room for the full name and scales to more groups later.
         self._advanced_body = ttk.Frame(self)
-        nav = tk.Frame(self._advanced_body, background=_PANEL, width=168)
+        nav = tk.Frame(self._advanced_body, background=_PANEL, width=_px(168))
         nav.pack(side='left', fill='y')
         nav.pack_propagate(False)
         content = ttk.Frame(self._advanced_body)
@@ -710,7 +733,7 @@ class SetupForm(ttk.Frame):
         for group_title in self.schema:
             self._pages[group_title] = ttk.Frame(content)
             lbl = tk.Label(nav, text=_(group_title), background=_PANEL, foreground=_TEXT_DIM,
-                          font=_FONT, anchor='w', justify='left', wraplength=148,
+                          font=_FONT, anchor='w', justify='left', wraplength=_px(148),
                           padx=12, pady=9)
             lbl.bind('<Button-1>', lambda _e, g=group_title: self._show_group(g))
             self._nav_labels[group_title] = lbl
@@ -1309,12 +1332,19 @@ class PreviewCanvas(ttk.Frame):
         ttk.Button(toolbar, text=_('Fit'), command=self.fit).pack(side='left')
         ttk.Button(toolbar, text='1:1', width=5, command=self.one_to_one).pack(side='left', padx=4)
         ttk.Label(toolbar, textvariable=self.zoom_var, width=6, style='Dim.TLabel').pack(side='left')
+        self.hist_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(toolbar, text=_('Histogram'), variable=self.hist_var,
+                        command=self._toggle_histogram).pack(side='right')
 
+        # Packed from the bottom up, the image last: the picture takes what is left, instead of
+        # squeezing the caption (and the histogram) out of a short pane.
+        ttk.Label(self, textvariable=self.caption_var, style='Dim.TLabel').pack(
+            side='bottom', anchor='w', pady=(4, 0))
+        self.hist_canvas = tk.Canvas(self, bg=_WELL, height=_px(64), highlightthickness=1,
+                                     highlightbackground=_LINE)       # packed while shown
         self.canvas = tk.Canvas(self, bg=_WELL, highlightthickness=1,
                                 highlightbackground=_LINE)
         self.canvas.pack(fill='both', expand=True)
-        ttk.Label(self, textvariable=self.caption_var, style='Dim.TLabel').pack(
-            anchor='w', pady=(4, 0))
 
         self.canvas.bind('<Configure>', lambda e: self.redraw())
         self.canvas.bind('<MouseWheel>', self._on_wheel)
@@ -1338,6 +1368,44 @@ class PreviewCanvas(ttk.Frame):
             self.fit()
         else:
             self.redraw()
+        self.draw_histogram()
+
+    def _toggle_histogram(self) -> None:
+        if self.hist_var.get():
+            self.hist_canvas.pack(side='bottom', fill='x', pady=(4, 0), before=self.canvas)
+            self.hist_canvas.bind('<Configure>', lambda _e: self.draw_histogram())
+            self.draw_histogram()
+        else:
+            self.hist_canvas.pack_forget()
+
+    @staticmethod
+    def histogram_bins(img, bins: int = 64) -> Any:
+        """Per-channel counts, (3, bins), of the 8-bit picture on screen (stride-sampled to ~250 px)."""
+        import numpy as np
+        a = np.asarray(img)
+        step = max(1, max(a.shape[0], a.shape[1]) // 250)
+        a = a[::step, ::step, :3]
+        return np.stack([np.histogram(a[..., c], bins=bins, range=(0, 256))[0] for c in range(3)])
+
+    def draw_histogram(self) -> None:
+        """Red/green/blue outlines of the shown picture: where the sky sits and whether anything
+        is clipped at either end (the sqrt keeps the sky peak from flattening the rest)."""
+        if not self.hist_var.get():
+            return
+        c = self.hist_canvas
+        c.delete('all')
+        if self._img_a is None:
+            return
+        import numpy as np
+        counts = np.sqrt(self.histogram_bins(self._img_a).astype(float))
+        peak = counts.max() or 1.0
+        w, h = max(c.winfo_width(), 2), max(c.winfo_height(), 2)
+        n = counts.shape[1]
+        for ch, colour in enumerate(('#ff5a5a', '#5adf7a', '#5a9aff')):
+            pts = []
+            for i in range(n):
+                pts += [i * (w - 2) / (n - 1) + 1, h - 2 - counts[ch, i] / peak * (h - 6)]
+            c.create_line(*pts, fill=colour, width=1)
 
     def _photo_bytes(self) -> bytes:
         return self._source_bytes or b''
@@ -1479,8 +1547,11 @@ class App:
         self._diagnostics_open = False
 
         root.title('OriginStack')
-        root.geometry('1400x900')
-        root.minsize(900, 600)
+        # Designed at 96 DPI; on a scaled display the same window in pixels is bigger, but never
+        # larger than the screen.
+        root.geometry('{}x{}'.format(min(_px(1400), int(root.winfo_screenwidth() * 0.96)),
+                                     min(_px(900), int(root.winfo_screenheight() * 0.92))))
+        root.minsize(_px(900), _px(600))
         root_dir = Path(__file__).resolve().parent.parent
         icon = root_dir / 'packaging' / 'icon.ico'
         if sys.platform == 'win32' and icon.exists():
@@ -1955,6 +2026,10 @@ class App:
         # what is left. Packed top-down, the frames table was packed last and lost its
         # rows whenever the summary grew.
         frames_frame.pack_configure(side='bottom', after=self.summary_frame)
+        # Empty before the first frame arrives: six blank rows were a quarter of the column that
+        # the preview needed. Shown (in the same place) by _refresh once there are rows.
+        self._frames_frame = frames_frame
+        frames_frame.pack_forget()
         self._show_plan = True
 
     def _plan_wrap(self) -> int:
@@ -2568,6 +2643,10 @@ class App:
         rows = [(r['name'], r['score'], r['snr'], r['stars'], r['fwhm'], r['ok'])
                 for r in snap['frames'][-20:]]
         rows = self._sorted_frame_rows(rows)
+        if rows and not self._frames_frame.winfo_manager():
+            self._frames_frame.pack(fill='x', pady=6, side='bottom', after=self.summary_frame)
+        elif not rows and self._frames_frame.winfo_manager():
+            self._frames_frame.pack_forget()
         if rows != self._frame_rows_shown:
             self._frame_rows_shown = rows
             self.frames_tree.delete(*self.frames_tree.get_children())
@@ -2718,7 +2797,13 @@ def main() -> int:
 
     from src.i18n import resolve_language, set_language
     _set_fonts(set_language(resolve_language()))
+    global _DPI_SCALE
+    _enable_dpi_awareness()
     root = tk.Tk()
+    try:
+        _DPI_SCALE = max(1.0, float(root.winfo_fpixels('1i')) / 96.0)
+    except tk.TclError:
+        _DPI_SCALE = 1.0
     try:
         App(root)
     except Exception as e:

@@ -57,3 +57,13 @@ def test_frame_rows_sort_by_the_clicked_column_and_cycle_back_to_arrival_order(t
     assert me._frame_sort is None and me._sorted_frame_rows(rows) == rows
     da.App._sort_frames(me, 'frame')
     assert [r[0] for r in me._sorted_frame_rows(rows)] == ['a.fits', 'b.fits', 'c.fits']
+
+
+def test_histogram_bins_count_every_sampled_pixel_per_channel():
+    import numpy as np
+    from PIL import Image
+    arr = np.zeros((40, 60, 3), np.uint8)
+    arr[..., 0] = 255                       # red full, green and blue black
+    bins = da.PreviewCanvas.histogram_bins(Image.fromarray(arr))
+    assert bins.shape == (3, 64)
+    assert bins[0, -1] == 40 * 60 and bins[1, 0] == 40 * 60 and bins[2, 0] == 40 * 60

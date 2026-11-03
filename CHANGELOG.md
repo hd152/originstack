@@ -6,6 +6,15 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+### Desktop app
+- Sharp on scaled Windows displays: the app now opts in to DPI awareness (it was drawn at 96 DPI and stretched), and its window and sidebar sizes follow the scale.
+- Preview toolbar on two rows (the Full screen button was cut off); the Compare box stays greyed out until Compare is ticked.
+- A ready session shows one preflight line instead of five rows; the stale "Ready to start" text is gone while a run goes, and the log gets the height then.
+- The empty Recent frames table is hidden until frames arrive, which gives the preview the room; the table's headings sort.
+- Preview **Histogram** (per-channel, under the image) and the image caption no longer squeezed out of a short pane.
+- Additional options: **Only changed** filter, a wider search box, and the full help as a tooltip on each description line.
+- **My settings**: save the current options under a name and load them for another session (folders are not part of it).
+
 ## [2.21.0] - 2026-11-02
 
 Image-quality work from a research survey of the whole pipeline: two calibration/denoising repairs
