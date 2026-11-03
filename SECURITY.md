@@ -13,7 +13,7 @@ OriginStack is a local image-processing pipeline. It reads FITS files from disk 
 
 ## Reporting a Vulnerability
 
-If you discover a security issue in OriginStack, please report it by opening a [GitHub Issue](../../issues) with the label `security`. For sensitive disclosures, email the repository owner directly before filing a public issue.
+If you discover a security issue in OriginStack, please report it by opening a [GitHub Issue](../../issues) with the label `security`. For sensitive disclosures, email [originstack@originstack.site](mailto:originstack@originstack.site) before filing a public issue.
 
 Please include:
 - A clear description of the vulnerability
