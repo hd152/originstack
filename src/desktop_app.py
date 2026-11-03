@@ -1756,8 +1756,7 @@ class App:
         self.compare_combo.pack(side='left', fill='x', expand=True)
         self.compare_combo.bind('<<ComboboxSelected>>', self._on_compare_selected)
         # Other code switches compare off by setting the variable; keep the box in step with it.
-        self.compare_var.trace_add('write', lambda *_a: self.compare_combo.configure(
-            state='readonly' if self.compare_var.get() else 'disabled'))
+        self.compare_var.trace_add('write', lambda *_a: self._sync_compare_box())
 
         # Once a run is done: re-stretch its preview JPEG with another stretch
         # (UIEvents.restretch). Hidden until the run has left an image to redo.
@@ -2154,6 +2153,9 @@ class App:
         if self._pp_pending:
             self._pp_pending = False
             self._run_pp()
+
+    def _sync_compare_box(self) -> None:
+        self.compare_combo.configure(state='readonly' if self.compare_var.get() else 'disabled')
 
     def _on_compare_toggled(self) -> None:
         self.preview.set_compare(self.compare_var.get())
