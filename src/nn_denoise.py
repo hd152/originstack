@@ -43,7 +43,9 @@ TILE = 384             # forward-pass tile (px), a multiple of 4 (two 2x pooling
 TILE_WORKERS = 2          # tiles in flight (denoise_z); the convolutions already use every core
 MARGIN = 32            # context on each side of a tile; > the network's receptive-field radius (~24 px)
 LEAK = 0.1             # LeakyReLU slope
-USE_FMA = os.environ.get('ORIGINSTACK_NN_FMA', '') == '1'   # prototype: fused multiply-add convs
+# Fused multiply-add convolutions (1.4x faster; rounding then differs in the last bits, and on a CPU
+# without FMA the plain kernel runs). ORIGINSTACK_NN_FMA=0 selects the plain kernel everywhere.
+USE_FMA = os.environ.get('ORIGINSTACK_NN_FMA', '1') != '0'
 RESTORE_SIGMA = 4.0    # px; low-frequency restore of faint extended light (nn_denoise)
 # Star FWHM (px, circular Gaussian fit) range of the Origin sessions the deconvolver was trained
 # on (2.9-5.1 px; the lower bound is lower: an S50 stack at 2.6 px sharpens fine unresampled). Outside it the network sharpens too much (undersampled) or too little
