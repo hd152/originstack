@@ -651,5 +651,12 @@
  "With --photometry-timeseries: write <output>_aavso.txt.": "Con --photometry-timeseries: escribir <output>_aavso.txt.",
  "With --photometry-timeseries: write <output>_aavso.txt: the light curve of the target in the AAVSO Extended Format, for WebObs upload. Comparison stars come from the AAVSO VSP chart (network), ensemble-calibrated per frame on the green channel (TG band), with a check star. Target: --aavso-star NAME or --photometry-target RA,DEC.": "Con --photometry-timeseries: escribir <output>_aavso.txt: la curva de luz del objetivo en el formato AAVSO Extended Format, para subir a WebObs. Las estrellas de comparación provienen de la carta AAVSO VSP (red), calibradas en conjunto por fotograma en el canal verde (banda TG), con una estrella de control. Objetivo: --aavso-star NOMBRE o --photometry-target RA,DEC.",
  "Write <output>_frames.csv and <output>_frames.json after registration.": "Escribir <output>_frames.csv y <output>_frames.json tras el registro.",
- "Write <output>_frames.csv and <output>_frames.json after registration: for every light, kept or rejected, which gate decided it and why (e.g. \"score 12.0 < 30.0\"), notes for kept frames far off the session median (FWHM, stars, background, ellipticity), and the key metrics. Changes no result. With -v also prints the count per reason.": "Escribir <output>_frames.csv y <output>_frames.json tras el registro: para cada light, aceptado o rechazado, qué filtro decidió y por qué (p. ej. \"score 12.0 < 30.0\"), notas de los fotogramas aceptados muy alejados de la mediana de la sesión (FWHM, estrellas, fondo, elipticidad) y las métricas principales. No cambia ningún resultado. Con -v también imprime el recuento por motivo."
+ "Write <output>_frames.csv and <output>_frames.json after registration: for every light, kept or rejected, which gate decided it and why (e.g. \"score 12.0 < 30.0\"), notes for kept frames far off the session median (FWHM, stars, background, ellipticity), and the key metrics. Changes no result. With -v also prints the count per reason.": "Escribir <output>_frames.csv y <output>_frames.json tras el registro: para cada light, aceptado o rechazado, qué filtro decidió y por qué (p. ej. \"score 12.0 < 30.0\"), notas de los fotogramas aceptados muy alejados de la mediana de la sesión (FWHM, estrellas, fondo, elipticidad) y las métricas principales. No cambia ningún resultado. Con -v también imprime el recuento por motivo.",
+ "All checks passed": "Todas las comprobaciones superadas",
+ "Delete": "Eliminar",
+ "My settings": "Mis ajustes",
+ "Name for these settings:": "Nombre de estos ajustes:",
+ "Only changed": "Solo modificados",
+ "Save as…": "Guardar como…",
+ "Save settings": "Guardar ajustes"
 }

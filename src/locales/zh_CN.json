@@ -651,5 +651,12 @@
  "With --photometry-timeseries: write <output>_aavso.txt.": "配合 --photometry-timeseries:写出 <output>_aavso.txt。",
  "With --photometry-timeseries: write <output>_aavso.txt: the light curve of the target in the AAVSO Extended Format, for WebObs upload. Comparison stars come from the AAVSO VSP chart (network), ensemble-calibrated per frame on the green channel (TG band), with a check star. Target: --aavso-star NAME or --photometry-target RA,DEC.": "配合 --photometry-timeseries:写出 <output>_aavso.txt:目标的光变曲线,采用 AAVSO Extended Format 格式,可上传到 WebObs。比较星来自AAVSO VSP星图(网络),在绿色通道(TG波段)上按帧做整体校准,并带有一颗检验星。目标:--aavso-star 名称 或 --photometry-target RA,DEC。",
  "Write <output>_frames.csv and <output>_frames.json after registration.": "配准后写出 <output>_frames.csv 和 <output>_frames.json。",
- "Write <output>_frames.csv and <output>_frames.json after registration: for every light, kept or rejected, which gate decided it and why (e.g. \"score 12.0 < 30.0\"), notes for kept frames far off the session median (FWHM, stars, background, ellipticity), and the key metrics. Changes no result. With -v also prints the count per reason.": "配准后写出 <output>_frames.csv 和 <output>_frames.json:对每个 light,无论保留还是剔除,说明由哪道关卡决定及原因(例如 \"score 12.0 < 30.0\"),并为远离本次观测中位数的保留帧(FWHM、星数、背景、椭圆度)添加备注,以及主要指标。不改变任何结果。使用 -v 时还会打印各原因的数量。"
+ "Write <output>_frames.csv and <output>_frames.json after registration: for every light, kept or rejected, which gate decided it and why (e.g. \"score 12.0 < 30.0\"), notes for kept frames far off the session median (FWHM, stars, background, ellipticity), and the key metrics. Changes no result. With -v also prints the count per reason.": "配准后写出 <output>_frames.csv 和 <output>_frames.json:对每个 light,无论保留还是剔除,说明由哪道关卡决定及原因(例如 \"score 12.0 < 30.0\"),并为远离本次观测中位数的保留帧(FWHM、星数、背景、椭圆度)添加备注,以及主要指标。不改变任何结果。使用 -v 时还会打印各原因的数量。",
+ "All checks passed": "所有检查均已通过",
+ "Delete": "删除",
+ "My settings": "我的设置",
+ "Name for these settings:": "这些设置的名称：",
+ "Only changed": "仅显示已更改",
+ "Save as…": "另存为…",
+ "Save settings": "保存设置"
 }
