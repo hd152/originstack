@@ -6,6 +6,7 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+- Star reduction is about 25% faster (one colour-aware smoothing call per star instead of three).
 - Faster NN deconvolution / denoising: the whole network now runs in one native call with recycled activation buffers and fused multiply-add convolutions (about 3x per tile; NN deconvolution on the Whirlpool stack 19.3 s -> 10.2 s, Phase 4 25 s -> 16 s). The result differs from before in the last bits (preview JPEG by up to 8 levels in a few pixels) and, on a CPU without FMA, from the same run on one with it; `ORIGINSTACK_NN_FMA=0` turns the fused kernel off.
 - Desktop app: a **Quick look** preview of the stack appears right after registration (the 8 sharpest frames, warped, binned and averaged), instead of an empty preview until Phase 3's combine ends. On a 41-frame session it showed 12 s before the first real stack preview; longer sessions gain more. Nothing changes in the stack or on CLI runs.
 

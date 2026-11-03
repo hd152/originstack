@@ -1019,7 +1019,10 @@ def shrink_stars(img: np.ndarray, sources, fwhm: float, amount: float = 0.5,
         cut = out[cy - Rb:cy + Rb + 1, cx - Rb:cx + Rb + 1]
         B = np.median(cut[ann], axis=0)
         e = cut - B
-        es = np.stack([_gaussian_blur(e[..., c], 0.7) for c in range(3)], axis=2)
+        # Filtering the three colour planes together avoids three native-call
+        # setup costs for every small star cutout. The zero-width channel axis
+        # keeps the operation independent per channel.
+        es = ndimage.gaussian_filter(e, sigma=(0.7, 0.7, 0.0), mode='reflect')
         el = es @ lw
         A = float(el[rr <= 1.5].max())
         if A < 5.0 * sky_sigma:
