@@ -20,8 +20,9 @@ _WM_COPYGLOBALDATA = 0x0049        # sent by Explorer to a process at a lower in
 _MSGFLT_ALLOW = 1
 _GWL_WNDPROC = -4
 
-# Keeps the window-procedure thunk (and the original procedure) alive for the process: a
-# collected callback would crash the next message.
+# Keeps every window-procedure thunk (and the procedure it replaced) alive for the process: a
+# collected callback would crash the next message. A list per window: hooking the same window
+# twice chains the new procedure to the old thunk, which must outlive it.
 _keep: dict = {}
 
 
@@ -90,7 +91,7 @@ def enable_file_drop(root, on_drop: Callable[[List[str]], None]) -> bool:
         original = user32.SetWindowLongPtrW(hwnd, _GWL_WNDPROC, ctypes.cast(thunk, ctypes.c_void_p))
         if not original:
             return False
-        _keep[hwnd] = (thunk, original)
+        _keep.setdefault(hwnd, []).append((thunk, original))    # a second hook chains to the first
         shell32.DragAcceptFiles(hwnd, True)
         try:    # an elevated app would otherwise ignore drops from a normal Explorer
             for msg in (_WM_DROPFILES, _WM_COPYGLOBALDATA):

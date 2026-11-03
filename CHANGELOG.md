@@ -6,6 +6,10 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+## [2.22.0] - 2026-11-03
+
+Speed and the desktop app. The learned deconvolution/denoising step runs about 3x faster per tile and a Phase 4 run on the Whirlpool stack went from 25 s to 16 s; the app gains a quick look preview, in-app updates, drag and drop, saved settings and a tidier layout. Twelve free sample sessions are published on Zenodo (linked from the website).
+
 - Star reduction is about 25% faster (one colour-aware smoothing call per star instead of three).
 - Faster NN deconvolution / denoising: the whole network now runs in one native call with recycled activation buffers and fused multiply-add convolutions (about 3x per tile; NN deconvolution on the Whirlpool stack 19.3 s -> 10.2 s, Phase 4 25 s -> 16 s). The result differs from before in the last bits (preview JPEG by up to 8 levels in a few pixels) and, on a CPU without FMA, from the same run on one with it; `ORIGINSTACK_NN_FMA=0` turns the fused kernel off.
 - Desktop app: a **Quick look** preview of the stack appears right after registration (the 8 sharpest frames, warped, binned and averaged), instead of an empty preview until Phase 3's combine ends. On a 41-frame session it showed 12 s before the first real stack preview; longer sessions gain more. Nothing changes in the stack or on CLI runs.
@@ -19,7 +23,9 @@ match the `VERSION` file and `v*` git tags.
 - Preview **Histogram** (per-channel, under the image) and the image caption no longer squeezed out of a short pane.
 - Additional options: **Only changed** filter, a wider search box, and the full help as a tooltip on each description line.
 - **My settings**: save the current options under a name and load them for another session (folders are not part of it).
+- Desktop app: hooking one window for drops twice no longer frees the first hook's callback (only reachable from tests that build several apps on one window; it crashed them).
 - Desktop app (Windows): drop a session folder, or a file from it, on the window to set the light frames. Uses the Windows shell's own drop message through ctypes: no new dependency.
+- Website and tools: a sample-sessions page (twelve raw Origin sessions on Zenodo, CC BY 4.0), `tools/upload_zenodo.py` / `tools/zenodo_stats.py`, a sample regression check (`tools/check_samples.py`), and a contact address (originstack@originstack.site).
 
 ## [2.21.0] - 2026-11-02
 
