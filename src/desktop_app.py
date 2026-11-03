@@ -1644,10 +1644,16 @@ class App:
             _Tooltip(cb, tip)
             self.export_vars[fmt] = var
         self.readiness_var = tk.StringVar(value=_('Choose a light-frame folder to begin.'))
-        ttk.Label(parent, textvariable=self.readiness_var, style='Dim.TLabel',
-                  wraplength=560).pack(fill='x', pady=(0, 4))
+        self.readiness_label = ttk.Label(parent, textvariable=self.readiness_var, style='Dim.TLabel',
+                                         wraplength=560)
+        self.readiness_label.pack(fill='x', pady=(0, 4))
         self.preflight_frame = ttk.LabelFrame(parent, text=_('PREFLIGHT'))
         self.preflight_frame.pack(fill='x', pady=(0, 6))
+        self._preflight_ok_var = tk.StringVar(value='')
+        self._preflight_ok = ttk.Label(self.preflight_frame, textvariable=self._preflight_ok_var,
+                                       style='Dim.TLabel')
+        self._preflight_grid = ttk.Frame(self.preflight_frame)
+        self._preflight_grid.pack(fill='x')
         self.preflight_vars = {
             key: tk.StringVar(value=f'○ {label}')
             for key, label in (
@@ -1659,12 +1665,13 @@ class App:
             )
         }
         for row, var in enumerate(self.preflight_vars.values()):
-            ttk.Label(self.preflight_frame, textvariable=var, style='Dim.TLabel').grid(
+            ttk.Label(self._preflight_grid, textvariable=var, style='Dim.TLabel').grid(
                 row=row // 2, column=row % 2, sticky='w', padx=8, pady=2)
-        self.preflight_frame.grid_columnconfigure(0, weight=1)
-        self.preflight_frame.grid_columnconfigure(1, weight=1)
+        self._preflight_grid.grid_columnconfigure(0, weight=1)
+        self._preflight_grid.grid_columnconfigure(1, weight=1)
 
         phase_frame = ttk.LabelFrame(parent, text=_('PIPELINE'))
+        self._phase_frame = phase_frame
         phase_frame.pack(fill='x', pady=6)
         self.phase_labels = []
         titles = [f'{i} · {name}' for i, name in
@@ -1679,11 +1686,12 @@ class App:
         self.progress_bar = ttk.Progressbar(phase_frame, mode='determinate')
         self.progress_bar.grid(row=1, column=0, columnspan=4, sticky='we', padx=4, pady=(0, 4))
         self.progress_var = tk.StringVar(value='')
+        # Progress text left, time left right, on one row: a second row left the log no height.
         ttk.Label(phase_frame, textvariable=self.progress_var).grid(
-            row=2, column=0, columnspan=4, sticky='w', padx=4, pady=(0, 4))
+            row=2, column=0, columnspan=3, sticky='w', padx=4, pady=(0, 4))
         self.eta_var = tk.StringVar(value='')
         ttk.Label(phase_frame, textvariable=self.eta_var, style='Dim.TLabel').grid(
-            row=3, column=0, columnspan=4, sticky='e', padx=4, pady=(0, 4))
+            row=2, column=3, sticky='e', padx=4, pady=(0, 4))
 
         # RECENT FRAMES moved to the right column; the whole left column
         # below the pipeline bar is the log now.
@@ -1708,24 +1716,31 @@ class App:
         preview_frame = ttk.LabelFrame(parent, text=_('PREVIEW'))
         preview_frame.pack(fill='both', expand=True, pady=(0, 6))
 
+        # Two rows: on one, the Full screen button was cut off at the default window width and
+        # the milestone names ("Post-processing: before sky floor") did not fit their box.
         vtools = ttk.Frame(preview_frame)
-        vtools.pack(fill='x', pady=4)
+        vtools.pack(fill='x', pady=(4, 0))
         ttk.Label(vtools, text=_('Milestone')).pack(side='left', padx=(0, 4))
         self.view_var = tk.StringVar()
         self.view_combo = ttk.Combobox(vtools, textvariable=self.view_var,
-                                       state='readonly', width=20)
-        self.view_combo.pack(side='left')
+                                       state='readonly', width=34)
+        self.view_combo.pack(side='left', fill='x', expand=True)
         self.view_combo.bind('<<ComboboxSelected>>', self._on_view_selected)
+        ttk.Button(vtools, text=_('Full screen'), command=self._preview_fullscreen).pack(
+            side='right', padx=(8, 0))
+        ctools = ttk.Frame(preview_frame)
+        ctools.pack(fill='x', pady=(2, 4))
         self.compare_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(vtools, text=_('Compare'), variable=self.compare_var,
-                        command=self._on_compare_toggled).pack(side='left', padx=8)
+        ttk.Checkbutton(ctools, text=_('Compare'), variable=self.compare_var,
+                        command=self._on_compare_toggled).pack(side='left', padx=(0, 6))
         self.compare_combo_var = tk.StringVar()
-        self.compare_combo = ttk.Combobox(vtools, textvariable=self.compare_combo_var,
-                                          state='readonly', width=20)
+        self.compare_combo = ttk.Combobox(ctools, textvariable=self.compare_combo_var,
+                                          state='disabled', width=34)
         self.compare_combo.pack(side='left', fill='x', expand=True)
         self.compare_combo.bind('<<ComboboxSelected>>', self._on_compare_selected)
-        ttk.Button(vtools, text=_('Full screen'), command=self._preview_fullscreen).pack(
-            side='right')
+        # Other code switches compare off by setting the variable; keep the box in step with it.
+        self.compare_var.trace_add('write', lambda *_a: self.compare_combo.configure(
+            state='readonly' if self.compare_var.get() else 'disabled'))
 
         # Once a run is done: re-stretch its preview JPEG with another stretch
         # (UIEvents.restretch). Hidden until the run has left an image to redo.
@@ -1873,6 +1888,8 @@ class App:
         self.start_btn.state(['disabled'])
         self.cancel_btn.state(['!disabled'])
         self.status_var.set(_('Running…'))
+        self.readiness_var.set('')
+        self.readiness_label.pack_forget()
         self._shown_log_lines = 0
         self._clear_frames_table()
         self.summary_var.set('')
@@ -1896,6 +1913,7 @@ class App:
             for key, var in self.preflight_vars.items():
                 label = var.get().split(' ', 1)[-1]
                 var.set(self._check_icon(None, label))
+            self._show_preflight_summary()
             return
         counts = self.form._frame_counts
         lights = counts.get('light', 0)
@@ -1915,6 +1933,20 @@ class App:
                 gb=estimated / 1024 ** 3)))
         self.preflight_vars['output'].set(self._check_icon(
             bool(directory), _('Output location')))
+        self._show_preflight_summary()
+
+    def _show_preflight_summary(self) -> None:
+        """One line once every check passes (the five rows took a third of the left column); the
+        full grid again as soon as one needs attention or is not known yet."""
+        if all(v.get().startswith('✓') for v in self.preflight_vars.values()):
+            self._preflight_grid.pack_forget()
+            summary = getattr(self.form, '_data_summary', '')
+            self._preflight_ok_var.set('✓ ' + (_('Ready to start · {summary}', summary=summary)
+                                               if summary else _('All checks passed')))
+            self._preflight_ok.pack(anchor='w', padx=8, pady=2)
+        else:
+            self._preflight_ok.pack_forget()
+            self._preflight_grid.pack(fill='x')
 
     def _reset_run_view(self) -> None:
         if self.rm.is_running():
@@ -1966,8 +1998,14 @@ class App:
         elif not self.form._data_summary:
             self.readiness_var.set(_('No frames found — choose a folder containing light frames.'))
         else:
-            self.readiness_var.set(_('Ready to start · {summary}', summary=self.form._data_summary))
+            self.readiness_var.set('')
         self._update_preflight()
+        # Only a problem or a missing folder gets its own line; a ready session reads
+        # "Ready to start · 35 lights, ..." in the preflight line, which saves a row.
+        if self.readiness_var.get():
+            self.readiness_label.pack(fill='x', pady=(0, 4), before=self.preflight_frame)
+        else:
+            self.readiness_label.pack_forget()
         self._show_plan = True
         self.summary_frame.configure(text=_('THIS RUN'))
         self.summary_label.pack_forget()
@@ -2474,8 +2512,23 @@ class App:
         except Exception:
             pass
 
+    def _shape_left_for_run(self, running: bool) -> None:
+        """While a run goes the log and progress matter and the Setup form does not: give the log
+        the height (the form still scrolls); when it is over, give the form its half back."""
+        if running == getattr(self, '_left_running', False) or not self._vsplit_pinned:
+            return
+        self._left_running = running
+        if running:
+            self.preflight_frame.pack_forget()      # "Ready to start" while it runs is stale
+        else:
+            self.preflight_frame.pack(fill='x', pady=(0, 6), before=self._phase_frame)
+        h = self._vpaned.winfo_height()
+        if h > 1:
+            self._vpaned.sashpos(0, int(h * 0.28) if running else max(h // 2, h - 300))
+
     def _refresh_run_button(self, snap: Optional[Dict[str, Any]] = None) -> None:
         running = self.rm.is_running()
+        self._shape_left_for_run(running)
         if running:
             self.start_btn.state(['disabled'])
             self.header_status_var.set(_('Cancelling…') if self.rm.is_cancelling() else _('Running…'))
