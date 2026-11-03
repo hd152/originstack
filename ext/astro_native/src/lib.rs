@@ -187,6 +187,8 @@ fn astro_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(proper_coadd_accum32_tile, m)?)?;
     m.add_function(wrap_pyfunction!(nn_conv3x3, m)?)?;
     m.add_function(wrap_pyfunction!(nn_conv3x3_portable, m)?)?;
+    m.add_function(wrap_pyfunction!(nn_forward, m)?)?;
+    m.add_function(wrap_pyfunction!(nn_release_buffers, m)?)?;
     m.add_function(wrap_pyfunction!(frame_sky_noise, m)?)?;
     m.add_function(wrap_pyfunction!(validate_frame_stats, m)?)?;
     m.add_function(wrap_pyfunction!(hot_pixel_rgb, m)?)?;
