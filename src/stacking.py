@@ -1939,6 +1939,13 @@ def run_stacking_phase(
     stats.output_shape = (bottom - top, right - left)
     stats.cropped_pixels = (H - (bottom - top), W - (right - left))
 
+    # Desktop app: a rough look at the stack now, instead of an empty preview until the combine ends.
+    # Not with elastic registration: a rigid warp would misplace the stars it corrected.
+    if displacement_fields is None:
+        from src.quick_look import publish_quick_look
+        publish_quick_look(mem_rgb, final, final_indices, shifts, transforms,
+                           (top, bottom, left, right), args)
+
     drizzle_scale = getattr(args, 'drizzle_scale', 1.0)
     use_aligned_memmap = (drizzle_scale <= 1.0 and
                           args.stack_method in ('median', 'sigma_clip', 'winsorized',

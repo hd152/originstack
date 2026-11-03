@@ -6,6 +6,8 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+- Desktop app: a **Quick look** preview of the stack appears right after registration (the 8 sharpest frames, warped, binned and averaged), instead of an empty preview until Phase 3's combine ends. On a 41-frame session it showed 12 s before the first real stack preview; longer sessions gain more. Nothing changes in the stack or on CLI runs.
+
 - Desktop app (Windows): drop a session folder, or a file from it, on the window to set the light frames. Uses the Windows shell's own drop message through ctypes: no new dependency.
 
 ## [2.21.0] - 2026-11-02
