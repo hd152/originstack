@@ -1613,6 +1613,10 @@ class App:
         self._vpaned.bind('<Configure>', _pin_vsplit, add='+')
         root.after(80, _pin_vsplit)
 
+        # Drop a session folder (or a file from it) on the window to set the light frames.
+        from src.drop_files import enable_file_drop
+        enable_file_drop(root, self._on_files_dropped)
+
         root.protocol('WM_DELETE_WINDOW', self._on_closing)
         root.bind('<Control-Return>', lambda _event: self._on_start())
         root.bind('<Escape>', lambda _event: self._on_cancel() if self.rm.is_running() else None)
@@ -2197,6 +2201,12 @@ class App:
                     self.preview.clear()
             elif self.preview.current_slug == 'example':
                 self.preview.clear()
+
+    def _on_files_dropped(self, paths: List[str]) -> None:
+        from src.drop_files import folder_from_drop
+        folder = folder_from_drop(paths)
+        if folder and not self.rm.is_running():
+            self.form.vars['directory'].set(os.path.normpath(folder))
 
     def _on_cancel(self) -> None:
         # Cooperative, not instant -- takes effect at the next checkpoint
