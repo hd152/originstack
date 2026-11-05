@@ -67,6 +67,10 @@ class Config:
     # (largest star region on the real stacks above: 701 px; Orion's core 25.6k).
     PREVIEW_ROLLOFF_MIN_PIXELS = 1000
     PREVIEW_ROLLOFF_KNEE = 0.85
+    # `preserve` stretch: chroma fades to white as the displayed luminance goes
+    # from this level to 1 (flat saturated blue discs on Orion's stars/Trapezium
+    # otherwise).
+    PREVIEW_PRESERVE_WHITE_START = 0.7
     PREVIEW_ROLLOFF_STRENGTH = 8.0
     # When the region above white is most of the object (a small bright planetary
     # nebula on empty sky), the band [KNEE, 1] is all of it: the dual-band M57

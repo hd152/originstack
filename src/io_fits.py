@@ -900,6 +900,14 @@ def colour_preserving_stretch(rgb: np.ndarray, lum_stretched: np.ndarray,
     mn = out.min(axis=2, keepdims=True)
     s_lo = np.where(mn < 0.0, Tg / np.maximum(Tg - mn, 1e-12), 1.0)
     out = Tg + np.clip(s_lo, 0.0, 1.0) * (out - Tg)
+    # Near display white a saturated colour cannot be shown at its luminance:
+    # the rescale below would turn every bright star core and a clipped core
+    # (M42's Trapezium) into a flat saturated disc. Fade chroma out as T
+    # approaches 1 (the way a camera's highlights go white).
+    from src.models import Config
+    lo = Config.PREVIEW_PRESERVE_WHITE_START
+    fade = _smoothstep((Tg - lo) / max(1.0 - lo, 1e-6))
+    out = Tg + (1.0 - fade) * (out - Tg)
     # Over-range: rescale by the largest channel (keeps hue and saturation).
     mx = out.max(axis=2, keepdims=True)
     out = out / np.maximum(mx, 1.0)

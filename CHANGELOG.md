@@ -6,6 +6,11 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+## [2.22.2] - 2026-11-05
+
+### Fixed
+- The colour-preserving preview (the 2.22.1 default) rendered saturated star cores and clipped nebula cores as flat blue discs: on Orion every bright star was a light-blue dot and the Trapezium region a featureless blue blob. Chroma now fades to white as the displayed luminance approaches white (`Config.PREVIEW_PRESERVE_WHITE_START`, 0.7), as in a camera's highlights; stars below that level keep their colour (Pinwheel's red stars stay red). Preview JPEG only; linear FITS, colour calibration and photometry unchanged.
+
 ## [2.22.1] - 2026-11-04
 
 ### Changed
