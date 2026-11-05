@@ -75,10 +75,10 @@ def ps1_cutout(ra: float, dec: float, size: int, filename: str):
         return np.asarray(h[0].data, np.float32), WCS(h[0].header)
 
 
-def reproject_onto(src: np.ndarray, src_wcs: WCS, dst_wcs: WCS, shape) -> np.ndarray:
-    """Area-like average of ``src`` over each pixel of ``dst`` (SUB x SUB bilinear samples)."""
+def reproject_onto(src: np.ndarray, src_wcs: WCS, dst_wcs: WCS, shape, sub: int = SUB) -> np.ndarray:
+    """Area-like average of ``src`` over each pixel of ``dst`` (``sub`` x ``sub`` bilinear samples)."""
     h, w = shape
-    off = (np.arange(SUB) + 0.5) / SUB - 0.5
+    off = (np.arange(sub) + 0.5) / sub - 0.5
     yy, xx = np.mgrid[0:h, 0:w].astype(np.float64)
     acc = np.zeros((h, w))
     bad = np.zeros((h, w), bool)
@@ -92,7 +92,7 @@ def reproject_onto(src: np.ndarray, src_wcs: WCS, dst_wcs: WCS, shape) -> np.nda
             ok = ndi.map_coordinates(finite.astype(np.float32), [py, px], order=1, mode="constant", cval=0.0)
             bad |= ~np.isfinite(v) | (ok < 0.999)
             acc += np.nan_to_num(v)
-    out = (acc / (SUB * SUB)).astype(np.float32)
+    out = (acc / (sub * sub)).astype(np.float32)
     out[bad] = np.nan
     return out
 
@@ -140,6 +140,8 @@ def main() -> None:
         n = args.size - 1
         corners = [(0, 0), (0, n), (n, 0), (n, n), (n / 2, n / 2), (0, n / 2), (n, n / 2), (n / 2, 0), (n / 2, n)]
         cells = skycells_for([tuple(float(v) for v in sub_wcs.pixel_to_world_values(x, y)) for y, x in corners])
+        # samples per pixel follow the pixel ratio: 6 for Origin (1.47"), ~10 for a Seestar S50 (2.4")
+        sub = max(SUB, int(round(scale / PS1_SCALE)))
         bands = []
         t = time.time()
         for b in "gri":
@@ -147,7 +149,7 @@ def main() -> None:
             cnt = np.zeros((args.size, args.size))
             for files in cells:                    # skycells overlap: average where several cover
                 img, w = ps1_cutout(ra, dec, need, files[b])
-                r = reproject_onto(img, w, sub_wcs, (args.size, args.size))
+                r = reproject_onto(img, w, sub_wcs, (args.size, args.size), sub)
                 ok = np.isfinite(r)
                 acc[ok] += r[ok]
                 cnt[ok] += 1
