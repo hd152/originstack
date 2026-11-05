@@ -97,10 +97,11 @@ def test_oklab_star_cores_brighter_and_still_coloured():
     o = iof.render_preview_float(img, 'oklab')
     _assert_display(o)
     for y, x in ((60, 80), (330, 500)):
-        # ghs keeps the ratios by dimming the core to fit the gamut
-        assert o[y, x] @ W > g[y, x] @ W + 0.1
+        # ghs fades a core at display white to white (no flat saturated disc);
+        # oklab keeps the core's colour
+        assert _sat(g[y, x]) < 0.1
+        assert o[y, x] @ W > 0.5
         assert _sat(o[y, x]) > 0.3
-        assert np.argmax(o[y, x]) == np.argmax(g[y, x])          # same dominant hue
     # mid-tones keep the ghs preview's colour
     neb = (r > 20) & (r < 80)
     assert abs(_sat(o[neb]).mean() - _sat(g[neb]).mean()) < 0.02

@@ -44,15 +44,19 @@ def test_preserve_keeps_rgb_ratios_and_luminance():
 def test_preserve_over_range_keeps_hue_and_saturation():
     # A saturated red whose luminance maps near 1: R would exceed 1.
     rgb = np.array([[[95.0, 20.0, 10.0]]], np.float32)
-    T = np.array([[0.95]])
+    T = np.array([[0.6]])
     out = colour_preserving_stretch(rgb, T, 0.0, 100.0, 0.1)
     assert out.max() == pytest.approx(1.0) and out.min() >= 0.0
     np.testing.assert_allclose(out[0, 0] / out[0, 0].sum(), rgb[0, 0] / rgb[0, 0].sum(),
                                atol=1e-5)
-    # A core at the white point keeps its colour instead of turning white
+    # A core at display white goes white instead of a flat saturated disc ...
     core = colour_preserving_stretch(np.array([[[45.0, 70.0, 100.0]]], np.float32),
                                      np.array([[1.0]]), 0.0, 70.0, 0.1)
-    assert core[0, 0, 2] == pytest.approx(1.0) and core[0, 0, 0] < 0.5
+    assert core.min() > 0.95
+    # ... while one well below it keeps its colour
+    mid = colour_preserving_stretch(np.array([[[30.0, 45.0, 70.0]]], np.float32),
+                                    np.array([[0.5]]), 0.0, 100.0, 0.1)
+    assert mid[0, 0, 2] > 1.5 * mid[0, 0, 0]
 
 
 def test_preserve_greys_the_noise_floor():
@@ -72,7 +76,7 @@ def test_preserve_keeps_star_colours_channel_mode_shifts_them():
     chan = np.stack([generalized_hyperbolic_stretch(img[..., c], **kw) for c in range(3)], 2)
     sky = np.median(img, axis=(0, 1))
     for (cy, cx), _amp, _col in stars:
-        for dx, tol in ((0, None), (3, 0.05)):             # core (gamut-limited), wing
+        for dx, tol in ((3, 0.05),):                       # wing (cores fade to white)
             lin = img[cy, cx + dx] - sky
             ci_lin = np.log(lin[2] / lin[0])
             ci_p = np.log(pres[cy, cx + dx, 2] / pres[cy, cx + dx, 0])
