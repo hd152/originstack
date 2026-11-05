@@ -85,7 +85,7 @@
     <div class="bar">
       <picture><source type="image/webp" srcset="../img/logo-dark-200.webp 200w, ../img/logo-dark-400.webp 400w" sizes="188px"><img src="../img/logo-dark.png" alt="OriginStack" width="920" height="256"></picture>
       <nav aria-label="章节">
-        <a href="#how">How it works</a> <a href="#oneclick">What you get</a> <a href="#app">The app</a> <a href="#get">Install</a> <a href="stack-celestron-origin.html">Guide</a> <a href="../sample-sessions.html">Sample data</a> <a href="#technical">Technical details</a>
+        <a href="#how">工作原理</a> <a href="#oneclick">你会得到什么</a> <a href="#app">应用</a> <a href="#get">安装</a> <a href="stack-celestron-origin.html">指南</a> <a href="../sample-sessions.html">示例数据</a> <a href="#technical">技术细节</a>
       </nav>
     </div>
 
@@ -115,7 +115,7 @@
       <span class="cap r">114 帧，已叠加并处理</span>
       <input type="range" min="0" max="100" value="50" aria-label="拖动以对比单帧与最终叠加结果">
     </div>
-    <p class="hero-bridge"><span>从差别看起</span> <a href="#how">See how simple it is&nbsp;→</a></p>
+    <p class="hero-bridge"><span>从差别看起</span> <a href="#how">看看有多简单&nbsp;→</a></p>
     <p class="fine">OriginStack 是免费的。如果它为你省下了一晚上的后期处理时间，你可以<a data-goatcounter-click="support-index" href="https://ko-fi.com/originstack">在 Ko-fi 上打赏</a>。</p>
     </div>
     </div>
@@ -125,23 +125,23 @@
 <main id="main-content">
 <section id="how">
   <div class="wrap">
-    <h2>How it works, in three steps</h2>
-    <p class="intro measure">You do not need to know anything about image processing. If you can pick a folder, you can use it.</p>
+    <h2>三步看懂它如何工作</h2>
+    <p class="intro measure">你不需要懂任何图像处理。只要会选择文件夹，就能使用。</p>
     <div class="phases">
       <div>
-        <h3>1. Pick your folder</h3>
-        <p>Choose the folder your telescope or camera saved. OriginStack counts the frames and works out what you photographed.</p>
+        <h3>1. 选择文件夹</h3>
+        <p>选择望远镜或相机保存的文件夹。OriginStack 会统计帧数，并判断你拍摄的是什么。</p>
       </div>
       <div>
-        <h3>2. Press Start</h3>
-        <p>It combines hundreds of short, noisy exposures into one clean picture and then finishes it for you. A night of frames takes about a minute on a normal laptop.</p>
+        <h3>2. 点击开始</h3>
+        <p>它把数百张短而嘈杂的曝光合成为一张干净的图像，然后替你完成后期。一整晚的帧在普通笔记本电脑上大约需要一分钟。</p>
       </div>
       <div>
-        <h3>3. Get your picture</h3>
-        <p>You get a finished JPEG ready to share, plus the unprocessed combined image in case you want to edit it further elsewhere.</p>
+        <h3>3. 获得你的图像</h3>
+        <p>你会得到可直接分享的成品 JPEG，以及未经处理的合成图像，方便你在其他软件中继续编辑。</p>
       </div>
     </div>
-    <p class="plain measure">It is free, it runs on your own computer, and it needs no account. It never sends your pictures anywhere.</p>
+    <p class="plain measure">它免费，在你自己的电脑上运行，也不需要账号。它不会把你的图像发送到任何地方。</p>
   </div>
 </section>
 
@@ -280,11 +280,11 @@ cd OriginStack-*-linux-x64
 
 <section id="technical">
   <div class="wrap">
-    <h2>The technical details</h2>
-    <p class="intro measure">Everything above is all you need to get a good picture. This section is for people who want the numbers: how fast it is, how it measures up against other software, and how to install it from source. Open any part to read it.</p>
+    <h2>技术细节</h2>
+    <p class="intro measure">上面的内容已足够获得一张好图像。本节面向想看数据的人：它有多快、与其他软件相比如何，以及如何从源码安装。点开任意部分即可阅读。</p>
 
     <details class="tech" id="time">
-      <summary>Speed and memory: a night of frames in about a minute</summary>
+      <summary>速度与内存：一整晚的帧约一分钟</summary>
     <p class="intro measure">欧米茄星云，114 帧，在一台 8 核笔记本电脑上：从原始文件到成品图像只需 <strong>62 秒</strong>，10 月初为 89 秒。红色部分是让图像变好看的步骤；其余时间用于让 114 帧对齐。</p>
 
     <div class="run" role="img" aria-label="条形图，显示 62 秒的构成：加载与评分 13.7 秒、配准 1.6 秒、对齐与叠加 22.0 秒、成品处理 18.1 秒、磁盘与准备 6.3 秒">
@@ -325,7 +325,7 @@ cd OriginStack-*-linux-x64
     </details>
 
     <details class="tech" id="compare">
-      <summary>How it compares with Siril, DeepSkyStacker, PixInsight and the Origin app</summary>
+      <summary>与 Siril、DeepSkyStacker、PixInsight 和 Origin 应用的比较</summary>
     <p class="intro measure">从 Origin 保存的帧出发，一次运行能得到什么。包含 Astro Pixel Processor 及各软件说明的完整表格见<a href="../compare.html">对比页面</a>。</p>
 
     <table class="wide matrix">
@@ -373,8 +373,8 @@ cd OriginStack-*-linux-x64
         <p><strong>噪声：锐度匹配后比 Siril 更低。</strong>更锐利的叠加结果单像素噪声更高，因此公平的比较是把 OriginStack 的每个通道模糊到星点宽度与 Siril 完全相同。此时其红/绿/蓝噪声在欧米茄上为 Siril 的 0.80、0.86、0.88 倍，在向日葵上为 0.84、0.66、0.93（其红色星点本来就与 Siril 一样宽），在玉夫座上为 0.82、0.72、0.89。不做匹配、按单像素比较，则分别为 0.92、1.02、1.05；0.84、0.73、0.97；以及 0.98、0.85、1.28 &mdash; 星点越锐利，这个数字越高。</p>
         <p><strong>速度：三个会话都比 Siril 更快。</strong>在同一台机器上先后运行，到得出叠加结果为止：欧米茄 44 s 对 Siril 的 54 s，向日葵 54 对 67 s，玉夫座 128 对 159 s。OriginStack 仍然做了 Siril 不做的逐帧工作 &mdash; 对每一帧进行质量评分、白平衡和星点检测 &mdash; 并在配准和叠加中把时间赢了回来。一天之中，两个工具在相同运行之间的耗时变化可达三分之一（仅 Siril 在欧米茄上就耗时 55 到 86 s），因此请在同一行内比较。成品图像还需另外 16 到 27 s。</p>
         <p><strong>内存与磁盘。</strong>内存足够时，OriginStack 会将对齐后的帧保存在内存中，两个较短的会话就是如此：12.0 和 14.3 GB，Siril 为 6.5 和 8.9 GB。在玉夫座上它们被写入临时文件，占用 9.1 GB，Siril 为 11.2 GB。临时磁盘占用在两个较短的会话上更低（11 和 15 GB，对 19 和 23 GB），在玉夫座上更高（63 对 57 GB）。</p>
-        <p><strong>Astro Pixel Processor</strong> (2.0.0-beta48, defaults, the Omega frames only): OriginStack's stars are 2% narrower on the same stars, but no narrower in red. At matched sharpness its noise is 0.92, 0.71 and 0.69 times APP's (red, green, blue). APP took 3 min 47 s, timed by hand in its window, against 57 s to the stack for OriginStack in the same run. One session, one run.</p>
-        <p><strong>StackingWizard</strong> (beta, defaults, the Omega frames only): OriginStack's stars are 5% narrower (4.39 against 4.61 px), and at matched sharpness its noise is 0.74, 0.62 and 0.54 times StackingWizard's (red, green, blue). StackingWizard kept 80 of the 114 frames, which accounts for part of the noise gap. It took 3 min 2 s, timed by hand, against 55 s to the stack for OriginStack. One session, one run.</p>
+        <p><strong>Astro Pixel Processor</strong>（2.0.0-beta48，默认设置，仅 Omega 帧）：在相同的星点上，OriginStack 的星像窄 2%，但红色通道并不更窄。在锐度相同的情况下，其噪声是 APP 的 0.92、0.71 和 0.69 倍（红、绿、蓝）。APP 在其窗口中手动计时用了 3 分 47 秒，而同一次运行中 OriginStack 到叠加完成用了 57 秒。一个会话，一次运行。</p>
+        <p><strong>StackingWizard</strong>（测试版，默认设置，仅 Omega 帧）：OriginStack 的星像窄 5%（4.39 对 4.61 px），在锐度相同的情况下，其噪声是 StackingWizard 的 0.74、0.62 和 0.54 倍（红、绿、蓝）。StackingWizard 在 114 帧中只保留了 80 帧，这解释了部分噪声差距。它手动计时用了 3 分 2 秒，而 OriginStack 到叠加完成用了 55 秒。一个会话，一次运行。</p>
         <p><strong>DeepSkyStacker</strong> 在欧米茄上耗时 14 分 8 秒，星点比另外两者都更柔和，并且在默认设置下留下了热像素条纹和几张配准错误的帧。</p>
       </div>
     </div>
@@ -437,7 +437,7 @@ cd OriginStack-*-linux-x64
     </details>
 
     <details class="tech" id="source">
-      <summary>Install from source, and everything else it does</summary>
+      <summary>从源码安装，以及它的其他功能</summary>
       <div class="get">
       <div>
         <h3>从源代码安装</h3>

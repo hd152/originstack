@@ -87,7 +87,7 @@
     <div class="bar">
       <picture><source type="image/webp" srcset="../img/logo-dark-200.webp 200w, ../img/logo-dark-400.webp 400w" sizes="188px"><img src="../img/logo-dark.png" alt="OriginStack" width="920" height="256"></picture>
       <nav aria-label="Seções">
-        <a href="#how">How it works</a> <a href="#oneclick">What you get</a> <a href="#app">The app</a> <a href="#get">Install</a> <a href="stack-celestron-origin.html">Guide</a> <a href="../sample-sessions.html">Sample data</a> <a href="#technical">Technical details</a>
+        <a href="#how">Como funciona</a> <a href="#oneclick">O que você recebe</a> <a href="#app">O aplicativo</a> <a href="#get">Instalar</a> <a href="stack-celestron-origin.html">Guia</a> <a href="../sample-sessions.html">Dados de exemplo</a> <a href="#technical">Detalhes técnicos</a>
       </nav>
     </div>
 
@@ -117,7 +117,7 @@
       <span class="cap r">114 frames, empilhados e processados</span>
       <input type="range" min="0" max="100" value="50" aria-label="Arraste para comparar um frame com o empilhamento final">
     </div>
-    <p class="hero-bridge"><span>Comece pela diferença</span> <a href="#how">See how simple it is&nbsp;→</a></p>
+    <p class="hero-bridge"><span>Comece pela diferença</span> <a href="#how">Veja como é simples&nbsp;→</a></p>
     <p class="fine">O OriginStack é gratuito. Se ele poupar uma noite de processamento, você pode <a data-goatcounter-click="support-index" href="https://ko-fi.com/originstack">deixar uma gorjeta no Ko-fi</a>.</p>
     </div>
     </div>
@@ -127,23 +127,23 @@
 <main id="main-content">
 <section id="how">
   <div class="wrap">
-    <h2>How it works, in three steps</h2>
-    <p class="intro measure">You do not need to know anything about image processing. If you can pick a folder, you can use it.</p>
+    <h2>Como funciona, em três passos</h2>
+    <p class="intro measure">Você não precisa saber nada sobre processamento de imagens. Se consegue escolher uma pasta, consegue usar.</p>
     <div class="phases">
       <div>
-        <h3>1. Pick your folder</h3>
-        <p>Choose the folder your telescope or camera saved. OriginStack counts the frames and works out what you photographed.</p>
+        <h3>1. Escolha sua pasta</h3>
+        <p>Escolha a pasta que seu telescópio ou câmera salvou. O OriginStack conta os quadros e descobre o que você fotografou.</p>
       </div>
       <div>
-        <h3>2. Press Start</h3>
-        <p>It combines hundreds of short, noisy exposures into one clean picture and then finishes it for you. A night of frames takes about a minute on a normal laptop.</p>
+        <h3>2. Aperte Iniciar</h3>
+        <p>Ele combina centenas de exposições curtas e ruidosas em uma imagem limpa e depois a finaliza para você. Uma noite de quadros leva cerca de um minuto em um notebook comum.</p>
       </div>
       <div>
-        <h3>3. Get your picture</h3>
-        <p>You get a finished JPEG ready to share, plus the unprocessed combined image in case you want to edit it further elsewhere.</p>
+        <h3>3. Receba sua imagem</h3>
+        <p>Você recebe um JPEG pronto para compartilhar, além da imagem combinada sem processamento, caso queira editá-la em outro lugar.</p>
       </div>
     </div>
-    <p class="plain measure">It is free, it runs on your own computer, and it needs no account. It never sends your pictures anywhere.</p>
+    <p class="plain measure">É gratuito, roda no seu próprio computador e não exige conta. Nunca envia suas imagens para lugar nenhum.</p>
   </div>
 </section>
 
@@ -282,11 +282,11 @@ cd OriginStack-*-linux-x64
 
 <section id="technical">
   <div class="wrap">
-    <h2>The technical details</h2>
-    <p class="intro measure">Everything above is all you need to get a good picture. This section is for people who want the numbers: how fast it is, how it measures up against other software, and how to install it from source. Open any part to read it.</p>
+    <h2>Os detalhes técnicos</h2>
+    <p class="intro measure">Tudo acima é o que você precisa para obter uma boa imagem. Esta seção é para quem quer os números: a velocidade, como ele se compara a outros programas e como instalá-lo a partir do código-fonte. Abra qualquer parte para ler.</p>
 
     <details class="tech" id="time">
-      <summary>Speed and memory: a night of frames in about a minute</summary>
+      <summary>Velocidade e memória: uma noite de quadros em cerca de um minuto</summary>
     <p class="intro measure">A Nebulosa Ômega, 114 frames, num notebook de 8 núcleos: <strong>62 segundos</strong> dos arquivos brutos até a imagem final, contra 89 no início de outubro. O bloco vermelho é a parte que deixa a imagem bonita; o resto é fazer 114 frames se alinharem.</p>
 
     <div class="run" role="img" aria-label="Barra mostrando 62 segundos divididos em carregamento e avaliação 13,7, registro 1,6, alinhamento e empilhamento 22,0, finalização 18,1 e disco e preparação 6,3 segundos">
@@ -327,7 +327,7 @@ cd OriginStack-*-linux-x64
     </details>
 
     <details class="tech" id="compare">
-      <summary>How it compares with Siril, DeepSkyStacker, PixInsight and the Origin app</summary>
+      <summary>Como se compara ao Siril, DeepSkyStacker, PixInsight e ao aplicativo do Origin</summary>
     <p class="intro measure">O que uma única execução entrega, a partir dos frames que o Origin salva. A tabela completa, com o Astro Pixel Processor e observações sobre cada programa, está na <a href="../compare.html">página de comparação</a>.</p>
 
     <table class="wide matrix">
@@ -375,8 +375,8 @@ cd OriginStack-*-linux-x64
         <p><strong>Ruído: menos ruidoso que o Siril com a nitidez igualada.</strong> Um empilhamento mais nítido tem mais ruído por pixel, então a comparação justa desfoca cada canal do OriginStack até que suas estrelas fiquem exatamente tão largas quanto as do Siril. Aí o ruído, em vermelho/verde/azul, é 0,80, 0,86, 0,88 vezes o do Siril na Ômega, 0,84, 0,66, 0,93 na Girassol (suas estrelas vermelhas já eram tão largas quanto as do Siril) e 0,82, 0,72, 0,89 na Escultor. Sem igualar, por pixel, é 0,92, 1,02, 1,05; 0,84, 0,73, 0,97; e 0,98, 0,85, 1,28 &mdash; quanto mais nítidas as estrelas, maior esse número.</p>
         <p><strong>Velocidade: mais rápido que o Siril nas três.</strong> Até o empilhamento, rodando um após o outro na mesma máquina: 44 s contra 54 s do Siril na Ômega, 54 contra 67 s na Girassol e 128 contra 159 s na Escultor. O OriginStack ainda faz trabalho por frame que o Siril não faz &mdash; avaliação de qualidade, balanço de branco e detecção de estrelas em cada frame &mdash; e recupera esse tempo no registro e no empilhamento. Os tempos das duas ferramentas variaram até um terço entre execuções idênticas ao longo do dia (só o Siril levou de 55 a 86 s na Ômega), então compare dentro de uma mesma linha. A imagem final custa outros 16 a 27 s.</p>
         <p><strong>Memória e disco.</strong> O OriginStack mantém os frames alinhados na memória quando há espaço, como nas duas sessões mais curtas: 12,0 e 14,3 GB, contra 6,5 e 8,9 do Siril. Na Escultor eles vão para arquivos temporários e ele usa 9,1 GB contra 11,2 do Siril. O disco temporário é menor nas duas sessões mais curtas (11 e 15 GB contra 19 e 23 GB) e maior na Escultor (63 contra 57 GB).</p>
-        <p><strong>Astro Pixel Processor</strong> (2.0.0-beta48, defaults, the Omega frames only): OriginStack's stars are 2% narrower on the same stars, but no narrower in red. At matched sharpness its noise is 0.92, 0.71 and 0.69 times APP's (red, green, blue). APP took 3 min 47 s, timed by hand in its window, against 57 s to the stack for OriginStack in the same run. One session, one run.</p>
-        <p><strong>StackingWizard</strong> (beta, defaults, the Omega frames only): OriginStack's stars are 5% narrower (4.39 against 4.61 px), and at matched sharpness its noise is 0.74, 0.62 and 0.54 times StackingWizard's (red, green, blue). StackingWizard kept 80 of the 114 frames, which accounts for part of the noise gap. It took 3 min 2 s, timed by hand, against 55 s to the stack for OriginStack. One session, one run.</p>
+        <p><strong>Astro Pixel Processor</strong> (2.0.0-beta48, padrões, só os quadros de Omega): nas mesmas estrelas, as do OriginStack são 2% mais estreitas, mas não mais estreitas no vermelho. Com a mesma nitidez, seu ruído é 0.92, 0.71 e 0.69 vezes o do APP (vermelho, verde, azul). O APP levou 3 min 47 s, cronometrado à mão em sua janela, contra 57 s até o empilhamento do OriginStack na mesma execução. Uma sessão, uma execução.</p>
+        <p><strong>StackingWizard</strong> (beta, padrões, só os quadros de Omega): as estrelas do OriginStack são 5% mais estreitas (4.39 contra 4.61 px) e, com a mesma nitidez, seu ruído é 0.74, 0.62 e 0.54 vezes o do StackingWizard (vermelho, verde, azul). O StackingWizard manteve 80 dos 114 quadros, o que explica parte da diferença de ruído. Levou 3 min 2 s, cronometrado à mão, contra 55 s até o empilhamento do OriginStack. Uma sessão, uma execução.</p>
         <p><strong>DeepSkyStacker</strong> levou 14 min 8 s na Ômega, produziu estrelas mais suaves que as dos outros dois e, nas configurações padrão, deixou rastros de hot pixels e alguns frames mal registrados.</p>
       </div>
     </div>
@@ -439,7 +439,7 @@ cd OriginStack-*-linux-x64
     </details>
 
     <details class="tech" id="source">
-      <summary>Install from source, and everything else it does</summary>
+      <summary>Instalar a partir do código-fonte, e tudo o mais que ele faz</summary>
       <div class="get">
       <div>
         <h3>A partir do código-fonte</h3>
