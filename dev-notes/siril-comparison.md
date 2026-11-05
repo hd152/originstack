@@ -51,3 +51,25 @@ Shared-star width (n=400, ratio OriginStack / other): Siril 0.967 (R/G/B 0.969/0
 APP 0.978 (R 1.003, G 0.961, B 0.951 -- no sharper than APP in R). Noise at matched star
 width (OriginStack / other): Siril 0.80/0.86/0.89, APP 0.92/0.71/0.69 (R/G/B). Detected star
 counts (OriginStack 3542, Siril 3525, APP 4381) are not a sharpness figure.
+
+## StackingWizard (beta 2026-10-31) vs OriginStack, Omega (2026-11-05)
+
+Same session and inputs as the APP run (114 lights, bias/dark/flat). StackingWizard is a GUI
+only (signed, `Downloads\Astrowizard.exe`, window title "AstroWizard"; the app is called
+StackingWizard); defaults, linear FITS export, nothing else run (confirmed). Hand-timed: 22.5 s to
+grade the lights + 2 min 39 s to stack = 182 s. It kept **80 of 114** frames ("mood: standard",
+0.7 h), bilinear demosaic, curved second-order registration fit, median-anchored sigma-clip with SNR
+weights; its own receipts file is next to the export. Scored with `tools/bench_vs_siril.py
+--external ... --external-name StackingWizard --external-seconds 182 --reuse-originstack`, against
+an OriginStack run from a clean folder of hardlinks (the session folder holds stacked FITS that
+discovery picks up as lights; Siril and OriginStack reproduced the APP-run numbers).
+
+| | OriginStack | StackingWizard |
+|---|---|---|
+| Time to the stack | 54.8 s | 182 s (hand-timed) |
+| Frames stacked | 114 / 114 | 80 / 114 |
+
+Shared-star width (n=400): 4.39 vs 4.61 px, median per-star ratio 0.952 (R/G/B 0.980/0.969/0.916).
+Noise at matched star width (OriginStack / StackingWizard): 0.74/0.62/0.54 (R/G/B); the 80-frame cut
+explains part of the gap. Detected stars 3542 vs 4032 (not a sharpness figure). Logs:
+`C:\nn_work\bench_wiz1.log`, `bench_wiz2.log` (work dir deleted).

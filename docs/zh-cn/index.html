@@ -374,6 +374,7 @@ cd OriginStack-*-linux-x64
         <p><strong>速度：三个会话都比 Siril 更快。</strong>在同一台机器上先后运行，到得出叠加结果为止：欧米茄 44 s 对 Siril 的 54 s，向日葵 54 对 67 s，玉夫座 128 对 159 s。OriginStack 仍然做了 Siril 不做的逐帧工作 &mdash; 对每一帧进行质量评分、白平衡和星点检测 &mdash; 并在配准和叠加中把时间赢了回来。一天之中，两个工具在相同运行之间的耗时变化可达三分之一（仅 Siril 在欧米茄上就耗时 55 到 86 s），因此请在同一行内比较。成品图像还需另外 16 到 27 s。</p>
         <p><strong>内存与磁盘。</strong>内存足够时，OriginStack 会将对齐后的帧保存在内存中，两个较短的会话就是如此：12.0 和 14.3 GB，Siril 为 6.5 和 8.9 GB。在玉夫座上它们被写入临时文件，占用 9.1 GB，Siril 为 11.2 GB。临时磁盘占用在两个较短的会话上更低（11 和 15 GB，对 19 和 23 GB），在玉夫座上更高（63 对 57 GB）。</p>
         <p><strong>Astro Pixel Processor</strong> (2.0.0-beta48, defaults, the Omega frames only): OriginStack's stars are 2% narrower on the same stars, but no narrower in red. At matched sharpness its noise is 0.92, 0.71 and 0.69 times APP's (red, green, blue). APP took 3 min 47 s, timed by hand in its window, against 57 s to the stack for OriginStack in the same run. One session, one run.</p>
+        <p><strong>StackingWizard</strong> (beta, defaults, the Omega frames only): OriginStack's stars are 5% narrower (4.39 against 4.61 px), and at matched sharpness its noise is 0.74, 0.62 and 0.54 times StackingWizard's (red, green, blue). StackingWizard kept 80 of the 114 frames, which accounts for part of the noise gap. It took 3 min 2 s, timed by hand, against 55 s to the stack for OriginStack. One session, one run.</p>
         <p><strong>DeepSkyStacker</strong> 在欧米茄上耗时 14 分 8 秒，星点比另外两者都更柔和，并且在默认设置下留下了热像素条纹和几张配准错误的帧。</p>
       </div>
     </div>
