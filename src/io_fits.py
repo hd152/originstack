@@ -1304,7 +1304,7 @@ def preview_stretch_kw(args) -> dict:
         ghs_sp=float(getattr(args, 'ghs_sp', 0.15)),
         ghs_hp=float(getattr(args, 'ghs_hp', 0.95)),
         black_sigma=float(getattr(args, 'preview_black_sigma', 0.0) or 0.0),
-        color=getattr(args, 'stretch_color', 'channel'),
+        color=getattr(args, 'stretch_color', 'preserve'),
         noise_scale=float(ns) if isinstance(ns, (int, float)) and ns > 0 else 1.0,
         anchor=object_anchor(args))
 
