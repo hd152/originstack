@@ -71,7 +71,7 @@
         <tr><th>Runs on</th><td>Windows, macOS, Linux</td><td>Windows, macOS, Linux</td><td>Windows</td><td>Windows, macOS, Linux</td><td>Windows, macOS, Linux</td><td>The telescope, via a phone or tablet</td></tr>
       </tbody>
     </table>
-    <p class="caveat measure">Astro Pixel Processor is in the table for its features only; a measured comparison like the ones below is under way and will be added when it is done.</p>
+    <p class="caveat measure">Astro Pixel Processor is in the table for its features; it is also measured below, on one session.</p>
   </div>
 </section>
 
@@ -109,24 +109,24 @@
 
     <table class="wide">
       <caption>Star width on the same stars, OriginStack against each tool (smaller is sharper).</caption>
-      <thead><tr><th>Session</th><th class="n">vs Siril</th><th class="n">vs DeepSkyStacker</th><th class="n">vs the Origin's own stack</th></tr></thead>
+      <thead><tr><th>Session</th><th class="n">vs Siril</th><th class="n">vs DeepSkyStacker</th><th class="n">vs Astro Pixel Processor</th><th class="n">vs StackingWizard</th><th class="n">vs the Origin's own stack</th></tr></thead>
       <tbody>
-        <tr><th>Omega Nebula, 114 frames</th><td class="n">4.42 / 4.56 px</td><td class="n">4.42 / 4.83 px</td><td class="n">&ndash;</td></tr>
-        <tr><th>Sunflower Galaxy, 158 frames</th><td class="n">3.51 / 3.60 px</td><td class="n">&ndash;</td><td class="n">3.54 / 4.25 px</td></tr>
-        <tr><th>Sculptor Galaxy, 532 frames</th><td class="n">2.66 / 3.01 px</td><td class="n">&ndash;</td><td class="n">&ndash;</td></tr>
-        <tr><th>Crab Nebula, 133 frames</th><td class="n">2.54 / 2.77 px</td><td class="n">&ndash;</td><td class="n">2.54 / 3.50 px</td></tr>
-        <tr><th>Black Eye Galaxy, 81 frames</th><td class="n">8.21 / 8.26 px</td><td class="n">&ndash;</td><td class="n">8.15 / 8.38 px</td></tr>
+        <tr><th>Omega Nebula, 114 frames</th><td class="n">4.42 / 4.56 px</td><td class="n">4.42 / 4.83 px</td><td class="n">2% narrower</td><td class="n">4.39 / 4.61 px</td><td class="n">&ndash;</td></tr>
+        <tr><th>Sunflower Galaxy, 158 frames</th><td class="n">3.51 / 3.60 px</td><td class="n">&ndash;</td><td class="n">&ndash;</td><td class="n">&ndash;</td><td class="n">3.54 / 4.25 px</td></tr>
+        <tr><th>Sculptor Galaxy, 532 frames</th><td class="n">2.66 / 3.01 px</td><td class="n">&ndash;</td><td class="n">&ndash;</td><td class="n">&ndash;</td><td class="n">&ndash;</td></tr>
+        <tr><th>Crab Nebula, 133 frames</th><td class="n">2.54 / 2.77 px</td><td class="n">&ndash;</td><td class="n">&ndash;</td><td class="n">&ndash;</td><td class="n">2.54 / 3.50 px</td></tr>
+        <tr><th>Black Eye Galaxy, 81 frames</th><td class="n">8.21 / 8.26 px</td><td class="n">&ndash;</td><td class="n">&ndash;</td><td class="n">&ndash;</td><td class="n">8.15 / 8.38 px</td></tr>
       </tbody>
     </table>
 
     <div class="phases">
       <div>
         <h3>Sharper than all three</h3>
-        <p>OriginStack's stars are 1 to 12% narrower than Siril's on every session measured, narrower than DeepSkyStacker's, and 4 to 27% narrower than the telescope's own stack.</p>
+        <p>OriginStack's stars are 1 to 12% narrower than Siril's on every session measured, narrower than DeepSkyStacker's, and 4 to 27% narrower than the telescope's own stack. Astro Pixel Processor and StackingWizard were measured on the Omega frames only: OriginStack's stars are 2% narrower than APP's overall (but no narrower in red) and 5% narrower than StackingWizard's.</p>
       </div>
       <div>
         <h3>No noise penalty</h3>
-        <p>A sharper stack is noisier per pixel, so the fair test blurs it to the other tool's sharpness first. Then OriginStack is quieter than Siril in every channel; at the scale of a star it ties the Origin's own stack.</p>
+        <p>A sharper stack is noisier per pixel, so the fair test blurs it to the other tool's sharpness first. Then OriginStack is quieter than Siril in every channel; at the scale of a star it ties the Origin's own stack. Against Astro Pixel Processor on Omega it is quieter in all three channels, by 8% in red and about 30% in green and blue. Against StackingWizard it is quieter by 26%, 38% and 46% (red, green, blue), though StackingWizard kept only 80 of the 114 frames, which accounts for part of that.</p>
       </div>
       <div>
         <h3>Every frame used</h3>
@@ -151,6 +151,8 @@
         <tr><th>Sculptor, 532 frames</th><td class="n">128 s</td><td class="n">159 s</td><td class="n">144 s</td></tr>
       </tbody>
     </table>
+    <p class="plain measure">Astro Pixel Processor (2.0.0-beta48, defaults) took 3 minutes 47 seconds on the Omega frames, timed by hand in its window: 23 s to calibrate, 58 s to register, 40 s to normalise and 105 s to integrate. In the run measured against it OriginStack took 57 seconds to the stack and Siril 66, so its times are not comparable to the table above, which comes from an earlier run; APP was run once, on this one session.</p>
+    <p class="plain measure">StackingWizard (beta, build 2026-10-31, defaults) took 3 minutes 2 seconds on the same frames, timed by hand: 22.5 s to grade the lights and 2 min 39 s to stack. It kept 80 of the 114 frames and demosaics with bilinear interpolation. In the run it was scored against, OriginStack took 55 seconds to the stack. One session, one run.</p>
     <p class="plain measure">DeepSkyStacker took 14 minutes 8 seconds on the Omega frames at its defaults, in an earlier run.</p>
 
     <dl class="feat">
