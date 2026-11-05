@@ -6,6 +6,11 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+## [2.22.1] - 2026-11-04
+
+### Changed
+- The preview stretch keeps colour by default: `--stretch-color` now defaults to `preserve` (the curve is applied to luminance and each pixel keeps its RGB ratios) instead of `channel`. Measured on a Pinwheel (M33) stack, star colour in the linear data followed Gaia BP-RP closely (r = 0.95) and solar-type stars sat at neutral; the per-channel stretch made the reddest stars read as saturated red in the JPEG. `--stretch-color channel` restores the previous look. Linear FITS output, colour calibration and photometry are unchanged; only the preview JPEG (and the desktop app's preview) differ.
+
 ## [2.22.0] - 2026-11-03
 
 Speed and the desktop app. The learned deconvolution/denoising step runs about 3x faster per tile and a Phase 4 run on the Whirlpool stack went from 25 s to 16 s; the app gains a quick look preview, in-app updates, drag and drop, saved settings and a tidier layout. Twelve free sample sessions are published on Zenodo (linked from the website).

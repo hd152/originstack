@@ -2442,8 +2442,8 @@ def build_parser() -> argparse.ArgumentParser:
                         'and the curve\N{RIGHT SINGLE QUOTATION MARK}s focus from the target itself '
                         '(found where the telescope pointed), so a small galaxy is not stretched '
                         'for the empty field around it; plain ghs when the target fills the frame.')
-    g_out.add_argument('--stretch-color', choices=['preserve', 'channel'], default='channel',
-                   help='How the ghs/arcsinh stretch treats colour (default: channel). '
+    g_out.add_argument('--stretch-color', choices=['preserve', 'channel'], default='preserve',
+                   help='How the ghs/arcsinh stretch treats colour (default: preserve). '
                         'preserve: the curve is applied to luminance and each pixel keeps '
                         'its RGB ratios, so stars and bright cores keep their colour. '
                         'channel: the curve is applied to each channel separately (the '

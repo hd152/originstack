@@ -44,6 +44,11 @@
   <div class="wrap">
     <h2>2.22 <small class="when">3 November 2026</small></h2>
     <div class="releases">
+      <article id="v2-22-1"><h3>2.22.1 <span>4 Nov</span></h3>
+        <ul>
+          <li><strong>Stars keep their colour in the preview.</strong> The preview stretch now keeps each pixel&rsquo;s red, green and blue ratios by default, so red giants stay orange or red and blue stars stay blue, instead of the brightest cores turning white. The old look is still there as <code>--stretch-color channel</code>.</li>
+        </ul>
+      </article>
       <article id="v2-22-0"><h3>2.22.0 <span>3 Nov</span></h3>
         <ul>
           <li><strong>The learned deconvolution and denoising step is about three times faster.</strong> On the Whirlpool stack that step went from 19 to 10 seconds and the whole post-processing from 25 to 16 seconds. The result is the same to the eye; individual pixels can differ in the last digits.</li>

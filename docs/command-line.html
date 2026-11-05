@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>OriginStack command-line reference</title>
-<meta name="description" content="Every option of the OriginStack command line, with its choices, default and description, generated from the program itself (version 2.22.0).">
+<meta name="description" content="Every option of the OriginStack command line, with its choices, default and description, generated from the program itself (version 2.22.1).">
 <meta name="keywords" content="OriginStack command line, originstack.py options, astrophotography stacking command line, stack-method, stretch, drizzle, merge, from-stack">
 <meta name="robots" content="index, follow">
 <meta name="theme-color" content="#0b1220">
@@ -36,7 +36,7 @@
       </nav>
     </div>
     <h1>Command-line reference</h1>
-    <p class="lede">Every option of <code>originstack.py</code>, version 2.22.0, generated from the program's own definitions, so it matches what <code>--help</code> prints. The desktop app shows the same options under <em>Additional options</em>, with shorter labels.</p>
+    <p class="lede">Every option of <code>originstack.py</code>, version 2.22.1, generated from the program's own definitions, so it matches what <code>--help</code> prints. The desktop app shows the same options under <em>Additional options</em>, with shorter labels.</p>
     <p class="toc">
       <a href="#opt-core">Core</a>
       <a href="#opt-frames-calibration-phase-1">Frames &amp; calibration (Phase 1)</a>
@@ -345,8 +345,8 @@ python originstack.py combine --mode sho --ha Ha.fits --oiii OIII.fits --sii SII
         <dd><p>Preview JPEG stretch method (default: ghs). masked blends a stronger faint-signal stretch through a smooth luminance mask; multiscale uses separate diffuse and filament masks; seti applies SETI Astro statistical stretch (target median 0.20); noisefloor picks the curve strength from the sky noise (ignores the preset GHS strength and --preview-black-sigma); oklab applies the GHS curve to perceptual lightness and keeps hue and saturation; clahe adds contrast-limited local equalisation to the GHS preview where there is extended signal; object takes the white point and the curve’s focus from the target itself (found where the telescope pointed), so a small galaxy is not stretched for the empty field around it; plain ghs when the target fills the frame.</p>
           <p class="meta">Choices: <code>linear</code>, <code>arcsinh</code>, <code>ghs</code>, <code>masked</code>, <code>multiscale</code>, <code>seti</code>, <code>noisefloor</code>, <code>oklab</code>, <code>clahe</code>, <code>object</code> &middot; Default: <code>ghs</code></p></dd></div>
       <div id="opt-stretch-color"><dt><code>--stretch-color</code></dt>
-        <dd><p>How the ghs/arcsinh stretch treats colour (default: channel). preserve: the curve is applied to luminance and each pixel keeps its RGB ratios, so stars and bright cores keep their colour. channel: the curve is applied to each channel separately (the behaviour before 2.5), which renders bright objects whiter.</p>
-          <p class="meta">Choices: <code>preserve</code>, <code>channel</code> &middot; Default: <code>channel</code></p></dd></div>
+        <dd><p>How the ghs/arcsinh stretch treats colour (default: preserve). preserve: the curve is applied to luminance and each pixel keeps its RGB ratios, so stars and bright cores keep their colour. channel: the curve is applied to each channel separately (the behaviour before 2.5), which renders bright objects whiter.</p>
+          <p class="meta">Choices: <code>preserve</code>, <code>channel</code> &middot; Default: <code>preserve</code></p></dd></div>
       <div id="opt-preview-black-sigma"><dt><code>--preview-black-sigma</code> <var>PREVIEW_BLACK_SIGMA</var></dt>
         <dd><p>Preview black point, in sky-sigma above the sky median (default: -0.0868). Higher (e.g. 2.0) clips background noise to black for a small target on empty sky; negative keeps faint frame-filling nebulosity visible. Set per target by --auto.</p>
           <p class="meta">Default: <code>-0.0868</code></p></dd></div>
