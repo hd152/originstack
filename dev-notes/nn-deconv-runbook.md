@@ -982,3 +982,33 @@ restore-off. Flux kept in the 3 FWHM aperture on 4-edge-strip crops (9 Sculptor,
 stars): median 0.999 -> 0.999 and 1.011 -> 1.012; bright edge stars are ~1.00 either way, so the
 measurable gain is small (the faint ones are noise-limited); the point is consistency with the
 interior (same restore everywhere), not a large flux change.
+
+## Seestar S50 data: survey truth is feasible; shipped v4 already works (2026-11-05)
+
+Question: is it worth retraining the deconvolver with Seestar S50 data (the nine volunteer
+sessions in `G:\astro\S50`, plus M13)? Answer from a cheap feasibility pass: **not on this data.**
+
+- **Stacks and WCS.** Ten sessions stacked with `--plate-solve --plate-solver local`: 7 solved
+  (M27, IC 1396, M31, NGC 7000, M17 x2, IC 1805), 3 failed (M101, M13, M63). Stars are 2.5-3.5 px
+  FWHM (`nn_denoise.measure_star_fwhm`), inside v4's trained range (2.3-5.2).
+- **Survey truth.** `fetch_ps1_truth.py` works on an S50 stack: its pixels are 2.4"/px against
+  Origin's 1.47", so the sampling grid is now `round(scale / 0.25")` per axis (10 for S50, 6 for
+  Origin: unchanged) and a 300 px crop needs a ~4000 px PS1 cutout per filter (a 600 px crop asked
+  for ~8000 px and had not returned after 25 min). First crop of a target 3-7 min, the second
+  1-2 min (cached skycells). The solved WCS matches PS1 to 0.35 px (M27 crop).
+- **What the data supports.** Of 14 crops, 5 pass the colour fit (`gen_survey_pairs`: star
+  photometry against g/r/i, scatter <= 0.25 dex) -> a 240-patch bank. The OIII/narrowband
+  sessions (M17 OIII, IC 1805) and nebula-dominated crops have too few usable stars, and M31's
+  first crop is skipped for the same reason. The fitted S50 colour matrix differs strongly from
+  the Origin's (R: .46 g + .43 r + .11 i; G: .72 g + .28 r; B: .88 g + .12 r), so it cannot be
+  reused. One held-out crop (M31 c1; the eval only scores `HOLDOUT`-prefixed names, so the
+  crops were copied as `Pleiades_s50_*`).
+- **Shipped v4 on that held-out crop** (`eval_ps1_truth.py`, medians over 1 crop): error against
+  the survey truth 7.34 (input) -> 4.82 (v4), -34%; star width / truth 1.73 -> 1.18; sky noise
+  0.37 of the input; invented peaks 167 -> 200 per Mpx (the plain denoiser: 133). So v4 takes
+  S50 stars to within 18% of the survey's width unmodified.
+- **Why stop.** Five usable crops (one held out) cannot tell a retrain from v4 on S50, and the
+  earlier mixed fine-tune (seeing-pair targets + S50 pairs) made the model worse: its target is
+  not the PS1 one. Meaningful S50 training needs many more solved, broadband (no dual-band filter)
+  sessions; ask S50 volunteers for broadband sessions of star-rich galaxy/cluster fields.
+- Data kept: `C:\nn_work\s50stacks` (stacks), `C:\nn_work\s50truth` (crops, bank, logs, `fwhm.py`).
