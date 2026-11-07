@@ -441,6 +441,63 @@ def _note_dark_scaling(frames: dict, dark_exptime: Optional[float]) -> None:
                f"Darks of the same exposure as the lights give the best results.")
 
 
+def _reconcile_dark_pedestal(masters: dict) -> None:
+    """Make the master dark carry the bias pedestal, as the calibration expects.
+
+    Calibration is ``light - bias - scale * (dark - bias)``, written as
+    ``light - bias - scale * dark + scale * bias``: it takes the dark to contain the bias, so
+    ``dark - bias`` is the dark current. A dark whose pedestal was already removed (median 16 ADU
+    against a bias of 4,989 on one session's 1 s dark) made the ``+ scale * bias`` term add
+    ``scale x 4,989`` ADU to every pixel: +100,000 at scale 20, ten times the sky, which white
+    balance then turned into a red cast and the flat into coloured mottling. Such a dark gets
+    the bias added, so only its own signal is subtracted."""
+    bias, dark = masters.get('bias'), masters.get('dark')
+    if bias is None or dark is None or bias.shape != dark.shape:
+        return
+    bias_med, dark_med = float(np.median(bias)), float(np.median(dark))
+    if bias_med > 100.0 and dark_med < 0.5 * bias_med:
+        masters['dark'] = (dark + bias).astype(np.float32)
+        masters['dark_pedestal_added'] = True
+        safe_print(f"  NOTE: the master dark has no bias pedestal (median {dark_med:.0f} ADU, "
+                   f"bias {bias_med:.0f} ADU): treated as already bias-subtracted")
+
+
+def _guard_dark_calibration(masters: dict, lights) -> None:
+    """Drop a dark that would remove more than a typical light holds, with a warning.
+
+    The scaled dark (``scale x (dark - bias)``) is compared with the signal of a middle light
+    (its median above the bias). A dark that removes nearly all of it (a wrong exposure scale, a
+    temperature model gone wild) leaves frames that are mostly zeros; the checks above stop the
+    known causes, this one stops the next."""
+    dark = masters.get('dark')
+    if dark is None or not lights:
+        return
+    try:
+        from src.frame_discovery import _frame_exptime
+        from src.io_fits import load_frame
+        mid = lights[len(lights) // 2]
+        data, _hdr = load_frame(mid.path, replicate_mono=False)
+        raw_med = float(np.median(data))
+        light_exp = _frame_exptime(mid)
+    except Exception:
+        return                              # only a safety net: never stop a run for it
+    bias = masters.get('bias')
+    have_bias = bias is not None and bias.shape == dark.shape
+    bias_med = float(np.median(bias)) if have_bias else 0.0
+    dark_exp = masters.get('dark_exptime')
+    scale = light_exp / dark_exp if (light_exp and dark_exp and dark_exp > 0) else 1.0
+    removed = scale * (float(np.median(dark)) - bias_med)
+    signal = max(raw_med - bias_med, 1.0)
+    limit = max(500.0, (0.9 if have_bias else 1.5) * signal)
+    if abs(removed) > limit:
+        safe_print(f"  WARNING: the master dark would change a typical light by {removed:+.0f} ADU "
+                   f"(median {raw_med:.0f}, bias {bias_med:.0f}): it does not match these lights. "
+                   "Calibrating without a dark.")
+        masters['dark'] = None
+        masters['dark_exptime'] = None
+        masters['dark_dropped'] = True
+
+
 def _warn_dark_iso_mismatch(frames: dict) -> None:
     """Say when the dark was taken at another ISO than the lights. The Origin pairs ISO
     500 sessions with an ISO 200 dark (3 of 33 local sessions); the dark is scaled by
@@ -606,6 +663,7 @@ def _build_masters(frames: dict, stats: "ProcessingStats | None" = None,
         masters['bias'] = None
 
     _dark_from_model = False
+    _dark_model_exposure = None
     if frames.get('dark'):
         _use_dark_model = getattr(args, 'dark_temp_model', False)
         if not _use_dark_model and getattr(args, 'auto', False) and \
@@ -620,12 +678,40 @@ def _build_masters(frames: dict, stats: "ProcessingStats | None" = None,
                                   (_peek_temp(f) for f in frames['dark']) if t is not None))
             _use_dark_model = _n_distinct >= 3
         if _use_dark_model:
-            from src.dark_temp_model import _frame_temp, build_dark_temperature_model, sample_dark_at_temperature
+            from src.dark_temp_model import (
+                _frame_temp,
+                build_dark_temperature_model,
+                model_unusable_reason,
+                sample_dark_at_temperature,
+                sample_unusable_reason,
+            )
+            from src.frame_discovery import _frame_exptime
             light_temps = [t for t in (_frame_temp(f) for f in lights) if t is not None]
             target_temp = sum(light_temps) / len(light_temps) if light_temps else None
-            model = build_dark_temperature_model(frames['dark']) if target_temp is not None else None
+            _light_exps = []
+            for _lf in lights:
+                try:
+                    _le = _frame_exptime(_lf)
+                except Exception:
+                    _le = None
+                if _le:
+                    _light_exps.append(_le)
+            _light_exp = float(np.median(_light_exps)) if _light_exps else None
+            model = (build_dark_temperature_model(frames['dark'], light_exposure=_light_exp)
+                     if target_temp is not None else None)
+            _model_dark = None
             if model is not None:
-                masters['dark'] = sample_dark_at_temperature(model, target_temp)
+                _why = model_unusable_reason(model, target_temp)
+                if _why is None:
+                    _model_dark = sample_dark_at_temperature(model, target_temp)
+                    _why = sample_unusable_reason(model, _model_dark)
+                if _why is not None:
+                    safe_print(f"  Dark temperature model not used: {_why} -- falling back to "
+                               "nearest-match selection")
+                    model = None
+            if model is not None:
+                masters['dark'] = _model_dark
+                _dark_model_exposure = model.get('exposure')
                 _dark_from_model = True
                 safe_print(f"  ✓ Master dark:  temperature model from {model['n_frames']} "
                            f"frames ({model['n_temps']} distinct temps, degree="
@@ -722,13 +808,19 @@ def _build_masters(frames: dict, stats: "ProcessingStats | None" = None,
 
     masters['dark_exptime'] = None
     if frames.get('dark'):
-        try:
-            masters['dark_exptime'] = float(
-                frames['dark'][0].header.get('EXPTIME', 0) or 0) or None
-        except Exception as e:
-            safe_print(f"  WARNING: Could not read dark EXPTIME ({e}) — dark scaling disabled")
+        if _dark_from_model and _dark_model_exposure:
+            # the model was fitted to darks of one exposure; frames['dark'][0] may be another
+            masters['dark_exptime'] = float(_dark_model_exposure)
+        else:
+            try:
+                masters['dark_exptime'] = float(
+                    frames['dark'][0].header.get('EXPTIME', 0) or 0) or None
+            except Exception as e:
+                safe_print(f"  WARNING: Could not read dark EXPTIME ({e}) — dark scaling disabled")
         _note_dark_scaling(frames, masters['dark_exptime'])
         _warn_dark_iso_mismatch(frames)
+        _reconcile_dark_pedestal(masters)
+        _guard_dark_calibration(masters, lights)
 
     # Photon-transfer gain / read-noise from raw bias+flat pairs, for the
     # Poisson term in --photometry. Only when photometry is requested and no

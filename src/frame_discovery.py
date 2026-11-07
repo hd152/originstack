@@ -287,6 +287,11 @@ def select_matching_darks(lights: List[FrameInfo], darks: List[FrameInfo]) -> Li
                 score += 10  # Exact match
             elif abs(d_et - majority_et) / max(majority_et, 0.1) < 0.5:
                 score += 5   # Within 50% — scalable
+            if d_et > 0 and majority_et / d_et > 2.0:
+                # Scaling a short dark up multiplies its noise, hot pixels and any pedestal
+                # error by the ratio: a 1 s dark chosen only for its temperature was
+                # scaled x20 onto 20 s lights.
+                score -= 60
 
         scored.append((score, d))
 

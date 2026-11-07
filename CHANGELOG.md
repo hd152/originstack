@@ -6,6 +6,13 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+### Fixed
+- **A session with a mixed set of darks came out with a huge sky offset, a red cast and coloured mottling.** One real Origin session (221 frames, the largest of nine, so the reference of a hierarchical merge) had a 1 s dark whose bias pedestal was already removed (median 16 ADU against a bias of 4,989), 10 s and 15 s darks, and 20 s lights. Three things combined: the dark choice ranked temperature above exposure and picked the 1 s dark (scaled x20); under `--auto` the dark temperature model (opt-in, but switched on by `--auto` with three or more dark temperatures) was fitted to all of them as if they were one exposure and evaluated 4-6 C outside the darks' temperatures (a master dark of 0 ADU, or 18,000 ADU once the 1 s dark was removed); and calibration's `+ scale * bias` term assumes the dark holds the bias, so a dark without it added `scale x bias` (+100,000 ADU) to every pixel. White balance turned that into R/G 1.65 sky and the flat's 0.75% error into coloured blotches, and the merge copied it from the reference session into the final stack.
+  - The temperature model is fitted to darks of **one exposure** (the group nearest the lights'), refuses to be evaluated more than 2 C outside the fitted temperatures, refuses a dark whose level is far from the darks it was fitted to, and the master dark's exposure comes from that group, not from the first dark in the list.
+  - Dark selection no longer picks a dark that must be scaled up more than 2x when others are close.
+  - A master dark without the bias pedestal gets the bias added ("treated as already bias-subtracted").
+  - A dark that would remove, or add, more than a typical light holds is dropped with a warning instead of producing an all-zero or hundred-thousand-ADU stack.
+
 ## [2.22.2] - 2026-11-05
 
 ### Fixed
