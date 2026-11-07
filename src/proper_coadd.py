@@ -456,17 +456,128 @@ def _progress_ticker(label: str, total: int, cancel_event=None, verbose: bool = 
     return tick
 
 
+_GPU_MAX_PLANE = 4096    # the GPU kernels transform power-of-two planes of at most this size
+
+
+def _gpu_plane(n: int) -> int:
+    """Smallest power of two holding ``n`` pixels plus the padding (>= 16)."""
+    return 1 << int(np.ceil(np.log2(max(n + _PAD, 16))))
+
+
+def _gpu_unusable(aligned, C: int, H: int, W: int) -> Optional[str]:
+    """Why the GPU coadd cannot run on this stack, or None when it can."""
+    if _native is None or not hasattr(_native, 'gpu_coadd_begin'):
+        return "this astro_native build has no GPU support (build it with --features gpu)"
+    if not _native.gpu_available():
+        return "no usable GPU adapter"
+    if C != 3:
+        return "only 3-channel frames are supported"
+    if (getattr(aligned, 'dtype', None) != np.float32 or not isinstance(aligned, np.ndarray)
+            or not aligned.flags.c_contiguous):
+        return "the aligned stack is not a contiguous float32 array"
+    if max(_gpu_plane(H), _gpu_plane(W)) > _GPU_MAX_PLANE:
+        return "frames larger than %d px are not supported" % (_GPU_MAX_PLANE - _PAD)
+    return None
+
+
+def _combine_gpu(aligned, ref_sig, use, meas, n_thr: int, tick, verbose: bool):
+    """The combine pass of ``proper_coadd`` on the GPU (``--gpu-coadd``, src/gpu_coadd.rs).
+
+    Sky and noise per frame (CPU, in a thread pool that runs ahead) overlap the device, which
+    rejects, transforms and accumulates the frames in chunks. Returns ``(img (3, H, W),
+    wsum, w2_over_f, sky_acc, n_bad)`` -- ``img`` is the raw inverse transform, the caller adds
+    the weight scale and the sky -- or None when the GPU cannot be used or fails (then nothing
+    has been added to the caller's sums and the CPU path runs). ``RunCancelled`` propagates.
+    The sums are local until the end, so a failure part-way leaves no trace."""
+    from src.models import RunCancelled
+    N, H, W, C = aligned.shape
+    why = _gpu_unusable(aligned, C, H, W)
+    if why is not None:
+        safe_print(f"    --gpu-coadd: {why}; using the CPU")
+        return None
+    R = _PSF_R
+    yy, xx = np.mgrid[-R:R + 1, -R:R + 1].astype(np.float64)
+    wsum, w2f, sky_acc = np.zeros(C), np.zeros(C), np.zeros(C)
+    used = 0
+    memmap = isinstance(aligned, np.memmap)
+
+    def host_prep(j):
+        p, F = meas[j]
+        # an in-RAM frame is read in place; a disk-backed one is read once, sequentially
+        sky, sig = _sky_noise(np.array(aligned[j]) if memmap else aligned[j])
+        if not (np.all(np.isfinite(sig)) and np.all(sig > 0)):
+            return None
+        k = _moffat_grid(yy, xx, p)
+        k /= k.sum()
+        return j, F, sky, sig, k
+
+    def flush(batch):
+        nonlocal used
+        if not batch:
+            return
+        ids, fs, sks, s2s, wns, wfs, sts = [], [], [], [], [], [], []
+        for j, F, sky, sig, k in batch:
+            ids.append(j)
+            fs.append(float(np.float32(F)))
+            sks.append([float(np.float32(v)) for v in sky])
+            s2s.append([float(np.float32(v ** 2)) for v in sig])
+            wns.append([F / sig[c] ** 2 for c in range(C)])
+            wfs.append([F * F / sig[c] ** 2 for c in range(C)])
+            sts.append(k.astype(np.float32))
+            for c in range(C):
+                wsum[c] += F * F / sig[c] ** 2
+                w2f[c] += (F * F / sig[c] ** 2) ** 2 / F
+                sky_acc[c] += (F * F / sig[c] ** 2) * sky[c] / F
+        _native.gpu_coadd_add(aligned, ids, fs, sks, s2s, wns, wfs, np.ascontiguousarray(np.stack(sts)))
+        used += len(batch)
+
+    ex = ThreadPoolExecutor(max_workers=n_thr)
+    try:
+        _native.gpu_coadd_begin(ref_sig, float(_REJECT_K), float(_SIGNAL_FRAC), _PAD, R,
+                                _gpu_plane(H), _gpu_plane(W))
+        if verbose:
+            safe_print(f"    proper coadd: on the GPU ({_native.gpu_info()})")
+        batch = []
+        for fu in [ex.submit(host_prep, j) for j in use]:     # host prep runs ahead of the device
+            hp = fu.result()
+            tick()                                            # progress, and RunCancelled
+            if hp is not None:
+                batch.append(hp)
+            if len(batch) >= 8:
+                flush(batch)
+                batch = []
+        flush(batch)
+        if used == 0:
+            raise RuntimeError("no frame had a usable noise level")
+        img = np.asarray(_native.gpu_coadd_finish())
+    except RunCancelled:
+        _native.gpu_coadd_abort()
+        raise
+    except BaseException as exc:                              # any GPU or driver failure,
+        _native.gpu_coadd_abort()                             # a driver panic (pyo3 PanicException) included
+        if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+            raise
+        _log.info("proper coadd: the GPU path failed (%s); using the CPU", exc)
+        safe_print(f"    --gpu-coadd: failed ({exc}); using the CPU")
+        return None
+    finally:
+        ex.shutdown(wait=True, cancel_futures=True)
+    return img, wsum, w2f, sky_acc, len(use) - used
+
+
 def proper_coadd(aligned, reference: np.ndarray, fwhm: float = 5.0,
                  workers: Optional[int] = None, verbose: bool = True,
                  stats: Optional[dict] = None, premeasured=None,
-                 cancel_event=None) -> Optional[np.ndarray]:
+                 cancel_event=None, gpu: bool = False) -> Optional[np.ndarray]:
     """Proper coadd of ``aligned`` (N, H, W, C) float32 onto ``reference``'s grid.
 
     ``reference`` is the normal stack of the same frames (rejection reference and PSF
     star positions). ``premeasured`` = (FrameMeasurer, [measure() result per frame])
     skips the measuring pass (done during alignment). Returns float32 (H, W, C), or
     None when the PSF could not be measured (the caller keeps the normal stack).
-    ``cancel_event``: a set ``threading.Event`` stops it with ``RunCancelled``."""
+    ``cancel_event``: a set ``threading.Event`` stops it with ``RunCancelled``.
+    ``gpu``: run the combine pass on the GPU (``--gpu-coadd``) when the native build and the
+    stack allow it; any GPU failure falls back to the CPU path below."""
     if not HAS_SCIPY:
         return None
     t0 = time.time()
@@ -534,8 +645,6 @@ def proper_coadd(aligned, reference: np.ndarray, fwhm: float = 5.0,
     PH = sfft.next_fast_len(H + 2 * _PAD, real=True)
     PW = sfft.next_fast_len(W + 2 * _PAD, real=True)
     fshape = (PH, PW // 2 + 1)
-    num = np.zeros((C,) + fshape, np.complex128)
-    den = np.zeros((C,) + fshape, np.float64)
     wsum = np.zeros(C)
     w2_over_f = np.zeros(C)     # for the Poisson factor: sum w_j^2 / F_j
     sky_acc = np.zeros(C)
@@ -555,6 +664,9 @@ def proper_coadd(aligned, reference: np.ndarray, fwhm: float = 5.0,
     acc32 = native
 
     tick = _progress_ticker('Proper coadd', len(use), cancel_event, verbose=verbose)
+
+    t1 = time.time()
+    gpu_res = _combine_gpu(aligned, ref_sig, use, meas, n_thr, tick, verbose) if gpu else None
 
     def worker(k):
         planes = np.zeros((C + 1, PH, PW), np.float32)
@@ -605,27 +717,41 @@ def proper_coadd(aligned, reference: np.ndarray, fwhm: float = 5.0,
             n_rep_box[0] += nrep
         return tuple(part)
 
-    t1 = time.time()
-    with ThreadPoolExecutor(max_workers=n_thr) as ex:
-        parts = list(ex.map(worker_tiled if acc32 and _tiled_ok(aligned) else worker, range(n_thr)))
-    n_bad_noise = 0
-    for a_num, a_den, s_w, s_w2f, s_sky, nbad in parts:          # fixed order: deterministic
-        num += a_num
-        den += a_den
-        wsum += s_w
-        w2_over_f += s_w2f
-        sky_acc += s_sky
-        n_bad_noise += nbad
-    del parts
-    n_rep = n_rep_box[0]
+    if gpu_res is not None:
+        gpu_img, g_wsum, g_w2f, g_sky, n_bad_noise = gpu_res
+        wsum += g_wsum
+        w2_over_f += g_w2f
+        sky_acc += g_sky
+        n_rep = None                        # the device does not count replaced samples
+    else:
+        num = np.zeros((C,) + fshape, np.complex128)
+        den = np.zeros((C,) + fshape, np.float64)
+        with ThreadPoolExecutor(max_workers=n_thr) as ex:
+            parts = list(ex.map(worker_tiled if acc32 and _tiled_ok(aligned) else worker, range(n_thr)))
+        n_bad_noise = 0
+        for a_num, a_den, s_w, s_w2f, s_sky, nbad in parts:          # fixed order: deterministic
+            num += a_num
+            den += a_den
+            wsum += s_w
+            w2_over_f += s_w2f
+            sky_acc += s_sky
+            n_bad_noise += nbad
+        del parts
+        n_rep = n_rep_box[0]
     out = np.empty((H, W, C), np.float32)
     for c in range(C):
-        R = num[c] / np.sqrt(np.maximum(den[c], 1e-300))
-        img = sfft.irfft2(R, s=(PH, PW), workers=-1)[_PAD:_PAD + H, _PAD:_PAD + W]
+        if gpu_res is not None:
+            img = gpu_img[c]
+        else:
+            R = num[c] / np.sqrt(np.maximum(den[c], 1e-300))
+            img = sfft.irfft2(R, s=(PH, PW), workers=-1)[_PAD:_PAD + H, _PAD:_PAD + W]
         out[..., c] = (img / np.sqrt(wsum[c]) + sky_acc[c] / wsum[c]).astype(np.float32)
     if verbose:
-        safe_print(f"    proper coadd: combined in {time.time() - t1:.1f}s, "
-              f"{n_rep / max(len(use) * H * W * C, 1) * 100:.3f}% of samples replaced as outliers")
+        if n_rep is None:
+            safe_print(f"    proper coadd: combined on the GPU in {time.time() - t1:.1f}s")
+        else:
+            safe_print(f"    proper coadd: combined in {time.time() - t1:.1f}s, "
+                       f"{n_rep / max(len(use) * H * W * C, 1) * 100:.3f}% of samples replaced as outliers")
     if stats is not None:
         # Poisson variance of a source of flux f in the output, per unit of the frames'
         # own Poisson coefficient: at zero frequency the output is sum w_j (M_j / F_j) /

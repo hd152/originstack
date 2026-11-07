@@ -2208,7 +2208,8 @@ def run_stacking_phase(
                 _pc = proper_coadd(mem_aligned, stacked,
                                    fwhm=float(np.median(_fw)) if _fw else 5.0,
                                    verbose=True, stats=_pc_stats,
-                                   cancel_event=getattr(args, '_cancel_event', None))
+                                   cancel_event=getattr(args, '_cancel_event', None),
+                                   gpu=bool(getattr(args, 'gpu_coadd', False)))
                 if _pc is not None:
                     stacked = _pc
                     if _pc_stats.get('poisson_factor'):
