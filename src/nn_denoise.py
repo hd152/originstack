@@ -232,11 +232,150 @@ def denoise_z(z: np.ndarray, w: Dict[str, np.ndarray], workers: Optional[int] = 
     return out
 
 
+_FIT_LO = np.array([0.0, -3.0, -3.0, 0.5, -np.inf])
+_FIT_HI = np.array([np.inf, 3.0, 3.0, 8.0, np.inf])
+_FIT_CHUNK = 64        # stars fitted per batch: one chunk usually yields the 60 accepted stars
+
+
+def _fit_gaussians(cuts: np.ndarray, amp0: np.ndarray, bg0: np.ndarray,
+                   max_iter: int = 80, rtol: float = 1e-9) -> np.ndarray:
+    """Batched bounded Levenberg-Marquardt fit of ``bg + a exp(-((x-dx)^2 + (y-dy)^2) / (2 s^2))``
+    to (n, 2 FIT_HALF + 1, 2 FIT_HALF + 1) stamps. Same start ([amp0, 0, 0, 1.8, bg0]) and bounds
+    (a >= 0, |dx|, |dy| <= 3, 0.5 <= s <= 8) as the scipy ``least_squares`` fit it replaces, with
+    an analytic Jacobian; a parameter pinned at a bound with the gradient pushing outward is held.
+    Only the stars still moving are touched each iteration. Returns (n, 5): a, dx, dy, s, bg."""
+    n = len(cuts)
+    yy, xx = np.mgrid[-FIT_HALF:FIT_HALF + 1, -FIT_HALF:FIT_HALF + 1]
+    gx = xx.ravel().astype(np.float64)[None, :]
+    gy = yy.ravel().astype(np.float64)[None, :]
+    z = np.asarray(cuts, np.float64).reshape(n, -1)
+    p = np.empty((n, 5))
+    p[:, 0], p[:, 1:3], p[:, 3], p[:, 4] = amp0, 0.0, 1.8, bg0
+    lam = np.full(n, 1e-3)
+    eye = np.eye(5)
+
+    def model(q):
+        ddx, ddy = gx - q[:, 1:2], gy - q[:, 2:3]
+        d2 = ddx * ddx + ddy * ddy
+        return np.exp(-d2 / (2.0 * q[:, 3:4] ** 2)), ddx, ddy, d2
+
+    act = np.arange(n)
+    for _ in range(max_iter):
+        if act.size == 0:
+            break
+        pa, za, la = p[act], z[act], lam[act]
+        e, ddx, ddy, d2 = model(pa)
+        a, s = pa[:, 0:1], pa[:, 3:4]
+        r = pa[:, 4:5] + a * e - za
+        cost = 0.5 * np.einsum('ij,ij->i', r, r)
+        ae, s2 = a * e, s * s
+        jac = np.empty((act.size, r.shape[1], 5))
+        jac[:, :, 0] = e
+        jac[:, :, 1] = ae * ddx / s2
+        jac[:, :, 2] = ae * ddy / s2
+        jac[:, :, 3] = ae * d2 / (s2 * s)
+        jac[:, :, 4] = 1.0
+        jt = jac.transpose(0, 2, 1)
+        g = np.matmul(jt, r[:, :, None])[:, :, 0]
+        hess = np.matmul(jt, jac)
+        frozen = ((pa <= _FIT_LO) & (g > 0)) | ((pa >= _FIT_HI) & (g < 0))
+        mat = hess + la[:, None, None] * (np.maximum(np.einsum('ikk->ik', hess), 1e-12)[:, :, None] * eye)
+        mat = np.where(frozen[:, :, None] | frozen[:, None, :], eye[None], mat)
+        step = np.linalg.solve(mat, np.where(frozen, 0.0, -g)[:, :, None])[:, :, 0]
+        pn = np.clip(pa + step, _FIT_LO, _FIT_HI)
+        en = model(pn)[0]
+        rn = pn[:, 4:5] + pn[:, 0:1] * en - za
+        costn = 0.5 * np.einsum('ij,ij->i', rn, rn)
+        better = costn < cost
+        small = better & ((cost - costn) <= rtol * np.maximum(cost, 1e-30))
+        p[act] = np.where(better[:, None], pn, pa)
+        lam[act] = np.where(better, np.maximum(la * 0.3, 1e-12), np.minimum(la * 6.0, 1e12))
+        act = act[~(small | (lam[act] >= 1e12) | (np.abs(step).max(axis=1) < 1e-10))]
+    return p
+
+
+def _fwhm_lum(img: np.ndarray) -> np.ndarray:
+    """The image ``measure_star_fwhm`` fits: the channel mean with NaNs zeroed, minus its median.
+    Three float32 channels are summed in the order ``ndarray.mean(axis=2)`` uses (bit-identical,
+    3x faster on a 3000 x 2000 stack)."""
+    img = np.asarray(img, np.float32) if img.ndim == 3 else img
+    if img.ndim == 3 and img.shape[2] == 3:
+        lum = img[..., 0] + img[..., 1]
+        lum += img[..., 2]
+        lum /= np.float32(3)
+        if not np.isfinite(lum).all():
+            lum = np.nan_to_num(lum, copy=False)
+    else:
+        lum = np.nan_to_num(img.mean(axis=2) if img.ndim == 3 else img)
+    return lum - np.float32(np.median(lum))
+
+
+def _fwhm_candidates(lum: np.ndarray, max_stars: int):
+    """Stars to fit, brightest first, as ``(cuts, amp0, bg0, min_amp)``: isolated (no neighbour
+    within 12 px), clear of the border, unsaturated, with positive peak above their edge
+    median; at most 600 detections are considered. ``None`` when fewer than 12 are detected."""
+    from src.star_detect import detect_stars_matched_filter
+    try:
+        src = detect_stars_matched_filter(lum)
+    except Exception:
+        return None
+    if src is None or len(src) < 12:
+        return None
+    src = src[np.argsort(-np.asarray(src['flux']))]
+    xs, ys = np.asarray(src['xcentroid'], float), np.asarray(src['ycentroid'], float)
+    sat = np.percentile(lum, 99.99) * 0.6
+    min_amp = 8.0 * float(noise_sigma(lum[..., None])[0])
+    h, w = lum.shape
+    cuts, amp0, bg0 = [], [], []
+    for i in range(min(len(xs), 600)):
+        d2 = (xs - xs[i]) ** 2 + (ys - ys[i]) ** 2
+        d2[i] = np.inf
+        xi, yi = int(round(xs[i])), int(round(ys[i]))
+        if (d2.min() < 12 ** 2 or xi < FIT_HALF + 1 or yi < FIT_HALF + 1
+                or xi >= w - FIT_HALF - 1 or yi >= h - FIT_HALF - 1):
+            continue
+        cut = lum[yi - FIT_HALF:yi + FIT_HALF + 1, xi - FIT_HALF:xi + FIT_HALF + 1].astype(np.float64)
+        edge = np.concatenate([cut[0], cut[-1], cut[1:-1, 0], cut[1:-1, -1]])
+        bg = float(np.median(edge))
+        amp = float(cut.max()) - bg
+        if amp <= 0 or cut.max() >= sat:
+            continue
+        cuts.append(cut)
+        amp0.append(amp)
+        bg0.append(bg)
+    if not cuts:
+        return np.empty((0, 2 * FIT_HALF + 1, 2 * FIT_HALF + 1)), np.empty(0), np.empty(0), min_amp
+    return np.array(cuts), np.array(amp0), np.array(bg0), min_amp
+
+
 def measure_star_fwhm(img: np.ndarray, max_stars: int = 60) -> Optional[float]:
     """Median Gaussian FWHM (px) of bright, unsaturated, isolated stars of an (H, W, C)
     image, or None when fewer than 12 usable stars fit. ``quality.measure_fwhm`` (half-max
     area) reads 7.4 px on stacks whose Gaussian width is 4.4 px, so the network's trained
-    range is defined in this measure."""
+    range is defined in this measure.
+
+    The stars are fitted in batches (``_fit_gaussians``) in brightness order until ``max_stars``
+    are accepted, so the same stars are used as by the one-at-a-time scipy fit it replaces
+    (``_measure_star_fwhm_scipy``); on five real stacks every accept/reject decision agreed
+    and the median FWHM matched to 4 decimals."""
+    cand = _fwhm_candidates(_fwhm_lum(img), max_stars)
+    if cand is None:
+        return None
+    cuts, amp0, bg0, min_amp = cand
+    out = []
+    for i in range(0, len(cuts), _FIT_CHUNK):
+        sol = _fit_gaussians(cuts[i:i + _FIT_CHUNK], amp0[i:i + _FIT_CHUNK], bg0[i:i + _FIT_CHUNK])
+        ok = (sol[:, 3] < 8.0 - 1e-6) & (sol[:, 0] > min_amp)
+        out.extend(2.3548 * sol[ok, 3])
+        if len(out) >= max_stars:
+            out = out[:max_stars]
+            break
+    return float(np.median(out)) if len(out) >= 12 else None
+
+
+def _measure_star_fwhm_scipy(img: np.ndarray, max_stars: int = 60) -> Optional[float]:
+    """The original ``measure_star_fwhm``: one scipy ``least_squares`` fit per star (~5 ms each).
+    Kept as the reference the batched fitter is tested against."""
     from scipy.optimize import least_squares
 
     from src.star_detect import detect_stars_matched_filter
@@ -384,8 +523,10 @@ def nn_denoise(img: np.ndarray, strength: float = 1.0, model_path: Optional[str]
     A fixed 1 px did that on 2.6 px stars but undid it on 4.4 px ones (width ratio 0.74 ->
     0.90), and 0.5 px (0.19 FWHM) undid it on 2.6 px ones, so it is a fraction of the width."""
     img = np.asarray(img, dtype=np.float32)
+    fw_img = None            # the stars' FWHM measured on ``img`` itself (reused below when ``src`` is ``img``)
     if fwhm_range is not None:
-        f = scale_factor(measure_star_fwhm(img), fwhm_range)
+        fw_img = measure_star_fwhm(img)
+        f = scale_factor(fw_img, fwhm_range)
         if f != 1.0:
             shape = (max(8, int(round(img.shape[0] * f))), max(8, int(round(img.shape[1] * f))))
             safe = np.where(np.isfinite(img), img, 0.0).astype(np.float32)
@@ -402,7 +543,12 @@ def nn_denoise(img: np.ndarray, strength: float = 1.0, model_path: Optional[str]
     den = denoise_z(z, w) * sig + bg
     if restore_sigma > 0:
         res = src - den
-        fw = measure_star_fwhm(src) if star_restore_frac > 0 else None
+        if star_restore_frac <= 0:
+            fw = None
+        elif fwhm_range is not None and finite.all():
+            fw = fw_img         # ``src`` is ``img`` then: the same measurement, not repeated
+        else:
+            fw = measure_star_fwhm(src)
         # wide stars (>= ~4 px) lose no flux to the 4 px restore and would lose sharpness
         # to a tight one (Omega width ratio 0.74 -> 0.82): fade the tight restore out. The
         # fade scales the mask WEIGHT, not the blur width: a width of ramp x frac x fw (0.07 px

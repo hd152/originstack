@@ -282,6 +282,103 @@ def test_measure_star_fwhm_recovers_the_gaussian_width(fwhm):
     assert got is not None and abs(got - fwhm) < 0.15 * fwhm
 
 
+# ── batched Gaussian fit (the scipy fit measure_star_fwhm used to run per star) ──
+
+def _gauss_stamps(n, seed=0, noise=3.0, sigmas=None):
+    """Noisy (n, 17, 17) Gaussian stamps with random width, sub-pixel offset, amplitude, background."""
+    rng = np.random.default_rng(seed)
+    h = nd.FIT_HALF
+    yy, xx = np.mgrid[-h:h + 1, -h:h + 1]
+    sig = rng.uniform(1.0, 4.0, n) if sigmas is None else np.asarray(sigmas, float)
+    dx, dy = rng.uniform(-1.5, 1.5, n), rng.uniform(-1.5, 1.5, n)
+    amp, bg = rng.uniform(150.0, 4000.0, n), rng.uniform(-20.0, 200.0, n)
+    cuts = np.stack([b + a * np.exp(-((xx - x) ** 2 + (yy - y) ** 2) / (2 * s * s))
+                     for s, x, y, a, b in zip(sig, dx, dy, amp, bg)])
+    cuts = cuts + rng.normal(0.0, noise, cuts.shape)
+    return cuts, amp, bg, sig
+
+
+def _scipy_fit(cut, amp0, bg0):
+    from scipy.optimize import least_squares
+    h = nd.FIT_HALF
+    yy, xx = np.mgrid[-h:h + 1, -h:h + 1]
+
+    def resid(p):
+        a, dx, dy, sig, bg = p
+        return (bg + a * np.exp(-((xx - dx) ** 2 + (yy - dy) ** 2) / (2 * sig ** 2)) - cut).ravel()
+    return least_squares(resid, [amp0, 0.0, 0.0, 1.8, bg0], max_nfev=60,
+                         bounds=([0, -3, -3, 0.5, -np.inf], [np.inf, 3, 3, 8.0, np.inf])).x
+
+
+def test_batched_gaussian_fit_matches_scipy_and_recovers_the_truth():
+    cuts, amp, bg, sig = _gauss_stamps(40)
+    amp0 = cuts.reshape(40, -1).max(axis=1) - bg
+    sol = nd._fit_gaussians(cuts, amp0, bg)
+    ref = np.stack([_scipy_fit(c, a, b) for c, a, b in zip(cuts, amp0, bg)])
+    np.testing.assert_allclose(sol[:, 3], ref[:, 3], rtol=1e-3)         # same minimum as the reference
+    np.testing.assert_allclose(sol[:, 3], sig, rtol=0.05)               # and the true width, within the noise
+    assert np.all(np.abs(sol[:, 1:3]) <= 3.0) and np.all(sol[:, 0] >= 0.0)
+
+
+def test_batched_gaussian_fit_respects_the_width_bounds():
+    # a flat-topped, much wider blob than the 8 px cap: pinned at the cap, so measure_star_fwhm rejects it
+    cuts, _, bg, _ = _gauss_stamps(3, sigmas=[30.0, 30.0, 30.0], noise=0.5)
+    amp0 = cuts.reshape(3, -1).max(axis=1) - bg
+    sol = nd._fit_gaussians(cuts, amp0, bg)
+    ref = np.stack([_scipy_fit(c, a, b) for c, a, b in zip(cuts, amp0, bg)])
+    assert np.all(sol[:, 3] >= 8.0 - 1e-6) and np.all(ref[:, 3] >= 8.0 - 1e-6)
+    narrow, _, nbg, _ = _gauss_stamps(3, sigmas=[0.3, 0.3, 0.3], noise=0.5)   # narrower than the 0.5 px floor
+    sol = nd._fit_gaussians(narrow, narrow.reshape(3, -1).max(axis=1) - nbg, nbg)
+    assert np.allclose(sol[:, 3], 0.5, atol=1e-3)
+
+
+def test_batched_gaussian_fit_handles_one_star_and_pure_noise():
+    cuts, _, bg, sig = _gauss_stamps(1, seed=5)
+    sol = nd._fit_gaussians(cuts, cuts.max() - bg, bg)
+    assert sol.shape == (1, 5) and abs(sol[0, 3] - sig[0]) < 0.05 * sig[0]
+    noise = np.random.default_rng(1).normal(100.0, 5.0, (4, 17, 17))
+    sol = nd._fit_gaussians(noise, noise.reshape(4, -1).max(axis=1) - 100.0, np.full(4, 100.0))
+    assert np.isfinite(sol).all()                                       # no NaN from a degenerate stamp
+
+
+@pytest.mark.parametrize('fwhm', [2.0, 4.0, 8.0])
+def test_measure_star_fwhm_agrees_with_the_scipy_reference(fwhm):
+    img = _star_field(fwhm)
+    got, ref = nd.measure_star_fwhm(img), nd._measure_star_fwhm_scipy(img)
+    assert got is not None and ref is not None
+    assert abs(got - ref) < 2e-3 * ref
+    img[40:60, 40:60, :] = np.nan                                        # NaNs are zeroed like the reference does
+    got, ref = nd.measure_star_fwhm(img), nd._measure_star_fwhm_scipy(img)
+    assert abs(got - ref) < 2e-3 * ref
+    assert nd.measure_star_fwhm(img, max_stars=20) is not None           # a smaller cap stops the chunks early
+
+
+def test_fwhm_lum_is_the_channel_mean_minus_its_median():
+    rng = np.random.default_rng(2)
+    for c in (3, 4):
+        img = rng.normal(100, 5, (64, 70, c)).astype(np.float32)
+        img[3, 4, 0] = np.nan
+        ref = np.nan_to_num(img.astype(np.float32).mean(axis=2))
+        ref = ref - np.float32(np.median(ref))
+        np.testing.assert_array_equal(nd._fwhm_lum(img), ref)             # bit-identical, 3 channels or not
+    mono = rng.normal(100, 5, (30, 40)).astype(np.float32)
+    ref = np.nan_to_num(mono)
+    np.testing.assert_array_equal(nd._fwhm_lum(mono), ref - np.float32(np.median(ref)))
+
+
+def test_nn_denoise_measures_the_star_width_once(monkeypatch):
+    calls = []
+    monkeypatch.setattr(nd, 'load_weights', lambda path=None: _random_weights())
+    monkeypatch.setattr(nd, 'measure_star_fwhm', lambda img, max_stars=60: calls.append(img.shape) or 4.0)
+    img = _star_field(4.0)
+    nd.nn_denoise(img, fwhm_range=(2.8, 5.2), star_restore_frac=0.4)
+    assert len(calls) == 1                                               # the range check's value serves the restore
+    calls.clear()
+    img[10, 10, 1] = np.nan                                              # ``src`` is no longer ``img``: measured again
+    nd.nn_denoise(img, fwhm_range=(2.8, 5.2), star_restore_frac=0.4)
+    assert len(calls) == 2
+
+
 def test_measure_star_fwhm_none_without_stars():
     flat = np.random.default_rng(0).normal(100, 2, (200, 200, 3)).astype(np.float32)
     assert nd.measure_star_fwhm(flat) is None
