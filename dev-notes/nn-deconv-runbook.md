@@ -1012,3 +1012,30 @@ sessions in `G:\astro\S50`, plus M13)? Answer from a cheap feasibility pass: **n
   not the PS1 one. Meaningful S50 training needs many more solved, broadband (no dual-band filter)
   sessions; ask S50 volunteers for broadband sessions of star-rich galaxy/cluster fields.
 - Data kept: `C:\nn_work\s50stacks` (stacks), `C:\nn_work\s50truth` (crops, bank, logs, `fwhm.py`).
+
+## Star FWHM measurement speed (2026-11-06)
+
+`nn_denoise.measure_star_fwhm` runs twice per NN step (once for the `fwhm_range` check, once for
+`star_restore_frac`) on the same image. A cProfile run suggested ~7 s for the pair; **unprofiled it
+was 0.8 s per call** (profiling inflates a Python loop of small scipy calls, and the profile ran
+beside another job). Where one 0.65 s call went: ~360 ms for ~63 scipy `least_squares` fits (5-6 ms
+each), ~260 ms whole-image prep (channel mean 109, median 75, `noise_sigma` 63, percentile 13), 31 ms
+detection.
+
+- Fits: `_fit_gaussians`, a batched bounded Levenberg-Marquardt solve (analytic Jacobian, 5x5
+  normal equations batched with `np.linalg.solve`, finished stars dropped from the active set), 64
+  stars per chunk until 60 are accepted. A chunk takes 9-15 ms (scipy: ~320 ms). Fitting the 500
+  candidates at once was slow (every iteration touched finished stars); the loop only ever needs the
+  first 60 accepted, so chunking keeps the selection identical to the one-at-a-time loop.
+- Agreement with `_measure_star_fwhm_scipy` (kept as the reference): on Whirlpool, Eagle, California,
+  Andromeda and 161P Hartley stacks every accept/reject decision matched over 200-516 candidates each,
+  per-star sigma differed by p99 < 5e-5 relative (one Andromeda star settled in a different minimum,
+  irrelevant to a median), and the returned FWHM by 4e-7 to 4e-6 relative.
+- Prep: the three-channel mean is `(a + b) + c` in float32 (what `ndarray.mean(axis=2)` does,
+  bit-identical, 109 -> 29 ms) and `nan_to_num` is skipped for finite images. The median and
+  `noise_sigma` stay exact: `min_amp = 8 sigma` decides which stars count, and a native flat median
+  would save ~35 ms of a 6 M-sample `np.median` for a kernel and a crate bump.
+- `nn_denoise` reuses the first measurement for the restore when `src` is `img` (all finite).
+- Result per call 2.4-3.3x (574 -> 174 ms on Whirlpool, interleaved min-of-5), per NN step ~1.5 s
+  saved of ~11 s (the rest is the network, the restore filters and the star mask).
+
