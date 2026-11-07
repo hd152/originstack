@@ -6,6 +6,9 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+### Changed
+- Linux and macOS bundles drop the same unused Qt payload as the Windows one (QML, Quick, PDF, Network, Qt translations, unused image plugins); the path tokens now match the Linux/macOS wheel layout.
+
 ## [2.23.0] - 2026-11-06
 
 ### Changed
