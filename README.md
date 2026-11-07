@@ -1074,6 +1074,15 @@ Notes:
 - Not available in the packaged desktop app (it would need your own CUDA install).
 - Falls back to CPU automatically if no GPU is available.
 
+### `--gpu-coadd` (experimental, any GPU vendor)
+
+A separate, opt-in GPU path for the combine pass of the proper coadd (on by default), through wgpu
+(Vulkan, DX12 or Metal; no CUDA needed). It requires building the native extension yourself with
+`maturin build --release --features gpu` (in `ext/astro_native`); the packaged app and the PyPI wheels do
+not include it. On a 4 GB GTX 1650 Ti it took a real 206-frame session's combine pass from 17 s to 9 s,
+with results within about 1e-5 of the noise of the CPU result (not bit-identical). If the GPU is missing
+or fails, the run uses the CPU pass and says so. See [dev-notes/gpu-coadd.md](dev-notes/gpu-coadd.md).
+
 ## Support
 
 OriginStack is free. If it saves you time, you can leave a tip on

@@ -6,6 +6,9 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+### Added
+- **`--gpu-coadd`: the proper coadd's combine pass on the GPU** (opt-in; Vulkan, DX12 or Metal through wgpu, any vendor). On a real 206-frame session the pass took 9 s instead of 17 s and the stack differed from the CPU stack by about 1e-5 of its noise (float32 on the GPU: close, not bit-identical). It needs an `astro_native` built with `--features gpu` and is not in the packaged app or the PyPI wheels; the run falls back to the CPU pass, with a note, when the GPU is missing, too small or fails. Details, numbers and limits: [dev-notes/gpu-coadd.md](dev-notes/gpu-coadd.md); `tools/ab_gpu_coadd.py` compares the two paths.
+
 ### Changed
 - Linux and macOS bundles drop the same unused Qt payload as the Windows one (QML, Quick, PDF, Network, Qt translations, unused image plugins); the path tokens now match the Linux/macOS wheel layout.
 
