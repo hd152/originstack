@@ -6,6 +6,8 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+## [2.23.0] - 2026-11-06
+
 ### Changed
 - The desktop app is now a Qt (PySide6) window. Same pipeline, same settings and the same "Setup, run, preview" flow, with a smoother image viewer (zoom about the pointer, pan, before/after wipe) and the tools under the picture in tabs. The old tkinter window is gone (no `--tk`); without PySide6 the launcher shows an error dialog. The taskbar button shows the run's progress on Windows (yellow while the frame review waits, red after a failure) and flashes when a run finishes or needs you while the window is in the background.
 
