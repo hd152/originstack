@@ -13,6 +13,8 @@
 //! - `calibrate`, `hotpix`, `cfa_equalize`, `color`, `debayer`, `rcd`: Phase 1.
 //! - `filters`, `background`, `detect`, `psf`, `pca`, `wavelet`, `nn`: Phase 4 and fitting.
 //! - `transient_triage`: tract ONNX inference, behind the `triage` Cargo feature.
+//! - `gpu`, `gpu_coadd`: wgpu compute (device context; the proper-coadd FFT and accumulation),
+//!   behind the `gpu` Cargo feature.
 
 pub(crate) use numpy::{
     IntoPyArray, PyArray1, PyArray2, PyArray3, PyReadonlyArray1, PyReadonlyArray2,
@@ -64,6 +66,10 @@ mod debayer;
 mod detect;
 mod drizzle;
 mod filters;
+#[cfg(feature = "gpu")]
+mod gpu;
+#[cfg(feature = "gpu")]
+mod gpu_coadd;
 mod hotpix;
 mod moving;
 mod nn;
@@ -118,6 +124,16 @@ fn astro_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(vote_velocity, m)?)?;
     #[cfg(feature = "triage")]
     m.add_function(wrap_pyfunction!(transient_triage::transient_triage_score, m)?)?;
+    #[cfg(feature = "gpu")]
+    {
+        m.add_function(wrap_pyfunction!(gpu::gpu_available, m)?)?;
+        m.add_function(wrap_pyfunction!(gpu::gpu_info, m)?)?;
+        m.add_function(wrap_pyfunction!(gpu_coadd::gpu_fft2, m)?)?;
+        m.add_function(wrap_pyfunction!(gpu_coadd::gpu_coadd_begin, m)?)?;
+        m.add_function(wrap_pyfunction!(gpu_coadd::gpu_coadd_add, m)?)?;
+        m.add_function(wrap_pyfunction!(gpu_coadd::gpu_coadd_finish, m)?)?;
+        m.add_function(wrap_pyfunction!(gpu_coadd::gpu_coadd_abort, m)?)?;
+    }
     m.add_function(wrap_pyfunction!(sigma_clip_combine, m)?)?;
     m.add_function(wrap_pyfunction!(online_sigma_clip_seed_burnin, m)?)?;
     m.add_function(wrap_pyfunction!(online_sigma_clip_fold_frame, m)?)?;
