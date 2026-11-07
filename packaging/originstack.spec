@@ -128,6 +128,12 @@ _DROP_TOKENS = ('avif',)
 # which is where a DLL dropped by mistake shows up.
 _DROP_TOKENS += (
     'opengl32sw', 'qt6quick', 'qt6qml', 'qt6pdf', 'qt6network', 'pyside6/translations',
+    # Linux/macOS wheels spell the same files differently: Qt/translations, libq*.so/.dylib
+    # plugins, and macOS frameworks (QtQuick.framework, ...).
+    'pyside6/qt/translations', 'imageformats/libqgif', 'imageformats/libqicns',
+    'imageformats/libqpdf', 'imageformats/libqsvg', 'imageformats/libqtga',
+    'imageformats/libqtiff', 'imageformats/libqwbmp', 'imageformats/libqwebp',
+    'qtquick.framework', 'qtqml.framework', 'qtpdf.framework', 'qtnetwork.framework',
     'imageformats/qgif', 'imageformats/qicns', 'imageformats/qpdf', 'imageformats/qsvg',
     'imageformats/qtga', 'imageformats/qtiff', 'imageformats/qwbmp', 'imageformats/qwebp',
 )
