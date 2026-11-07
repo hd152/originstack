@@ -88,7 +88,8 @@ def main() -> int:
     g = cpu[..., 1].astype(np.float64)
     lag = (g[:, 4:] - g[:, :-4]).ravel()
     noise = 1.4826 * np.median(np.abs(lag - np.median(lag))) / np.sqrt(2)
-    bright = np.abs(cpu) > 0.5 * float(np.percentile(np.abs(cpu), 99.99))
+    above = cpu - float(np.median(cpu))
+    bright = above > 0.5 * float(np.percentile(above, 99.99))      # the stars, not the sky
     print(f'time: CPU {t_cpu:.1f} s, GPU {t_gpu:.1f} s (whole proper_coadd call, incl. PSF measurement)')
     print(f'output noise {noise:.3f}; difference rms {np.sqrt(np.mean(d ** 2)):.5f} '
           f'({np.sqrt(np.mean(d ** 2)) / noise:.1e} of noise), max {np.abs(d).max():.4f}, '
