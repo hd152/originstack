@@ -5,6 +5,7 @@ astropy>=8.0.2
 scipy>=1.7
 tqdm>=4.70.1
 Pillow>=13.0.0
+PySide6>=6.8     # the desktop app's window (python desktop_app.py); the CLI does not need it
 
 # Optional dependencies (install separately as needed):
 #

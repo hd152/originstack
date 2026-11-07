@@ -50,7 +50,8 @@ For installation, quick start, and common recipes, see [README.md](README.md).
 | `src/stream_stack.py` | Two-pass streaming stack of an already-complete directory (`--stream`) — see feature 43 |
 | `src/ui_events.py` | In-process UI event/state sink for the desktop app — log/phase/progress state, named milestone previews, per-frame thumbnail ring, re-stretch of the finished run's preview |
 | `src/desktop_control.py` | Desktop-app control layer — form schema introspection, form-to-argv translation, `RunManager` |
-| `src/desktop_app.py` | Native tkinter desktop app (`python desktop_app.py`) — Setup form, live progress/log, interactive preview (zoom/pan/wipe compare/thumbnail ring) |
+| `src/qt_app/` | Qt (PySide6) desktop app (`python desktop_app.py`): form model, Setup form, viewer, stretch editor, post-processing panel, main window |
+| `src/desktop_app.py` | The desktop launcher: starts `src/qt_app`, or shows an error dialog when PySide6 is missing |
 | `src/native_dialog.py` | Native Windows message boxes via ctypes — fatal-error / close-confirm dialogs for the packaged desktop app |
 | `src/notify.py` | Best-effort native Windows balloon-tip notification (no-op elsewhere) |
 | `src/channel_combine.py` | `combine` subcommand — LRGB/narrowband palettes, SCNR, continuum subtraction |
@@ -400,7 +401,7 @@ mean-variance relationship.
 
 ### 25. Desktop App (`python desktop_app.py`)
 
-- Native tkinter window (stdlib, no external UI toolkit or runtime dependency) — replaced a `pywebview`-wrapped local HTTP dashboard (2026-08)
+- Qt (PySide6) window; before 2026-11 a tkinter window (removed), which in 2026-08 had replaced a `pywebview`-wrapped local HTTP dashboard
 - Setup form auto-built from the CLI's own argument parser (one tab per argparse group), so it can't drift out of sync with the flags it exposes
 - Live phase stepper with timings, active-loop progress bar, log stream, per-frame quality ticker, and an interactive preview (zoom/pan, before/after wipe-slider compare, per-frame thumbnail ring), and a completion summary card
 - After a run, a Stretch / Colour bar re-renders the preview JPEG with another `--stretch` / `--stretch-color` choice (no re-processing; the FITS outputs are unchanged)

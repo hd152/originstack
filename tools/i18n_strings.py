@@ -26,7 +26,8 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 LOCALE_DIR = ROOT / 'src' / 'locales'
-SOURCES = [ROOT / 'src' / 'desktop_app.py']
+SOURCES = [ROOT / 'src' / 'desktop_common.py',
+           *sorted((ROOT / 'src' / 'qt_app').glob('*.py'))]
 _PLACEHOLDER = re.compile(r'\{(\w*)\}')
 
 
@@ -44,7 +45,7 @@ def app_keys() -> List[str]:
     for path in SOURCES:
         keys.update(_literal_calls(path))
     from src.auto_settings import TARGET_LABELS
-    from src.desktop_app import _field_label
+    from src.desktop_common import _field_label
     from src.desktop_control import get_form_schema
     keys.update(TARGET_LABELS.values())
     for group, fields in get_form_schema().items():

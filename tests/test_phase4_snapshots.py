@@ -152,65 +152,6 @@ def test_ui_rerun_without_a_run_and_after_a_new_run(tmp_path):
         ui.rerun_postprocess(['scnr'])
 
 
-def test_desktop_panel_lists_steps_and_reruns_on_toggle(tmp_path, monkeypatch):
-    """The Post-processing panel: one box per step, a change re-runs Phase 4 off the GUI thread."""
-    import pytest
-    pytest.importorskip('tkinter')
-    import tkinter as tk
-    try:
-        root = tk.Tk()
-    except tk.TclError:
-        pytest.skip('no display available for a real Tk root')
-    try:
-        from src import desktop_app
-        monkeypatch.setattr('src.utils.should_check_for_update', lambda: False)
-        app = desktop_app.App(root)
-        ui, img, _ = _ui_with_run(tmp_path)
-        app.ui = ui
-        snap = ui.snapshot()
-        snap['run_status'] = 'ok'
-        app._sync_pp_bar(snap)
-        assert 'local_contrast' in app._pp_vars and app.pp_bar.winfo_manager() == 'pack'
-        app._pp_vars['local_contrast'].set(False)
-        assert app._pp_timer is not None
-        root.after_cancel(app._pp_timer)
-        app._run_pp()                       # what the debounce timer calls
-        for _ in range(600):
-            root.update()
-            if not app._pp_busy:
-                break
-            root.after(50)
-            root.update()
-        assert not app._pp_busy
-        assert 'Updated' in app.pp_status_var.get() or 'Aktual' in app.pp_status_var.get()
-        assert np.array_equal(ui._final_src['rgb'], _run(img, _args(['local_contrast'])))
-        # the starless box: shown without stars, a sidecar next to the preview, and back
-        app.pp_starless_var.set(True)
-        app._run_pp()
-        for _ in range(600):
-            root.update()
-            if not app._pp_busy:
-                break
-            root.after(50)
-            root.update()
-        assert app._pp_starless_shown is True and (tmp_path / 'stack_starless.jpg').exists()
-        app.pp_starless_var.set(False)
-        app._run_pp()
-        for _ in range(600):
-            root.update()
-            if not app._pp_busy:
-                break
-            root.after(50)
-            root.update()
-        assert app._pp_starless_shown is False
-        # a finished-run snapshot without a kept session hides the panel
-        ui.run_started()
-        app._sync_pp_bar(ui.snapshot())
-        assert app.pp_bar.winfo_manager() == ''
-    finally:
-        root.destroy()
-
-
 def test_starless_view_writes_a_sidecar_and_leaves_the_stars_in_files(tmp_path):
     import os
     ui, _, path = _ui_with_run(tmp_path)
@@ -317,38 +258,3 @@ def test_compare_step_errors_and_cancel(tmp_path):
     with pytest.raises(RunCancelled):
         ui.compare_postprocess_step('scnr', max_dim=96, cancel=ev)
     assert ui._pp_session['snaps'].resume is None
-
-
-def test_desktop_compare_window_shows_both_sides(tmp_path, monkeypatch):
-    pytest.importorskip('tkinter')
-    import tkinter as tk
-    try:
-        root = tk.Tk()
-    except tk.TclError:
-        pytest.skip('no display available for a real Tk root')
-    try:
-        from src import desktop_app
-        monkeypatch.setattr('src.utils.should_check_for_update', lambda: False)
-        app = desktop_app.App(root)
-        ui, _, _ = _ui_with_run(tmp_path)
-        app.ui = ui
-        snap = ui.snapshot()
-        snap['run_status'] = 'ok'
-        app._sync_pp_bar(snap)
-        assert app._cmp_ids
-        app.cmp_step_var.set([k for k, v in app._cmp_ids.items() if v == 'scnr'][0])
-        app._on_compare_step()
-        assert app._cmp_win is not None and app._pp_busy
-        import time
-        for _ in range(600):
-            root.update()
-            if not app._pp_busy:
-                break
-            time.sleep(0.1)
-        assert not app._pp_busy
-        win = app._cmp_win
-        assert win is not None
-        app._close_compare()
-        assert app._cmp_win is None
-    finally:
-        root.destroy()

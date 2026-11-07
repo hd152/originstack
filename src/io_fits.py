@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import contextvars
 import os
 import tempfile
 from typing import Dict, List, NamedTuple, Optional, Tuple, Union
@@ -73,6 +75,26 @@ def _sky_stats(lum: np.ndarray, noise_scale: float = 1.0) -> Tuple[float, float]
     med = float(med)
     sigma = float(sigma) if np.isfinite(sigma) and sigma > 0 else 1.0
     return med, sigma * float(noise_scale)
+
+
+# Area of the image being stretched relative to the full frame it stands for (1 = the frame
+# itself). The roll-off and star-core rules count pixels (``Config.PREVIEW_ROLLOFF_MIN_PIXELS``,
+# ``PREVIEW_CORE_FEATHER_MIN_PIXELS``) and smooth over a few pixels; on a reduced copy (the
+# desktop app's live stretch editor) those counts must shrink with it, or a small target
+# (a planetary nebula, a galaxy) is judged differently from the full-size render. A context
+# variable, not an argument, so it reaches the helpers without widening every signature and
+# stays per-thread.
+_PIXEL_SCALE: contextvars.ContextVar = contextvars.ContextVar(
+    'originstack_preview_pixel_scale', default=1.0)
+
+
+@contextlib.contextmanager
+def _pixel_scale(scale: float):
+    token = _PIXEL_SCALE.set(max(float(scale), 1e-6))
+    try:
+        yield
+    finally:
+        _PIXEL_SCALE.reset(token)
 
 
 _STRUCTURAL_KEYS = frozenset({
@@ -480,7 +502,9 @@ def _extended_highlight_top(lum: np.ndarray, white: float, sky: Optional[float] 
     if not above.any():
         return None
     labels, n = ndimage.label(above)
-    min_area = max(Config.PREVIEW_ROLLOFF_MIN_AREA * lum.size, Config.PREVIEW_ROLLOFF_MIN_PIXELS)
+    scale = _PIXEL_SCALE.get()
+    min_area = max(Config.PREVIEW_ROLLOFF_MIN_AREA * lum.size,
+                   Config.PREVIEW_ROLLOFF_MIN_PIXELS * scale)
     if n == 0:
         return None
     areas = np.bincount(labels.ravel())
@@ -501,8 +525,10 @@ def _extended_highlight_top(lum: np.ndarray, white: float, sky: Optional[float] 
         t = float(_smoothstep(np.asarray((frac - lo) / (hi - lo))))
         if t > 0.0:
             # feathered object mask, so the curve changes smoothly into its halo
+            lin = scale ** 0.5               # the feather is a few pixels wide at full size
             weight = t * np.clip(ndimage.gaussian_filter(
-                ndimage.binary_dilation(obj, iterations=3).astype(np.float64), 3.0), 0.0, 1.0)
+                ndimage.binary_dilation(obj, iterations=max(1, round(3 * lin))).astype(np.float64),
+                max(0.5, 3.0 * lin)), 0.0, 1.0)
             target = Config.PREVIEW_ROLLOFF_TARGET_KNEE
             top_c = 1.0
             if rgb is not None and black is not None:
@@ -932,15 +958,26 @@ def render_preview_uint8(rgb: np.ndarray, stretch: str = 'linear',
     return to_uint8(out)
 
 
-def render_preview_float(rgb: np.ndarray, stretch: str = 'linear',
+def _render_preview_float(rgb: np.ndarray, stretch: str = 'linear',
                          ghs_b: float = 8.0, ghs_sp: float = 0.15,
                          ghs_hp: float = 0.95,
                          black_sigma: float = 0.0,
                          color: str = 'preserve',
                          noise_scale: float = 1.0,
-                         anchor: Optional[Tuple[float, float]] = None) -> Optional[np.ndarray]:
+                         anchor: Optional[Tuple[float, float]] = None,
+                         white_pct: float = 99.5,
+                         nebula_auto: bool = True,
+                         info: Optional[dict] = None) -> Optional[np.ndarray]:
     """The display stretch of ``render_preview_uint8`` before quantisation:
     HWC float in [0, 1]. ``tools/bench_phase4.py`` scores this.
+
+    ``white_pct``: the luminance percentile that becomes white in the ghs family, 'arcsinh',
+    'noisefloor' and 'seti' (the interactive stretch editor moves it; 99.5 is the default
+    for the reason given in the 'ghs' branch). ``nebula_auto=False`` keeps ``ghs_b`` and
+    ``ghs_sp`` as given on a frame-filling bright nebula, where otherwise they are raised
+    to at least what lifts its faint wings (``_extended_nebula_ghs``); ``info``, when given,
+    is filled with the strength and symmetry point used (``ghs_b``, ``ghs_sp``) and whether
+    the nebula lift changed them (``lifted``).
 
     ``color`` ('ghs', 'arcsinh', and 'seti'): 'preserve' (default) applies the
     curve to luminance and keeps each pixel's RGB ratios
@@ -984,7 +1021,7 @@ def render_preview_float(rgb: np.ndarray, stretch: str = 'linear',
         # visually indistinguishable from sky even though the pixel data
         # is fine. 99.5 keeps stars comfortably white while giving diffuse
         # signal several times more of the normalized range to live in.
-        unified_white, _sp_scale = _preview_white(lum, _med, _bg_sigma, 99.5, unified_black)
+        unified_white, _sp_scale = _preview_white(lum, _med, _bg_sigma, white_pct, unified_black)
         ghs_sp = ghs_sp * _sp_scale
         if stretch == 'object':
             unified_white, ghs_sp = _object_stretch_points(
@@ -1000,9 +1037,14 @@ def render_preview_float(rgb: np.ndarray, stretch: str = 'linear',
             # Lift the faint wings only where the preset keeps the sky noise (nebulae,
             # black_sigma <= 0): a cluster or galaxy preset asks for a dark sky, and on
             # M15 the lift brought up red background-residual blotches around the core.
-            if _top is not None and black_sigma <= 0:
+            if _top is not None and black_sigma <= 0 and nebula_auto:
+                _b0, _sp0 = ghs_b, ghs_sp
                 ghs_b, ghs_sp = _extended_nebula_ghs(lum, _med, _bg_sigma, unified_black,
                                                      unified_white, ghs_b, ghs_sp, ghs_hp)
+                if info is not None:
+                    info['lifted'] = (ghs_b, ghs_sp) != (_b0, _sp0)
+        if info is not None:
+            info.update(ghs_b=float(ghs_b), ghs_sp=float(ghs_sp))
 
         def curve(x: np.ndarray) -> np.ndarray:
             return generalized_hyperbolic_stretch(
@@ -1055,7 +1097,7 @@ def render_preview_float(rgb: np.ndarray, stretch: str = 'linear',
         lum = luminance(rgb)
         _med, _bg_sigma = _sky_stats(lum, noise_scale)
         black = _med - Config.PREVIEW_NOISE_BLACK_SIGMA * _bg_sigma
-        white, _ = _preview_white(lum, _med, _bg_sigma, 99.5, black)
+        white, _ = _preview_white(lum, _med, _bg_sigma, white_pct, black)
         nb = _noise_limited_b(_med, _bg_sigma, black, white, ghs_hp)
 
         def noise_curve(x: np.ndarray) -> np.ndarray:
@@ -1070,7 +1112,7 @@ def render_preview_float(rgb: np.ndarray, stretch: str = 'linear',
         lum = luminance(rgb)
         _med, _bg_sigma = _sky_stats(lum, noise_scale)
         black = max(float(np.min(lum)), _med - 2.7 * _bg_sigma)
-        white, _ = _preview_white(lum, _med, _bg_sigma, 99.5, black)
+        white, _ = _preview_white(lum, _med, _bg_sigma, white_pct, black)
         span = max(white - black, 1e-12)
         normalized_lum = np.clip((lum.astype(np.float64) - black) / span, 0.0, 1.0)
         linked_median = float(np.median(normalized_lum))
@@ -1100,7 +1142,7 @@ def render_preview_float(rgb: np.ndarray, stretch: str = 'linear',
         # See the 'ghs' branch above for why 99.5 rather than a higher
         # percentile: saturated-star pixels otherwise set a white point far
         # above any extended structure, burying diffuse signal near-black.
-        unified_white, _ = _preview_white(lum, _med, _bg_sigma, 99.5, unified_black)
+        unified_white, _ = _preview_white(lum, _med, _bg_sigma, white_pct, unified_black)
         if color == 'preserve':
             out = _preserving_preview(
                 rgb, lum, lambda x: arcsinh_stretch(x, black_point=unified_black,
@@ -1147,7 +1189,7 @@ def _feather_clipped_core(out: np.ndarray, rgb: np.ndarray) -> np.ndarray:
     areas = np.bincount(labels.ravel())
     areas[0] = 0
     k = int(areas.argmax())
-    if areas[k] < Config.PREVIEW_CORE_FEATHER_MIN_PIXELS:
+    if areas[k] < Config.PREVIEW_CORE_FEATHER_MIN_PIXELS * _PIXEL_SCALE.get():
         return out
     plate = labels == k
     sigma = float(np.clip(Config.PREVIEW_CORE_FEATHER_SCALE * np.sqrt(areas[k] / np.pi), 2.0, 12.0))
@@ -1274,23 +1316,38 @@ def render_preview_rgb_uint8(rgb: np.ndarray, stretch: str = 'linear',
     return None if out is None else to_uint8(out)
 
 
+def render_preview_float(rgb: np.ndarray, *args, pixel_scale: float = 1.0, **kwargs):
+    """``_render_preview_float`` (arguments there: stretch, ghs_b, ghs_sp, ghs_hp,
+    black_sigma, color, noise_scale, anchor, white_pct, nebula_auto, info), with
+    ``pixel_scale``: the area of ``rgb`` relative to the full frame it stands for, 1 unless it
+    is a reduced copy (see ``_PIXEL_SCALE``)."""
+    with _pixel_scale(pixel_scale):
+        return _render_preview_float(rgb, *args, **kwargs)
+
+
 def render_preview_rgb_float(rgb: np.ndarray, stretch: str = 'linear',
                              ghs_b: float = 8.0, ghs_sp: float = 0.15,
                              ghs_hp: float = 0.95, black_sigma: float = 0.0,
                              starless: Optional[np.ndarray] = None,
                              color: str = 'preserve',
                              noise_scale: float = 1.0,
-                             anchor: Optional[Tuple[float, float]] = None) -> Optional[np.ndarray]:
+                             anchor: Optional[Tuple[float, float]] = None,
+                             white_pct: float = 99.5,
+                             nebula_auto: bool = True,
+                             info: Optional[dict] = None,
+                             pixel_scale: float = 1.0) -> Optional[np.ndarray]:
     """The final display image in [0, 1], before any quantisation: the layered stretch
     when ``starless`` is given with ``stretch='ghs'``, else ``render_preview_float``.
     The JPEG and the ``--export png`` / ``png16`` files are all made from it."""
-    if starless is not None and stretch == 'ghs' and starless.shape == rgb.shape:
-        return render_preview_layered_float(rgb, starless, ghs_b=ghs_b, ghs_sp=ghs_sp,
-                                            ghs_hp=ghs_hp, black_sigma=black_sigma,
-                                            color=color, noise_scale=noise_scale)
-    out = render_preview_float(rgb, stretch=stretch, ghs_b=ghs_b, ghs_sp=ghs_sp,
-                               ghs_hp=ghs_hp, black_sigma=black_sigma, color=color,
-                               noise_scale=noise_scale, anchor=anchor)
+    with _pixel_scale(pixel_scale):
+        if starless is not None and stretch == 'ghs' and starless.shape == rgb.shape:
+            return render_preview_layered_float(rgb, starless, ghs_b=ghs_b, ghs_sp=ghs_sp,
+                                                ghs_hp=ghs_hp, black_sigma=black_sigma,
+                                                color=color, noise_scale=noise_scale)
+        out = _render_preview_float(rgb, stretch=stretch, ghs_b=ghs_b, ghs_sp=ghs_sp,
+                                    ghs_hp=ghs_hp, black_sigma=black_sigma, color=color,
+                                    noise_scale=noise_scale, anchor=anchor, white_pct=white_pct,
+                                    nebula_auto=nebula_auto, info=info)
     return None if out is None else np.clip(out, 0.0, 1.0).astype(np.float32)
 
 

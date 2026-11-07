@@ -1,5 +1,5 @@
 """Tests for src/native_dialog.py -- the ctypes MessageBoxW wrapper that
-replaced tkinter in desktop_app.py on Windows (saves ~7-8MB of bundled Tcl/Tk runtime
+replaced tkinter in the old desktop window on Windows (saves ~7-8MB of bundled Tcl/Tk runtime
 in the packaged build). Off Windows it uses tkinter's own boxes; those tests replace
 ``_tk_box`` so a real dialog can never open during the suite."""
 from __future__ import annotations

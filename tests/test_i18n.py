@@ -114,20 +114,3 @@ def test_translated_page_links_resolve():
                 if url.split('#')[0] in ('', './', '../') or url.endswith('/'):
                     target = target / 'index.html'
                 assert target.exists(), f'{folder}/{page}: {url}'
-
-
-@pytest.mark.parametrize('code', [c for c in i18n.LANGUAGES if c != 'en'])
-def test_setup_form_builds_in_every_language(code, tk_root, english):
-    from src import desktop_app
-    i18n.set_language(code)
-    form = desktop_app.SetupForm(tk_root)
-    try:
-        form.pack()
-        tk_root.update_idletasks()
-        rows = form.describe_run()
-        assert rows and all(isinstance(h, str) and isinstance(t, str) for h, t in rows)
-        assert rows[0][0] == i18n._('Frames')
-        # Translated text never reaches what Start submits.
-        assert form.read_form() == {}
-    finally:
-        form.destroy()

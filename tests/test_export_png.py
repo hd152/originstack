@@ -106,7 +106,7 @@ def test_restretch_rewrites_the_exports(tmp_path):
 
 
 def test_app_checkboxes_join_the_typed_export_formats():
-    from src.desktop_app import with_export_checkboxes
+    from src.desktop_common import with_export_checkboxes
     from src.desktop_control import build_argv_from_form
     assert with_export_checkboxes({"directory": "d"}, "", {"png": False, "png16": False}) == {"directory": "d"}
     f = with_export_checkboxes({"directory": "d"}, "", {"png": True, "png16": True})

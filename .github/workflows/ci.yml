@@ -128,7 +128,14 @@ jobs:
       - name: Security lint (bandit)
         run: bandit -r src/ -ll -q
 
+      # The Qt window's tests (tests/test_qt_app.py) run on Qt's offscreen platform: no display,
+      # but the Qt libraries still load these system libraries.
+      - name: Qt system libraries
+        run: sudo apt-get update && sudo apt-get install -y libegl1 libgl1 libxkbcommon0 libdbus-1-3 libfontconfig1
+
       - name: Run tests
+        env:
+          QT_QPA_PLATFORM: offscreen
         run: pytest -q -n auto
 
       - name: Smoke run (synthetic)

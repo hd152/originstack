@@ -1868,6 +1868,53 @@ def reload_accepted_frames(
             raise RuntimeError("All frames failed to reload — cannot proceed "
                                "(likely out of memory)")
 
+def parse_frame_names(text) -> set:
+    """File names from a comma, semicolon or newline separated list (``--exclude-frames``)."""
+    if not text:
+        return set()
+    if isinstance(text, (list, tuple, set)):
+        text = ','.join(str(t) for t in text)
+    import re
+    return {t.strip() for t in re.split(r'[,;\n]', str(text)) if t.strip()}
+
+
+def apply_frame_exclusions(lights: List[FrameInfo], names) -> List[FrameInfo]:
+    """``lights`` without the frames whose file name is in ``names`` (see ``parse_frame_names``);
+    says how many were left out. A name matching nothing is ignored."""
+    wanted = parse_frame_names(names)
+    if not wanted:
+        return lights
+    kept = [f for f in lights if os.path.basename(f.path) not in wanted]
+    if len(kept) != len(lights):
+        safe_print(f'  Leaving out {len(lights) - len(kept)} frame(s) named in --exclude-frames')
+    return kept
+
+
+def apply_frame_review(final: List[FrameInfo], lights: List[FrameInfo], rejected_reasons: dict,
+                       stats: ProcessingStats, hook) -> List[FrameInfo]:
+    """The user's pause between quality analysis and registration.
+
+    ``hook(final, lights, rejected_reasons)`` returns the file names the user dropped; those
+    frames become rejected (reason "excluded by you") and the accepted list and the stats
+    follow. Returns the frames that stay."""
+    if hook is None or not final:
+        return final
+    drop = parse_frame_names(hook(final, lights, rejected_reasons))
+    if not drop:
+        return final
+    kept = []
+    for f in final:
+        if os.path.basename(f.path) in drop:
+            f.accepted = False
+            rejected_reasons[f.path] = 'excluded by you (frame review)'
+        else:
+            kept.append(f)
+    stats.accepted_frames = len(kept)
+    stats.rejected_frames = len(lights) - len(kept)
+    safe_print(f'  Frame review: {len(final) - len(kept)} frame(s) left out by you')
+    return kept
+
+
 def quality_gate(
     lights: List[FrameInfo],
     args: argparse.Namespace,

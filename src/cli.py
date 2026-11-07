@@ -28,6 +28,7 @@ from src.frame_discovery import (
     select_matching_darks,
     select_matching_flats,
 )
+from src.frame_processor import apply_frame_exclusions
 from src.gpu_context import get_gpu, reset_gpu
 from src.health_check import run_health_check
 from src.io_fits import make_master, mono_reason
@@ -1450,6 +1451,7 @@ def process_directory(directory: str, output: str, args: argparse.Namespace):
         stats = ProcessingStats()
 
         frames = discover_frames(d)
+        frames['light'] = apply_frame_exclusions(frames['light'], getattr(args, 'exclude_frames', ''))
         extra_cal = _load_calibration_dir(args)
         for ftype in ('dark', 'flat', 'bias'):
             frames[ftype].extend(extra_cal[ftype])
@@ -2212,6 +2214,10 @@ def build_parser() -> argparse.ArgumentParser:
                         'fitted displacement to %.1fpx. Off by default -- opt-in, '
                         'higher-risk correction.' % (Config.LOCAL_WARP_MIN_STARS,
                                                       Config.LOCAL_WARP_MAX_DISPLACEMENT_PX))
+    g_frames.add_argument('--exclude-frames', default='', metavar='NAMES',
+                   help='Light frames to leave out of the stack, by file name (comma separated, '
+                        'e.g. light_003.fits,light_017.fits). The desktop app fills this in from '
+                        'its frame-quality graph. Named frames that are not found are ignored.')
     g_frames.add_argument('--master-method', choices=['median', 'mean', 'robust_pca'],
                    default='median',
                    help='Master bias/dark/flat combine method (default: median). '

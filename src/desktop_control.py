@@ -325,6 +325,11 @@ class RunManager:
         # Output, or a folder, becomes <session>_stacked.fits somewhere), for the
         # app's Open Folder button.
         self.last_output: Optional[str] = None
+        # Pause after quality analysis so the user can look at the frames (the app's
+        # "Review frames" box); the run waits in ``_review_hook`` until ``review_continue``.
+        self.review_frames = False
+        self._review_event = threading.Event()
+        self._review_drop: set = set()
 
     def is_running(self) -> bool:
         return self.status == 'running'
@@ -337,6 +342,42 @@ class RunManager:
         than once. Takes effect at the next checkpoint, not instantly."""
         if self.status == 'running':
             self._cancel_event.set()
+
+    def review_continue(self, drop_names=()) -> None:
+        """Resume a run waiting for the frame review, leaving out the frames named in
+        ``drop_names`` (file names)."""
+        self._review_drop = {str(n) for n in drop_names}
+        self._review_event.set()
+
+    def _review_hook(self, final, lights, rejected_reasons):
+        """Runs on the run thread between quality analysis and registration: publish every
+        light's metrics, wait for ``review_continue`` (or a cancel), return the names to drop."""
+        import os
+
+        from src.models import RunCancelled
+        from src.ui_events import get_ui_events
+        wv = get_ui_events()
+        kept = {id(f) for f in final}
+        rows = []
+        for f in lights:
+            m = f.metrics or {}
+            rows.append({'name': os.path.basename(f.path),
+                         'score': round(float(m.get('score', 0.0)), 1),
+                         'snr': round(float(m.get('snr', 0.0)), 2),
+                         'stars': int(m.get('star_count', 0)),
+                         'fwhm': round(float(m.get('fwhm', 0.0)), 2),
+                         'ok': id(f) in kept,
+                         'reason': rejected_reasons.get(f.path, '')})
+        self._review_drop = set()
+        self._review_event = threading.Event()
+        wv.review_request(rows)
+        try:
+            while not self._review_event.wait(0.2):
+                if self._cancel_event.is_set():
+                    raise RunCancelled('cancelled during the frame review')
+        finally:
+            wv.review_done()
+        return set(self._review_drop)
 
     def start(self, form: Dict[str, Any]) -> Dict[str, Any]:
         with self._lock:
@@ -369,6 +410,7 @@ class RunManager:
         try:
             args = parse_args(argv)
             args._cancel_event = self._cancel_event
+            args._review_hook = self._review_hook if self.review_frames else None
 
             # Default a durable log file for GUI-triggered runs specifically
             # (not in apply_post_parse_setup, which is also the plain CLI's
