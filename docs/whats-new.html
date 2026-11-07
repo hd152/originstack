@@ -40,6 +40,23 @@
 </header>
 
 <main>
+<section id="v2-23">
+  <div class="wrap">
+    <h2>2.23 <small class="when">6 November 2026</small></h2>
+    <div class="releases">
+      <article id="v2-23-0"><h3>2.23.0 <span>6 Nov</span></h3>
+        <ul>
+          <li><strong>A new desktop window.</strong> The app is rebuilt on Qt: a smoother picture viewer (zoom about the pointer, pan, a wipe line you can drag, a pixel inspector, true 1:1 viewing), light and dark themes that follow your system, and your layout and recent folders remembered between runs.</li>
+          <li><strong>Edit the stretch after a run.</strong> A histogram with draggable black, symmetry and white points, a tone curve, undo and redo, and saved stretches. Phase 4 steps can be switched on and off and the picture updates, with a before-and-after of any single step.</li>
+          <li><strong>Review your frames before stacking.</strong> A graph of every frame&rsquo;s quality, star width and signal to noise shows a bad stretch of the night at once. Pick frames to leave out; the run waits five seconds for you, then carries on by itself. <code>--exclude-frames</code> does the same from the command line.</li>
+          <li><strong>Progress on the taskbar.</strong> On Windows the taskbar button shows the run&rsquo;s progress, turns yellow while it waits for you, red if it failed, and flashes when it finishes.</li>
+          <li><strong>A fix for sessions with mixed dark frames.</strong> A session whose dark frames had different exposures could stack with a huge sky offset, a red cast and coloured blotches. Darks are now chosen and checked more carefully, and a dark that would damage the image is dropped with a warning.</li>
+          <li><strong>A smaller download.</strong> The Windows installer is about 65 MB.</li>
+        </ul>
+      </article>
+    </div>
+  </div>
+</section>
 <section id="v2-22">
   <div class="wrap">
     <h2>2.22 <small class="when">3 November 2026</small></h2>
