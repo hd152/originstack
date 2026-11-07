@@ -7,6 +7,7 @@ match the `VERSION` file and `v*` git tags.
 ## [Unreleased]
 
 ### Changed
+- The NN deconvolution step measures the stars' FWHM several times faster (about 1.7 s -> 0.2-0.3 s for its two measurements on a 2000 x 3000 stack): the ~60 star fits run as one batched Levenberg-Marquardt solve instead of one scipy fit each, and the second measurement of the same image is no longer repeated. Same stars, same accept/reject decisions, FWHM identical to ~1e-6 on five real stacks.
 - Linux and macOS bundles drop the same unused Qt payload as the Windows one (QML, Quick, PDF, Network, Qt translations, unused image plugins); the path tokens now match the Linux/macOS wheel layout.
 
 ## [2.23.0] - 2026-11-06
