@@ -1399,8 +1399,9 @@ class MainWindow(QMainWindow):
                 subprocess.Popen(['open', '-R', target_file] if target_file else ['open', folder])
             else:
                 subprocess.Popen(['xdg-open', folder])
-        except Exception:
-            pass
+        except Exception as exc:                  # opening the folder is a convenience
+            import logging
+            logging.getLogger('originstack').debug('could not open the output folder: %s', exc)
 
     def _shape_left_for_run(self, running: bool) -> None:
         """While a run goes the log and progress matter and the form does not: give the log the
