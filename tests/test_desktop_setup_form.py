@@ -1,5 +1,5 @@
 """Setup form helpers: field descriptions, changed markers, search, and the
-name lists desktop_app.py keys on (a wrong dest there fails silently -- the
+name lists the desktop windows key on (src/desktop_common.py) (a wrong dest there fails silently -- the
 main form's 'deconvolve' entry matched nothing, so Deconvolution was missing
 from it)."""
 import pytest
@@ -51,159 +51,22 @@ def test_every_field_has_a_summary_key():
 
 
 def test_name_lists_refer_to_real_dests():
-    from src import desktop_app
+    from src import desktop_common
     dests = _all_dests()
     for name, keys in (('_FIELD_SUMMARIES', _FIELD_SUMMARIES),
-                       ('_COMMON_DESTS', desktop_app._COMMON_DESTS),
-                       ('_FIELD_LABELS', desktop_app._FIELD_LABELS),
-                       ('_EXPERT_DESTS', desktop_app._EXPERT_DESTS),
-                       ('_NO_CHANGE_MARK', desktop_app._NO_CHANGE_MARK)):
+                       ('_COMMON_DESTS', desktop_common._COMMON_DESTS),
+                       ('_FIELD_LABELS', desktop_common._FIELD_LABELS),
+                       ('_EXPERT_DESTS', desktop_common._EXPERT_DESTS),
+                       ('_NO_CHANGE_MARK', desktop_common._NO_CHANGE_MARK)):
         missing = set(keys) - dests
         assert not missing, f'{name} names unknown dests: {sorted(missing)}'
 
 
-@pytest.fixture
-def form(tk_root):
-    from src import desktop_app
-    f = desktop_app.SetupForm(tk_root)
-    f.pack()
-    tk_root.update_idletasks()
-    yield f
-    f.destroy()
-
-
-def _visible(form, dest):
-    return all(w.winfo_manager() == 'grid' for w in form._fields[dest]['widgets'])
-
-
-def test_deconvolution_is_on_the_main_form(form):
-    assert form._fields['deconvolve_mode']['group'] is None
-
-
-def test_shared_dest_gets_the_widget_build_argv_uses(form):
-    # --no-cosmic-ray-rejection and --cosmic-ray-rejection share a dest; the
-    # checkbox must be the store_true one, or ticking it emits nothing.
-    from src.desktop_control import build_argv_from_form
-    form.vars['cosmic_ray_rejection'].set(True)
-    assert build_argv_from_form(form.read_form()) == ['--cosmic-ray-rejection']
-
-
-def test_changed_marker_count_and_reset(form):
-    info = form._fields['banding_removal']
-    assert info['dot'].cget('text') == ''
-    form.vars['banding_removal'].set(True)
-    assert info['dot'].cget('text') == '●'
-    assert info['reset'].cget('text') == 'reset'
-    assert '1 changed' in form._toggle_btn.cget('text')
-    assert form.read_form() == {'banding_removal': True}
-    form._reset('banding_removal')
-    assert info['dot'].cget('text') == ''
-    assert 'changed' not in form._toggle_btn.cget('text')
-    assert form.read_form() == {}
-
-
-def test_path_fields_are_not_marked(form):
-    form.vars['directory'].set('C:/nowhere')
-    assert form._fields['directory']['dot'].cget('text') == ''
-
-
-def test_search_filters_across_groups_and_includes_expert(form):
-    assert not _visible(form, 'fix_atmospheric_dispersion')  # expert, hidden by default
-    form.search_var.set('atmospheric dispersion')
-    assert form._advanced_shown
-    assert _visible(form, 'fix_atmospheric_dispersion')
-    assert not _visible(form, 'banding_removal')
-    shown = [g for g, lbl in form._nav_labels.items() if lbl.winfo_manager()]
-    assert shown and all(form._nav_labels[g].cget('text').endswith(')') for g in shown)
-
-    form.search_var.set('zzqx no such setting')
-    assert form._current_group is None
-    assert form._no_match.winfo_manager() == 'pack'
-
-    form.search_var.set('')
-    assert not _visible(form, 'fix_atmospheric_dispersion')
-    assert _visible(form, 'banding_removal')
-    assert form._no_match.winfo_manager() == ''
-
-
-# ── target cards and run mode ──────────────────────────────────────────
-
-def _argv(form):
-    from src.desktop_control import build_argv_from_form
-    return build_argv_from_form(form.read_form())
-
-
-def test_target_cards_set_target_type_or_comet_mode(form):
-    assert form.goal.selected_target() == 'auto' and _argv(form) == []
-    form.goal.pick_target('galaxy')
-    assert _argv(form) == ['--target-type', 'galaxy']
-    form.goal.pick_target('comet')
-    assert _argv(form) == ['--comet-mode']
-    form.goal.pick_target('auto')
-    assert _argv(form) == []
-
-
-def test_run_mode_sets_the_preset(form):
-    assert form.goal.selected_mode() == 'full'
-    form.goal.pick_mode('quick')
-    assert _argv(form) == ['--preset', 'quick']
-    form.goal.pick_mode('full')
-    assert _argv(form) == []
-
-
-def test_cards_follow_the_fields_set_elsewhere(form):
-    form.vars['target_type'].set('globular_cluster')
-    assert form.goal.selected_target() == 'cluster'
-    form.vars['target_type'].set('planetary_nebula')  # no card for it
-    assert form.goal.selected_target() is None
-    form.vars['preset'].set('narrowband')
-    assert form.goal.selected_mode() is None
-
-
-def test_card_picks_are_not_counted_as_changed_settings(form):
-    form.goal.pick_target('nebula')
-    form.goal.pick_mode('quick')
-    assert 'changed' not in form._toggle_btn.cget('text')
-    assert form.changed_settings() == []
-
-
-def test_preset_is_not_on_the_main_form(form):
-    assert form._fields['preset']['group'] is not None
-
-
-def test_suggestion_badges_the_inferred_card(form):
-    form.goal.set_suggestion('reflection_nebula', 'M78')
-    assert form.goal.cards['nebula'].badge.cget('text') == 'SUGGESTED'
-    assert 'M78' in form.goal.cards['auto'].text.cget('text')
-    form.goal.pick_target('nebula')  # chosen: no badge needed
-    assert form.goal.cards['nebula'].badge.cget('text') == ''
-
-
-def test_example_images_exist_and_follow_the_suggestion(form):
-    from src.desktop_app import _EXAMPLES_DIR, _TARGET_CARDS
+def test_example_images_exist():
+    from src.desktop_common import _EXAMPLES_DIR, _TARGET_CARDS
     for card in _TARGET_CARDS:
         if card[5]:
             assert (_EXAMPLES_DIR / card[5]).is_file()
-    assert form.goal.example() == (None, '')  # auto, nothing suggested
-    form.goal.set_suggestion('galaxy', None)
-    path, caption = form.goal.example()
-    assert path.name == 'galaxy.jpg' and caption
-
-
-def test_describe_run(form, tmp_path):
-    session = tmp_path / 'M51'
-    session.mkdir()
-    form.vars['directory'].set(str(session))
-    form.goal.pick_target('galaxy')
-    form.goal.pick_mode('quick')
-    form.vars['trail_reject'].set(True)
-    rows = dict(form.describe_run())
-    assert rows['Target'] == 'Galaxy (your choice)'
-    assert rows['Mode'].startswith('Quick look')
-    assert rows['Changed'] == 'Trail rejection'
-    assert rows['Output'].startswith(str(tmp_path / 'M51_stacked.fits'))
-    form.vars['auto'].set(False)
-    assert dict(form.describe_run())['Target'].startswith('Auto advisor off')
 
 
 def test_hidden_aliases_do_not_replace_the_visible_option():
@@ -213,43 +76,3 @@ def test_hidden_aliases_do_not_replace_the_visible_option():
     assert argv == ['--full-field', '0.7']
     from src.cli import parse_args
     assert parse_args(['-d', '.'] + argv).full_field == 0.7
-
-
-def test_only_changed_lists_just_the_changed_settings(form, tk_root):
-    import tkinter as tk
-
-    from src import desktop_app as da
-    dest = next(d for d, f in form._fields.items()
-                if f['group'] is not None and d not in da._PICKER_DESTS
-                and d not in da._NO_CHANGE_MARK and isinstance(form.vars[d], tk.BooleanVar))
-    form.vars[dest].set(not form.vars[dest].get())
-    form.changed_only_var.set(True)
-    form._on_changed_only()
-    tk_root.update_idletasks()
-    shown = [d for d, f in form._fields.items() if f['group'] is not None and _visible(form, d)]
-    assert shown == [dest]
-
-
-def test_saved_settings_round_trip_and_leave_the_folders_alone(form, tk_root, tmp_path, monkeypatch):
-    import tkinter as tk
-
-    from src import desktop_app as da
-    monkeypatch.setattr('src.i18n._settings_path', lambda: tmp_path / 'settings.json')
-    dest = next(d for d, f in form._fields.items()
-                if f['group'] is not None and d not in da._PICKER_DESTS
-                and d not in da._NO_CHANGE_MARK and d not in form._path_dests
-                and isinstance(form.vars[d], tk.BooleanVar))
-    form.vars['directory'].set(str(tmp_path))
-    form.vars[dest].set(not form.vars[dest].get())
-    assert dest in form.preset_state() and 'directory' not in form.preset_state()
-    assert form.save_preset('night one')
-    form.vars[dest].set(form._initial[dest])               # back to the default
-    form.vars['directory'].set('elsewhere')
-    form.preset_var.set('night one')
-    form._load_preset()
-    assert form.vars[dest].get() != form._initial[dest]
-    assert form.vars['directory'].get() == 'elsewhere'     # the session's folder is not part of it
-    form.apply_preset({})                                  # an empty preset is "all defaults"
-    assert form.vars[dest].get() == form._initial[dest]
-    form._delete_preset()
-    assert 'night one' not in form._presets()

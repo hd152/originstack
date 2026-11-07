@@ -7,7 +7,7 @@ user32.dll's MessageBoxW is already on every Windows install and does the
 same job in one call -- same "small ctypes wrapper over dependency weight"
 choice src/notify.py already made for OS notifications.
 
-On Windows these are native MessageBox calls. Elsewhere they use tkinter's own message boxes (the desktop app already has Tk loaded there), and only fall back to a no-op if Tk cannot show one.
+On Windows these are native MessageBox calls. Elsewhere they use tkinter's own message boxes (imported on demand; the Qt window does not load Tk), and only fall back to a no-op if Tk cannot show one.
 """
 from __future__ import annotations
 

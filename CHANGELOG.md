@@ -6,12 +6,33 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+### Changed
+- The desktop app is now a Qt (PySide6) window. Same pipeline, same settings and the same "Setup, run, preview" flow, with a smoother image viewer (zoom about the pointer, pan, before/after wipe) and the tools under the picture in tabs. The old tkinter window is gone (no `--tk`); without PySide6 the launcher shows an error dialog. The taskbar button shows the run's progress on Windows (yellow while the frame review waits, red after a failure) and flashes when a run finishes or needs you while the window is in the background.
+
+### Added
+- **Stretch and levels** (desktop app, after a run): a live editor for the preview stretch. Choose the stretch and colour mode, move strength, symmetry point, highlight protection, black point and white point with sliders, or drag the black and white markers on the histogram of the linear stack (in sky sigmas, with the stretch's tone curve drawn over it). The picture follows within about 0.4 s on a 6 Mpx stack; *Apply and save* renders at full size and rewrites the JPEG and PNG exports. Controls a stretch does not read are greyed out. *Auto-lift faint nebula* shows what the frame-filling-nebula rule chose and, switched off, hands strength and symmetry point over unchanged.
+- Post-processing steps: *Update as I tick* can be turned off to change several steps and press *Apply* once. A Phase 4 re-run keeps the stretch you set.
+- `render_preview_float` / `render_preview_rgb_float` take `white_pct` (the percentile that becomes white, default 99.5 as before), `nebula_auto` and `pixel_scale`.
+
+- Desktop app polish:
+  - Light and dark themes (View > Theme: follow the system, dark, light; applies at the next start). Every text colour now clears WCAG AA (the faint hint text was 2.4:1). Dropdown arrows, check marks, tab bar, focus outlines and sliders are styled.
+  - Menu bar (File: choose folder, recent folders; View: tools, maximise the picture, histogram, theme; Help: keyboard shortcuts, report a problem, about). Window size, splitters, the open tool tab and the folded target cards are remembered between launches.
+  - The tools under the picture collapse to their tab bar (Ctrl+T) or hide entirely to maximise the picture (Ctrl+M). The target cards fold to one line.
+  - Stretch editor: double-click a slider or its label to go back to the run's value (a reset mark shows while it differs), undo and redo (Ctrl+Z / Ctrl+Y), saved stretches by name, a symmetry-point marker and value labels on the histogram, a read-out of the level under the pointer, a Log/Linear histogram toggle, and a smaller render while a slider or marker is held (full size on release). Hold **B** over the picture to see the stretch the run used.
+  - Picture: a pixel inspector (I), a minimap while zoomed in, pinch zoom, a wipe line that can be dragged on the picture, a "Without stars" switch next to Compare, and a hint on the empty picture.
+  - After a run, the summary lists the time spent in each phase; on macOS and Linux a tray message announces a finished run when the window is not in front (Windows already had one).
+
+- **Frame-quality graph** (desktop app, Frames tab): one measure per frame (quality score, star width, signal to noise, stars found) in capture order, so a bad stretch of the night shows at once. Hover for the numbers and the rejection reason, click a frame to look at it, drag a box to pick several (Shift adds), then *Exclude picked*. Tick **Review frames before stacking** and the run pauses after the quality analysis, with the graph and a *Continue stacking* button; it continues by itself after 5 seconds unless you touch the graph, pick a frame or press *Stay paused*: frames you leave out are dropped before registration, nothing is recomputed. After a run, *Stack again without them* starts a new run with those frames excluded.
+- `--exclude-frames NAMES`: leave named light frames (by file name, comma separated) out of a stack. The desktop app fills it from the graph; it is part of the checkpoint fingerprint like any Phase 1 setting.
+- **True 1:1 viewing** (desktop app): the preview JPEG is capped at 1024 px, so zooming used to magnify a thumbnail. The picture is now measured in real image pixels: 100% means one screen pixel per image pixel, and once you zoom past the pixels shown a full-size stretch of the final image loads in the background (over 60 Mpx a point-sampled reduction) and replaces it without moving the view. The pixel inspector shows the real position and the linear value of the data (and sigmas above the sky), not only the displayed colour. The app keeps previews of up to 300 frames (was 32) so frames picked on the graph have a picture.
+
 ### Fixed
 - **A session with a mixed set of darks came out with a huge sky offset, a red cast and coloured mottling.** One real Origin session (221 frames, the largest of nine, so the reference of a hierarchical merge) had a 1 s dark whose bias pedestal was already removed (median 16 ADU against a bias of 4,989), 10 s and 15 s darks, and 20 s lights. Three things combined: the dark choice ranked temperature above exposure and picked the 1 s dark (scaled x20); under `--auto` the dark temperature model (opt-in, but switched on by `--auto` with three or more dark temperatures) was fitted to all of them as if they were one exposure and evaluated 4-6 C outside the darks' temperatures (a master dark of 0 ADU, or 18,000 ADU once the 1 s dark was removed); and calibration's `+ scale * bias` term assumes the dark holds the bias, so a dark without it added `scale x bias` (+100,000 ADU) to every pixel. White balance turned that into R/G 1.65 sky and the flat's 0.75% error into coloured blotches, and the merge copied it from the reference session into the final stack.
   - The temperature model is fitted to darks of **one exposure** (the group nearest the lights'), refuses to be evaluated more than 2 C outside the fitted temperatures, refuses a dark whose level is far from the darks it was fitted to, and the master dark's exposure comes from that group, not from the first dark in the list.
   - Dark selection no longer picks a dark that must be scaled up more than 2x when others are close.
   - A master dark without the bias pedestal gets the bias added ("treated as already bias-subtracted").
   - A dark that would remove, or add, more than a typical light holds is dropped with a warning instead of producing an all-zero or hundred-thousand-ADU stack.
+- Desktop app: the status line could stay on "Running..." after a run finished when the run thread was still winding down as the finished state arrived.
 
 ## [2.22.2] - 2026-11-05
 

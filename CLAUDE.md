@@ -53,6 +53,12 @@ python tools/upload_zenodo.py MANIFEST.json                 # private drafts; --
 ```
 Releases, the sample-set procedure and the known limits: [dev-notes/maintenance.md](dev-notes/maintenance.md).
 
+### Desktop app
+```bash
+python desktop_app.py          # the Qt window (PySide6; requirements.txt)
+QT_QPA_PLATFORM=offscreen pytest -q tests/test_qt_app.py tests/test_stretch_editor.py
+```
+
 ### Run the stacker
 ```bash
 python originstack.py -d lights/ -o stacked.fits
@@ -167,7 +173,10 @@ files from different sessions have landed in the wrong PR before). So:
 | `pipeline.py` | `stack_target` (wires the phases), `postprocess_from_stack` (`--from-stack`), `save_final_preview` (writes a run's preview JPEG and keeps its source for the desktop re-stretch) |
 | `cli.py` | `process_directory`, `parse_args`, `main`, `_build_masters`; removed flags are hidden `_RemovedFlag` actions |
 | `health_check.py` | `run_health_check` |
-| `ui_events.py` / `desktop_control.py` / `desktop_app.py` / `native_dialog.py` / `notify.py` | Desktop app: event sink polled by tkinter (`remember_final_preview`/`restretch`: pick another stretch for the finished run's JPEG), form-from-argparse + `RunManager` (cooperative cancel), the tkinter window, error dialogs, balloon notifications |
+| `ui_events.py` / `desktop_control.py` / `desktop_app.py` / `native_dialog.py` / `notify.py` | Desktop app: event sink polled by the window's timer (`remember_final_preview`/`restretch`: pick another stretch, with the stretch editor's settings, for the finished run's JPEG; `live_stretch`/`stretch_state`/`reset_stretch`: the live editor), form-from-argparse + `RunManager` (cooperative cancel), the tkinter window, error dialogs, balloon notifications |
+| `qt_app/` | The desktop window (PySide6), launched by `desktop_app.py` (the old tkinter window is gone). `taskbar.py` draws the run's progress on the Windows taskbar button (ctypes `ITaskbarList3`; Qt 6 has no `QWinTaskbarButton`). `form_model.py` (all Setup state, no widgets: values, changed-from-default `read_form`, presets, folder scan, "This run"), `setup_form.py` (cards, fields, searchable Additional options), `viewer.py` (`QGraphicsView` zoom/pan/wipe + histogram), `stretch_panel.py` + `levels.py` (stretch editor: sliders and a draggable histogram), `post_panel.py` (Phase 4 step boxes, starless view, before/after of one step), `main_window.py` (layout, poll timer over `UIEvents.snapshot()`, header, update check), `frame_graph.py` (per-frame quality graph, Exclude/Include, review banner), `levels.py` (histogram, tone curve, black/symmetry/white markers), `window_state.py` (remembered layout, recent folders), `help_dialog.py` (the one shortcuts list), `theme.py` (dark/light palettes, WCAG-checked). Worker threads report through Qt signals, never by touching widgets. Detail: [qt-ui](dev-notes/qt-ui.md) |
+| `desktop_common.py` / `desktop_startup.py` | Toolkit-free pieces both windows use: field labels, target cards, run modes, frame-count text, step labels; log folder, `_fatal`, `_run_headless`, `_shutdown_and_exit` |
+| `stretch_editor.py` | The stretch editor's numbers, plain numpy: which controls each stretch reads (`controls_for`), ranges, histogram of the linear stack in sky sigmas (`asinh` axis), tone curve read from the rendering, black/white marker <-> setting conversions, `subsample` |
 | `i18n.py` | Desktop-app translations: `_()`/`N_()`, catalogs in `src/locales/<code>.json` keyed by the English text, language from `$ORIGINSTACK_LANG` / the saved menu choice / the OS |
 
 ### Four-phase pipeline
@@ -226,11 +235,21 @@ files from different sessions have landed in the wrong PR before). So:
 - Every desktop-app failure path goes through `_fatal()` (windowed exe has no console). Logging uses `logging.getLogger("originstack")` (OS001); optional imports in `src/` are `try/except`-guarded (OS002); library code uses `safe_print` (OS003).
 - `save_effective_config` writes strings through `_toml_str` (Windows paths).
 
+**Desktop app (Qt)**
+- One value per `dest` lives in `qt_app.form_model.FormModel`; widgets only mirror it. `read_form` submits a dest only when it differs from its default (everything submitted becomes "explicit" and `--auto` stops tuning it). A dest two flags share takes the field of its last action.
+- Single-letter shortcuts (F, 1, C) are scoped to the picture widget; a window-wide one swallows typing in the Setup fields.
+- Background work (re-run Phase 4, live stretch, apply, update download) emits Qt signals from a `threading.Thread`; only the GUI thread touches widgets. Only the newest live-stretch request is shown; a Phase 4 re-run, `restretch` and the live editor share `fs['kw']`, so what is on screen is what is saved.
+- The live stretch renders a point-sampled reduction (`stretch_editor.subsample`), never an average: the stretch derives its black and white points from the noise sigma and brightest percentiles, and averaging shrinks both. The reduction's area ratio goes in as `pixel_scale` (a context variable in `io_fits`) because the roll-off and star-core rules count pixels (`PREVIEW_ROLLOFF_MIN_PIXELS`, `PREVIEW_CORE_FEATHER_MIN_PIXELS`): without it a compact bright nebula (M57-like) rendered darker than the full-size result (mean error 5x larger). `tests/test_stretch_editor.py` keeps the sampled render equal to the full render at the same pixels.
+- `ghs_b` / `ghs_sp` do nothing on a frame-filling bright nebula while `nebula_auto` is on (`_extended_nebula_ghs` raises b to what lifts the faint wings and sets SP to 0, never weaker than given); the editor's *Auto-lift* switch is what makes them live. The white point never sits closer than `PREVIEW_WHITE_MIN_SIGMA` (50) sky sigmas to the sky, so `white_pct` also does nothing on an empty field.
+- Frames left out of a stack: `--exclude-frames` (file names, applied at discovery, in the Phase 1 group so the fingerprint sees it) or, in the desktop app, the review pause: `args._review_hook` runs right after `quality_gate` and returns names to drop (`frame_processor.apply_frame_review`). A QWidget attribute must not be called `metric`, `size`, `width` etc.: it shadows a Qt method (`FrameGraph.measure`).
+- The viewer measures in real-image pixels (`ImageView.set_image(img, logical_size)`); the 1024 px preview JPEG and the 1400 px live render are reduced copies, and `UIEvents.full_view()` supplies the full-size one when zoomed in (`needs_detail`). New code that draws or reads pixels must use scene (real) coordinates, not the shown picture's.
+- Qt tests run on the offscreen platform (`QT_QPA_PLATFORM=offscreen`, set in the test file; on Windows add `QT_QPA_FONTDIR=C:/Windows/Fonts` to see text in `grab()` screenshots). CI installs `libegl1 libgl1 libxkbcommon0 libdbus-1-3 libfontconfig1` for it.
+
 **Translations (desktop app and website)**
 - Every user-visible string in `desktop_app.py` goes through `_()` (or `N_()` in a module-level table, translated where shown). Keys stay English: never translate a value that is submitted, compared or used as a dict key (group titles, dests, choices). The log, progress text and the CLI stay English on purpose.
 - The Setup form translates at display time: group titles, field labels, summaries and full help are looked up by their English text, so changing an option's help in `cli.py` makes its translations stale. `python tools/i18n_strings.py` shows coverage per language, `--missing <code>` lists what needs translating; `python tools/check_translations.py` must pass (placeholders and HTML tags kept). Missing text falls back to English.
 - The English pages in `docs/` are the website source. After editing `index.html`, `stack-celestron-origin.html` or `privacy.html`, run `python tools/build_site_i18n.py` to regenerate `docs/<lang>/`, the switcher, `hreflang` alternates and the sitemap (a test fails when they are stale). New or changed paragraphs need `i18n/site/<code>.json` entries (`--missing <code>`), or they stay English on the translated pages. Never edit `docs/<lang>/` by hand.
-- Translations were machine-drafted (2026-10) and not reviewed by native speakers.
+- Translations were machine-drafted (2026-10; the stretch editor's strings 2026-11) and not reviewed by native speakers.
 
 **Domain conventions worth knowing**
 - A single-file calibration master (Origin ships one library flat) is a pre-averaged master, not one noisy frame: `cli._flat_smooth_sigma` blurs it `Config.FLAT_SINGLE_MASTER_SIGMA` (4 px), the n-frame rule (`15 // sqrt(n)`) only from n = 2. The 15 px it gave at n = 1 erased the flat's real pixel pattern.

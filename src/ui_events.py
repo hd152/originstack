@@ -23,8 +23,8 @@ from collections import OrderedDict
 from typing import Any, Dict, Iterable, Optional
 
 _MAX_LOG_LINES = 500
-_MAX_FRAME_ROWS = 60
-_MAX_FRAME_THUMBS = 32     # per-frame preview ring (the table lists the last 20 frames)
+_MAX_FRAME_ROWS = 1500        # the frame graph plots every frame of a session
+_MAX_FRAME_THUMBS = 300    # per-frame preview ring (the frame graph picks frames from the whole session)
 _MAX_NAMED = 16            # retained milestone previews
 
 
@@ -123,6 +123,7 @@ class UIEvents:
             'log': [],
             'frames': [],              # recent per-frame metric rows
             'frame_report': [],        # --frame-report: kept/rejected verdict per light
+            'review': {'waiting': False, 'frames': []},   # the run is paused for the user's frame review
             'summary': None,
             'done': False,
             'run_status': 'idle',      # 'idle' | 'running' | 'ok' | 'error'
@@ -220,6 +221,21 @@ class UIEvents:
             if len(rows) > _MAX_FRAME_ROWS:
                 del rows[:len(rows) - _MAX_FRAME_ROWS]
             self._bump()
+
+    def review_request(self, rows: list) -> None:
+        """The run is waiting for the user to look at the frames (``RunManager._review_hook``).
+        ``rows``: one dict per light (name, score, snr, stars, fwhm, ok, reason)."""
+        if not self.active:
+            return
+        with self._lock:
+            self._state['review'] = {'waiting': True, 'frames': [dict(r) for r in rows]}
+            self._bump()
+
+    def review_done(self) -> None:
+        with self._lock:
+            if self._state.get('review'):
+                self._state['review'] = {'waiting': False, 'frames': []}
+                self._bump()
 
     def frame_report(self, rows: list) -> None:
         """Publish the per-frame kept/rejected table (``src/frame_report.py``)."""
@@ -320,7 +336,7 @@ class UIEvents:
         from src.io_fits import preview_exports
         with self._lock:
             self._final_src = {'rgb': rgb, 'starless': starless,
-                               'path': os.path.abspath(path), 'kw': kw,
+                               'path': os.path.abspath(path), 'kw': kw, 'kw0': dict(kw),
                                'exports': preview_exports(args) if args is not None else ()}
             self._bump()
 
@@ -382,10 +398,16 @@ class UIEvents:
         with self._lock:
             if self._final_src is not fs:
                 raise RuntimeError('a new run started')
+            from src.stretch_editor import STRETCH_KEYS
             kw = self._stretch_kw(args)
-            kw['stretch'], kw['color'] = fs['kw']['stretch'], fs['kw']['color']
+            # what the user set in the stretch editor (and the stretch and colour picked) stays;
+            # the noise scale and anchor come from the new run
+            kw.update({k: fs['kw'][k] for k in STRETCH_KEYS if k in fs['kw']})
             fs.update(rgb=result, starless=starless, kw=kw)
             fs.pop('starless_img', None)
+            fs.pop('_edit', None)
+            fs.pop('_full', None)
+            fs.pop('_sky', None)
         return self.restretch(kw['stretch'], kw['color'])
 
     def compare_postprocess_step(self, step_id: str, max_dim: int = 1600, cancel=None):
@@ -488,20 +510,21 @@ class UIEvents:
                 self._set_named_slot('final', caption, data)
         return data
 
-    def restretch(self, stretch: str, color: str) -> bytes:
-        """Re-render the remembered final preview with ``stretch``/``color``,
-        overwrite its JPEG (and its ``--export png``/``png16`` copies) and update the
-        'final' viewer slot. Returns the
-        viewer-sized JPEG bytes. Runs the full-resolution stretch, so call it
-        off the GUI thread. Raises ``RuntimeError`` when there is nothing to
-        re-stretch or the stretch backend is unavailable; ``OSError`` when the
-        file cannot be written."""
+    def restretch(self, stretch: str, color: str, params: Optional[dict] = None) -> bytes:
+        """Re-render the remembered final preview with ``stretch``/``color`` (and the stretch
+        editor's ``params``: ghs_b, ghs_sp, ghs_hp, black_sigma, white_pct), overwrite its
+        JPEG (and its ``--export png``/``png16`` copies) and update the 'final' viewer slot.
+        Returns the viewer-sized JPEG bytes. Runs the full-resolution stretch, so call it
+        off the GUI thread. Raises ``RuntimeError`` when there is nothing to re-stretch or
+        the stretch backend is unavailable; ``OSError`` when the file cannot be written."""
         from src.io_fits import preview_jpeg_from_uint8, render_preview_rgb_float, to_uint8, write_final_images
+        from src.stretch_editor import kw_for_render
         with self._lock:
             src = self._final_src
         if src is None:
             raise RuntimeError('no finished preview to re-stretch')
-        kw = dict(src['kw'], stretch=stretch, color=color)
+        kw = kw_for_render(src['kw'], params, stretch, color) if params else \
+            dict(src['kw'], stretch=stretch, color=color)
         img = render_preview_rgb_float(src['rgb'], starless=src['starless'], **kw)
         if img is None:
             raise RuntimeError(f'the {stretch} stretch is unavailable')
@@ -514,6 +537,178 @@ class UIEvents:
                 caption = self._named.get('final', {}).get('caption', 'Final (post-processed)')
                 self._set_named_slot('final', caption, data)
         return data
+
+    # ── interactive stretch editor ─────────────────────────────────────
+
+    def stretch_state(self) -> Optional[dict]:
+        """The stretch settings the remembered final preview has now (stretch, color and the
+        editor's ghs_b, ghs_sp, ghs_hp, black_sigma, white_pct), or None without one. The
+        settings a run started with are kept apart (``reset_stretch``)."""
+        from src.stretch_editor import PARAM_DEFAULTS, STRETCH_KEYS
+        with self._lock:
+            fs = self._final_src
+            if fs is None:
+                return None
+            return {**PARAM_DEFAULTS, **{k: fs['kw'][k] for k in STRETCH_KEYS if k in fs['kw']}}
+
+    def reset_stretch(self) -> Optional[dict]:
+        """Put the stretch settings back to what the run used; returns them."""
+        from src.stretch_editor import STRETCH_KEYS
+        with self._lock:
+            fs = self._final_src
+            if fs is None:
+                return None
+            for k in STRETCH_KEYS:
+                if k in fs['kw0']:
+                    fs['kw'][k] = fs['kw0'][k]
+                else:
+                    fs['kw'].pop(k, None)
+        return self.stretch_state()
+
+    def live_stretch(self, params: Optional[dict] = None, stretch: Optional[str] = None,
+                     color: Optional[str] = None, max_dim: int = 1400,
+                     persist: bool = True) -> dict:
+        """A quick render of the final image with the editor's settings, nothing written.
+
+        The image is a point-sampled reduction (``stretch_editor.subsample``) so the stretch
+        sees the full image's noise and percentiles. The settings are kept as the preview's
+        current ones (a later Phase 4 re-run or ``restretch`` uses them) unless ``persist`` is
+        false (the editor's "show the stretch the run used" peek). Returns ``{'jpeg':
+        viewer JPEG bytes, 'hist': linear histogram, 'curve': (axis, output), 'markers':
+        {'black': axis position, 'white': axis position}, 'kw': settings used, 'effective':
+        the strength and symmetry point actually used and whether the nebula lift changed
+        them, 'lum', 'med', 'sigma'}``. ``RuntimeError`` when there is no finished preview or the stretch is
+        unavailable. Call it off the GUI thread."""
+        from src import stretch_editor as se
+        from src.io_fits import (
+            luminance,
+            preview_jpeg_from_uint8,
+            render_preview_rgb_float,
+            to_uint8,
+        )
+        with self._lock:
+            fs = self._final_src
+            if fs is None:
+                raise RuntimeError('no finished preview to adjust')
+            rgb, starless = fs['rgb'], fs['starless']
+            kw = se.kw_for_render(fs['kw'], params, stretch, color)
+            cache = fs.get('_edit', {}).get(max_dim)
+        if cache is None or cache['rgb'] is not rgb:
+            small = se.subsample(rgb, max_dim)
+            sl = starless
+            if sl is not None:
+                sl = se.subsample(sl, max_dim)
+                if sl.shape != small.shape:
+                    sl = None
+            lum = luminance(small)
+            med, sigma = se.sky_of(lum, kw.get('noise_scale', 1.0))
+            cache = {'rgb': rgb, 'small': small, 'starless': sl, 'lum': lum, 'med': med,
+                     'sigma': sigma, 'hist': se.linear_histogram(small, lum, med, sigma),
+                     'scale': (small.shape[0] * small.shape[1]) / (rgb.shape[0] * rgb.shape[1])}
+            with self._lock:
+                if self._final_src is fs and fs['rgb'] is rgb:
+                    caches = fs.setdefault('_edit', {})
+                    if len(caches) >= 3:                     # a few sizes (drag, rest, ...)
+                        caches.pop(next(iter(caches)))
+                    caches[max_dim] = cache
+        info: dict = {}
+        img = render_preview_rgb_float(cache['small'], starless=cache['starless'], info=info,
+                                       pixel_scale=cache['scale'], **kw)
+        if img is None:
+            raise RuntimeError(f"the {kw['stretch']} stretch is unavailable")
+        out_lum = luminance(img)
+        med, sigma, lum = cache['med'], cache['sigma'], cache['lum']
+        black = se.marker_axis(med + kw['black_sigma'] * sigma, med, sigma)
+        white = se.marker_axis(se.white_value(lum, med, sigma, kw['white_pct'], kw['black_sigma']),
+                               med, sigma)
+        if persist:
+            with self._lock:
+                if self._final_src is fs and fs['rgb'] is rgb:
+                    fs['kw'] = {**fs['kw'], **{k: kw[k] for k in se.STRETCH_KEYS if k in kw}}
+        return {'jpeg': preview_jpeg_from_uint8(to_uint8(img), max_dim=max_dim),
+                'hist': cache['hist'], 'curve': se.tone_curve(lum, out_lum, med, sigma),
+                'markers': {'black': black, 'white': white}, 'kw': kw, 'effective': info,
+                'lum': lum, 'med': med, 'sigma': sigma}
+
+    # ── full-size view and linear sampling (1:1 zoom, the pixel inspector) ──
+
+    def final_size(self) -> Optional[tuple]:
+        """(width, height) of the remembered final image in pixels, or None."""
+        with self._lock:
+            fs = self._final_src
+            if fs is None:
+                return None
+            h, w = fs['rgb'].shape[:2]
+        return (int(w), int(h))
+
+    def full_view(self, max_pixels: int = 60_000_000) -> dict:
+        """The final image stretched with its current settings at full size, for zooming to 1:1.
+
+        Returns ``{'rgb8': uint8 (h, w, 3), 'size': (width, height) of the real image,
+        'key': what it was rendered from}``. Over ``max_pixels`` it is a point-sampled
+        reduction (``size`` still says what the pixels stand for; the viewer scales it). The
+        newest result is kept, so asking again for the same settings is free; a different
+        stretch renders again (seconds on a big stack), so call it off the GUI thread.
+        ``RuntimeError`` with no finished preview or when the stretch is unavailable."""
+        import math
+
+        from src import stretch_editor as se
+        from src.io_fits import render_preview_rgb_float, to_uint8
+        with self._lock:
+            fs = self._final_src
+            if fs is None:
+                raise RuntimeError('no finished preview to show at full size')
+            rgb, starless = fs['rgb'], fs['starless']
+            kw = se.kw_for_render(fs['kw'])
+            cached = fs.get('_full')
+        key = (id(rgb), tuple(sorted((k, repr(v)) for k, v in kw.items())), int(max_pixels))
+        if cached is not None and cached['key'] == key:
+            return cached
+        h, w = rgb.shape[:2]
+        src, sl = rgb, starless
+        if h * w > max_pixels:
+            step = math.ceil(math.sqrt(h * w / max_pixels))
+            max_dim = max(h, w) // step
+            src = se.subsample(rgb, max_dim)
+            sl = se.subsample(starless, max_dim) if starless is not None else None
+            if sl is not None and sl.shape != src.shape:
+                sl = None
+        img = render_preview_rgb_float(src, starless=sl, pixel_scale=(src.shape[0] * src.shape[1]) / (h * w),
+                                       **kw)
+        if img is None:
+            raise RuntimeError(f"the {kw['stretch']} stretch is unavailable")
+        out = {'key': key, 'rgb8': to_uint8(img), 'size': (int(w), int(h))}
+        with self._lock:
+            if self._final_src is fs and fs['rgb'] is rgb:
+                fs['_full'] = out
+        return out
+
+    def sample_linear(self, x: int, y: int) -> Optional[dict]:
+        """The linear-stack value at pixel (x, y) of the final image: ``{'rgb': (r, g, b),
+        'sigma': levels above the sky in sky sigmas}``, or None outside the image / without one.
+        Cheap (one pixel); the sky is measured once on a sample and kept."""
+        from src import stretch_editor as se
+        from src.io_fits import luminance
+        with self._lock:
+            fs = self._final_src
+            if fs is None:
+                return None
+            rgb = fs['rgb']
+            sky = fs.get('_sky')
+        h, w = rgb.shape[:2]
+        if not (0 <= x < w and 0 <= y < h):
+            return None
+        if sky is None or sky[0] is not rgb:
+            small = se.subsample(rgb, 800)
+            med, sigma = se.sky_of(luminance(small))
+            sky = (rgb, med, sigma)
+            with self._lock:
+                if self._final_src is fs and fs['rgb'] is rgb:
+                    fs['_sky'] = sky
+        px = rgb[y, x].astype(float)
+        lum = float(luminance(px.reshape(1, 1, 3).astype('float32'))[0, 0])
+        return {'rgb': (float(px[0]), float(px[1]), float(px[2])),
+                'sigma': (lum - sky[1]) / (sky[2] if sky[2] > 0 else 1.0)}
 
     def summary(self, **fields: Any) -> None:
         if not self.active:
@@ -536,6 +731,7 @@ class UIEvents:
             self._state['log'] = []
             self._state['frames'] = []
             self._state['frame_report'] = []
+            self._state['review'] = {'waiting': False, 'frames': []}
             self._state['summary'] = None
             self._state['done'] = False
             self._state['phase'] = 0
@@ -566,6 +762,10 @@ class UIEvents:
         if not self.active:
             return
         with self._lock:
+            now = time.time()
+            last = self._state['phases'].get(self._state['phase'])
+            if last is not None and last['elapsed'] is None:
+                last['elapsed'] = now - last['started']      # the phase the run ended in
             self._state['run_status'] = status
             self._state['run_error'] = error
             self._bump()

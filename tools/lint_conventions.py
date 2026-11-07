@@ -50,7 +50,7 @@ OPTIONAL_PACKAGES = {
 }
 
 # src/ modules where bare print() is legitimate (they define/own the console path).
-PRINT_OK = {"utils.py", "desktop_app.py", "native_dialog.py"}
+PRINT_OK = {"utils.py", "native_dialog.py"}
 
 
 class Finding:

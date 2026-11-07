@@ -44,7 +44,7 @@ running as a worker -- then confirms clean shutdown):
 ## What's bundled vs. not
 
 Bundled: numpy, astropy, scipy, tqdm, Pillow, psutil, rawpy (camera RAW),
-tifffile (TIFF I/O), tkinter (the desktop app's UI toolkit, stdlib),
+tifffile (TIFF I/O), PySide6 (the desktop app's Qt UI; PyInstaller's own hook collects the Qt modules, platform plugin and DLLs), tkinter (stdlib; only `src/native_dialog.py`'s non-Windows message boxes),
 `astro_native` (built from a real `maturin build --release` wheel, not the
 dev-mode `maturin develop` editable install -- see `originstack.spec`'s
 comments for why that distinction matters for PyInstaller), and

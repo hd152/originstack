@@ -307,7 +307,7 @@ Eight built-in presets set a group of parameters at once (any flag you pass stil
 - **Mosaic stitching** (`--mosaic`, or detected from the sessions' pointing) — panels matched to each other in their overlaps (gain + gradient, one global solve), blended, and finished once as one image; no extra dependency
 - **Incremental stacking** — fold previous nights' saved stacks into tonight's run in seconds (`--merge`); output chains into future merges. Stacks from different exposure/ISO are mapped onto one flux scale first and weighted by measured noise, not frame count
 - **Multi-session (hierarchical) runs post-process the combined stack** — the combined output goes through Phase 4 with the reference session's settings, and the reference grid is the session with the most integration time
-- **Desktop app** — a native window (`python desktop_app.py`, or the packaged `OriginStack.exe`): pick the target from picture cards and a run mode, see what the run will do before you start, then follow phase progress, the log, per-frame quality and an interactive preview (zoom/pan, before/after wipe compare) — see [Desktop App](#desktop-app) below
+- **Desktop app** — a native window (`python desktop_app.py`, or the packaged `OriginStack.exe`): pick the target from picture cards and a run mode, see what the run will do before you start, then follow phase progress, the log, per-frame quality and an interactive preview (zoom/pan, before/after wipe compare); once a run is done, tune the result live: stretch sliders and a draggable histogram, Phase 4 steps switched on and off — see [Desktop App](#desktop-app) below
 - **Collection quality sweep** — recursively score every light in a folder tree and rename poor frames to `*.fits.rejected` (`--quality-sweep`, dry-run by default, reversible with `--sweep-undo`)
 - **Checkpointing** — save raw pre-post stack for iterative post-processing (`--keep-checkpoint`); coalesces with `--merge` for fast tuning of merged stacks
 - **Diagnostic snapshots** — FITS snapshots before each post-processing step (`--debug diagnostic`)
@@ -946,7 +946,9 @@ originstack.py                  ← thin backward-compatibility entry point
     ├── frame_discovery.py      ← automatic frame classification
     ├── auto_settings.py        ← heuristic target classifier (--auto)
     ├── plate_solve.py          ← built-in Gaia solver, ASTAP, astrometry.net
-    ├── desktop_app.py          ← the desktop app window (tkinter)
+    ├── qt_app/                 ← the desktop app window (Qt / PySide6)
+    ├── desktop_app.py          ← the desktop launcher (starts `qt_app`)
+    ├── stretch_editor.py       ← the stretch editor's numbers (histogram, tone curve, markers)
     ├── desktop_control.py      ← desktop app: form schema, form → CLI args, run manager
     ├── gpu_context.py          ← CPU/GPU abstraction (numpy ↔ cupy)
     ├── models.py               ← Config, FrameInfo, ProcessingStats

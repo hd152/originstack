@@ -1,5 +1,5 @@
 """The self-update check: src.utils.should_check_for_update (the gate) and its
-wiring into the CLI (src.cli.main) and the desktop app (src.desktop_app.App).
+wiring into the CLI (src.cli.main) and the Qt window (tests/test_qt_app.py).
 
 src.net_query.check_for_update itself (the actual GitHub API call and version
 comparison) is covered by tests/test_net_query.py::TestCheckForUpdate. These tests
@@ -113,58 +113,3 @@ class TestCliWiring:
 
         cli.main()
         assert 'Update available' not in capsys.readouterr().out and 'newer OriginStack' not in capsys.readouterr().out
-
-
-class TestDesktopAppWiring:
-    def test_no_check_started_when_disabled(self, monkeypatch):
-        pytest.importorskip('tkinter')
-        import tkinter as tk
-
-        try:
-            root = tk.Tk()
-        except tk.TclError:
-            pytest.skip('no display available for a real Tk root')
-        try:
-            from src import desktop_app
-            monkeypatch.setattr('src.utils.should_check_for_update', lambda: False)
-            started = []
-            monkeypatch.setattr(threading, 'Thread',
-                                lambda *a, **k: started.append(1) or mock.MagicMock())
-            app = desktop_app.App(root)
-            assert not started
-            assert app.update_label.cget('text') == ''
-        finally:
-            root.destroy()
-
-    def test_label_updates_when_a_newer_version_is_found(self, monkeypatch):
-        pytest.importorskip('tkinter')
-        import tkinter as tk
-
-        try:
-            root = tk.Tk()
-        except tk.TclError:
-            pytest.skip('no display available for a real Tk root')
-        try:
-            from src import desktop_app
-            monkeypatch.setattr('src.utils.should_check_for_update', lambda: True)
-
-            real_thread = threading.Thread
-            started = []
-
-            def track_thread(*args, **kwargs):
-                thread = real_thread(*args, **kwargs)
-                started.append(thread)
-                return thread
-
-            monkeypatch.setattr(threading, 'Thread', track_thread)
-            monkeypatch.setattr('src.net_query.check_for_update',
-                               lambda *a, **k: {'version': '9.9.9', 'url': 'https://example.invalid/new'})
-            app = desktop_app.App(root)
-            started[0].join(timeout=2)
-            assert not started[0].is_alive()
-            assert app.update_label.cget('text') == ''
-            app._poll()
-            assert '9.9.9' in app.update_label.cget('text')
-            assert app._update_url == 'https://example.invalid/new'
-        finally:
-            root.destroy()

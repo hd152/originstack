@@ -141,6 +141,8 @@ python originstack.py combine --mode sho --ha Ha.fits --oiii OIII.fits --sii SII
   <div class="wrap">
     <h2>Frames &amp; calibration (Phase 1)</h2>
     <dl class="opts">
+      <div id="opt-exclude-frames"><dt><code>--exclude-frames</code> <var>NAMES</var></dt>
+        <dd><p>Light frames to leave out of the stack, by file name (comma separated, e.g. light_003.fits,light_017.fits). The desktop app fills this in from its frame-quality graph. Named frames that are not found are ignored.</p></dd></div>
       <div id="opt-master-method"><dt><code>--master-method</code></dt>
         <dd><p>Master bias/dark/flat combine method (default: median). robust_pca: Principal Component Pursuit low-rank + sparse decomposition -- separates the true shared pattern (flat-field vignetting, fixed dark current) from sparse outliers (dust motes that shifted between sessions, transient hot pixels) more explicitly than median&#x27;s per-pixel order statistic. Needs &gt;= 5 frames per calibration type (falls back to median otherwise); loads the full stack into memory and is slower than median/mean.</p>
           <p class="meta">Choices: <code>median</code>, <code>mean</code>, <code>robust_pca</code> &middot; Default: <code>median</code></p></dd></div>

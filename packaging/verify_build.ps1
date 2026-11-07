@@ -1,19 +1,18 @@
 <#
 .SYNOPSIS
     Proves the packaged OriginStack.exe actually works, without needing a
-    human to visually inspect the tkinter window (unreliable on headless CI
+    human to visually inspect the Qt window (unreliable on headless CI
     runners anyway, and unnecessary locally).
 
 .DESCRIPTION
-    The desktop app is a native tkinter window (no local HTTP server as of
-    2026-08 -- it used to be a pywebview-wrapped dashboard). This script
+    The desktop app is a native Qt (PySide6) window, with no local HTTP server. This script
     proves the packaged exe works two ways:
 
     1. A normal launch: polls for a window with the right title to appear
        (proves every bundled import -- astropy/scipy/astro_native/rawpy/
-       tifffile/tkinter -- actually resolved at runtime and the
+       tifffile/PySide6 -- actually resolved at runtime and the
        app didn't crash on startup), then reads the startup log
-       (`desktop_app.py::_log_startup_status`) to confirm astro_native
+       (`desktop_startup.py::_log_startup_status`) to confirm astro_native
        loaded rather than silently falling back to numpy -- shipping that
        fallback's perf profile by accident defeats the point of bundling
        astro_native at all, so this fails hard rather than warning.

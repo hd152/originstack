@@ -50,28 +50,3 @@ def test_app_setting_roundtrip_for_folders(tmp_path, monkeypatch):
     monkeypatch.setattr(i18n, '_settings_path', lambda: tmp_path / 'settings.json')
     dc.save_app_setting('last_directory', str(tmp_path))
     assert dc.load_app_setting('last_directory') == str(tmp_path)
-
-
-def test_setup_form_restore_and_remember(tmp_path, monkeypatch):
-    import pytest
-    tk = pytest.importorskip('tkinter')
-    import src.i18n as i18n
-    monkeypatch.setattr(i18n, '_settings_path', lambda: tmp_path / 'settings.json')
-    try:
-        root = tk.Tk()
-    except tk.TclError:
-        pytest.skip('no display')
-    try:
-        from src.desktop_app import SetupForm
-        form = SetupForm(root)
-        folder = tmp_path / 'lights'
-        folder.mkdir()
-        form.vars['directory'].set(str(folder))
-        form.vars['output'].set(str(tmp_path / 'out' / 'stack.fits'))
-        form._remember_folders()
-        assert dc.load_app_setting('last_output') == str(tmp_path / 'out')
-        form2 = SetupForm(root)
-        form2.restore_folders()
-        assert form2.vars['directory'].get() == str(folder)
-    finally:
-        root.destroy()

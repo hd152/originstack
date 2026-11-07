@@ -34,7 +34,7 @@ datas += [(str(ROOT / 'VERSION'), '.')]
 # feature, so transient_triage_score does not exist and the model could not be
 # used (the app warns and skips scoring). If a build ever enables the feature,
 # add: datas += [(str(ROOT / 'src' / 'data' / 'transient_triage.onnx'), 'src/data')]
-# Example results on the desktop app's target cards (src/desktop_app.py, by path).
+# Example results on the desktop app's target cards (src/desktop_common.py, by path).
 datas += [(str(ROOT / 'src' / 'data' / 'examples'), 'src/data/examples')]
 # Desktop-app translations (src/i18n.py reads src/locales/<code>.json by path).
 datas += [(str(ROOT / 'src' / 'locales'), 'src/locales')]
@@ -47,13 +47,16 @@ datas += [(str(ROOT / 'src' / 'data' / 'nn_deconv.npz'), 'src/data')]
 # --remove-stars-method nn weights (src/star_n2n.py, same U-Net and forward pass).
 datas += [(str(ROOT / 'src' / 'data' / 'nn_starless.npz'), 'src/data')]
 
-# The window icon. The EXE resource below sets the taskbar/Explorer icon, but
-# desktop_app.py also calls root.iconbitmap() with a path relative to its own
-# __file__ -- which resolved to nothing in the bundle, so the window itself
-# silently kept tkinter's default feather.
+# The window icon. The EXE resource below sets the taskbar/Explorer icon, but the Qt window
+# (src/qt_app/main_window.py) loads its own icon by path relative to the repo root, so the
+# file has to be in the bundle too.
 datas += [(str(ROOT / 'packaging' / 'icon.ico'), 'packaging')]
-# Linux/macOS window icon: desktop_app.py sets it from assets/icon.png (.ico is Windows-only).
+# Linux/macOS window icon: the Qt window sets it from assets/icon.png (.ico is Windows-only).
 datas += [(str(ROOT / 'assets' / 'icon.png'), 'assets')]
+
+# Windows shows its error boxes through ctypes MessageBox (src/native_dialog.py), so the Tcl/Tk
+# runtime (~9MB) is dead weight there; Linux and macOS use tkinter's boxes and keep it.
+_EXTRA_EXCLUDES = ['tkinter', '_tkinter'] if sys.platform == 'win32' else []
 
 a = Analysis(
     [str(ROOT / 'desktop_app.py')],
@@ -73,9 +76,9 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[str(ROOT / 'packaging' / 'runtime_hook_stdout.py')],
-    # tkinter is the desktop app's UI toolkit as of 2026-08 (replaced a
-    # pywebview-wrapped local HTTP dashboard) -- no longer excluded. Only
-    # its own test suite is dead weight.
+    # The desktop window is Qt (PySide6; its PyInstaller hook collects the modules and the
+    # platform plugin). tkinter is no longer a UI toolkit here; only src/native_dialog.py's
+    # non-Windows message boxes import it lazily, so it stays collectable.
     #
     # scipy.io: MATLAB/WAV/NetCDF/Harwell-Boeing readers. No scipy.io import
     #   anywhere in src/. Safe to drop: scipy core / scipy.optimize /
@@ -94,8 +97,14 @@ a = Analysis(
     # Both are re-checked by packaging/verify_build.ps1 (a real packaged-exe
     # run) -- if excluding one breaks a lazy import path, that is where it
     # surfaces, not in pytest (dev venv, separate site-packages).
+    # The Qt window imports only QtCore/QtGui/QtWidgets. The PySide6 meta-package also installs
+    # WebEngine, Pdf and the Addons, which would add hundreds of MB if a hook pulled them in.
     excludes=['cupy', 'tkinter.test', 'matplotlib.tests',
-              'scipy.io', 'PIL.AvifImagePlugin'],
+              'scipy.io', 'PIL.AvifImagePlugin',
+              'PySide6.QtWebEngineCore', 'PySide6.QtWebEngineWidgets', 'PySide6.QtWebEngineQuick',
+              'PySide6.QtPdf', 'PySide6.QtPdfWidgets', 'PySide6.QtQml', 'PySide6.QtQuick',
+              'PySide6.QtQuickWidgets', 'PySide6.Qt3DCore', 'PySide6.QtMultimedia',
+              'PySide6.QtCharts', 'PySide6.QtDataVisualization', 'PySide6.QtNetwork'] + _EXTRA_EXCLUDES,
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
     cipher=block_cipher,
@@ -110,6 +119,20 @@ a = Analysis(
 # exclude actually reclaims the disk (~7.5MB). Tokens are matched against
 # the *destination* path, lowercased, forward-slashed.
 _DROP_TOKENS = ('avif',)
+
+# Qt payload the widgets window never loads, collected anyway as dependencies of the DLLs we do
+# need (~45MB unpacked): the software OpenGL fallback, QML/Quick (the window is QtWidgets),
+# the PDF module and its image plugin, Qt's own translations (the app has its own catalogs),
+# QtNetwork, and the image plugins for formats the app never reads. JPEG (preview bytes), PNG
+# (built in) and ICO (window icon) stay. packaging/verify_build.ps1 starts the packaged window,
+# which is where a DLL dropped by mistake shows up.
+_DROP_TOKENS += (
+    'opengl32sw', 'qt6quick', 'qt6qml', 'qt6pdf', 'qt6network', 'pyside6/translations',
+    'imageformats/qgif', 'imageformats/qicns', 'imageformats/qpdf', 'imageformats/qsvg',
+    'imageformats/qtga', 'imageformats/qtiff', 'imageformats/qwbmp', 'imageformats/qwebp',
+)
+if sys.platform == 'win32':
+    _DROP_TOKENS += ('_tcl_data', '_tk_data', 'tcl86t', 'tk86t', '_tkinter')
 def _keep(dest):
     d = dest.replace('\\', '/').lower()
     return not any(tok in d for tok in _DROP_TOKENS)
@@ -179,7 +202,7 @@ exe = EXE(
     upx=False,     # UPX + numpy/scipy .pyd files is a known source of both
                     # AV false positives and occasional load failures.
     console=False,  # windowed -- this is why runtime_hook_stdout.py and
-                     # src/desktop_app.py's _fatal() dialog exist: there is
+                     # src/desktop_startup.py's _fatal() dialog exist: there is
                      # no console for a bare print()/traceback to reach.
     # .ico is the Windows exe resource; Linux has no exe icon, and on macOS the
     # icon belongs to the .app (BUNDLE below), not the inner executable.

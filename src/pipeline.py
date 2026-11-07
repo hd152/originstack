@@ -29,7 +29,12 @@ from src.checkpoint import (
 from src.cleanup import deregister as _cleanup_deregister
 from src.cleanup import register as _cleanup_register
 from src.debayer import autodetect_bayer_orientation, debayer
-from src.frame_processor import execute_frame_processing, quality_gate, reload_accepted_frames
+from src.frame_processor import (
+    apply_frame_review,
+    execute_frame_processing,
+    quality_gate,
+    reload_accepted_frames,
+)
 from src.io_fits import (
     load_fits,
     load_frame,
@@ -1076,6 +1081,10 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                     rejected_reasons, stats)
 
                 final = quality_gate(lights, args, rejected_reasons, stats)
+                # The desktop app can pause here for the user to look at the per-frame
+                # graph and drop frames; nothing has been registered yet.
+                final = apply_frame_review(final, lights, rejected_reasons, stats,
+                                           getattr(args, '_review_hook', None))
                 stats.quality_time = time.time() - phase_start
 
                 if not final:

@@ -50,8 +50,8 @@ $py = "$venvPath\Scripts\python.exe"
 #    rawpy/tifffile for input formats). --transient-triage is NOT in the
 #    packaged app: its native kernel (pure-Rust tract) is behind the crate's
 #    optional `triage` feature, which the build below leaves off (~24 MB
-#    saved); the app warns and skips scoring. The desktop app's own UI (tkinter) is
-#    stdlib -- nothing extra to install for it.
+#    saved); the app warns and skips scoring. The desktop app's own UI is
+#    PySide6, installed from requirements.txt just below.
 & $py -m pip install -r "$Root\requirements.txt"
 & $py -m pip install "psutil>=5.9" "rawpy>=0.19" "tifffile>=2023.1" `
                       "pyinstaller>=6.0" "pyinstaller-hooks-contrib" "maturin>=1.7,<2.0"
