@@ -92,11 +92,31 @@ def _gray_locus_calibration(fluxes: np.ndarray,
     return scales.astype(np.float64)
 
 
+# Channel scales outside this range are clamped (and reported): a white balance that
+# wants more than 2x is not a colour fix but a sign that the stack's channels are
+# on different scales (merge of differently calibrated stacks, a dark pedestal).
+SCALE_LIMITS = (0.5, 2.0)
+
+
+def clamp_scales(wanted, lo: float = SCALE_LIMITS[0], hi: float = SCALE_LIMITS[1]):
+    """``(clamped, note)``: ``wanted`` clipped to [lo, hi]; ``note`` is a sentence naming
+    the clamped channels and the values the fit wanted, or None when none was clamped."""
+    wanted = np.asarray(wanted, dtype=np.float64)
+    clamped = np.clip(wanted, lo, hi)
+    hit = [f"{n} x{w:.3f}" for n, w, c in zip("RGB", wanted, clamped) if w != c]
+    if not hit:
+        return clamped, None
+    return clamped, (f"scales clamped to {lo:g}-{hi:g}: the fit wanted {', '.join(hit)}; "
+                     f"the stack's star colours are far from white (channels on different "
+                     f"scales? check calibration/merge)")
+
+
 def photometric_color_calibrate(img: np.ndarray,
                                   star_positions,
                                   aperture_r: int = 6,
                                   sigma_clip: float = 2.5,
-                                  verbose: bool = False
+                                  verbose: bool = False,
+                                  info: Optional[dict] = None
                                   ) -> Tuple[np.ndarray, Optional[np.ndarray]]:
     """Calibrate image white balance using the stellar gray-locus method.
 
@@ -120,6 +140,8 @@ def photometric_color_calibrate(img: np.ndarray,
         aperture_r:     Aperture radius in pixels for flux integration.
         sigma_clip:     Sigma threshold for gray-locus sigma-clipping.
         verbose:        Print calibration diagnostics.
+        info:           Optional dict; ``info['clamp_note']`` is set when the fit
+                        wanted scales outside ``SCALE_LIMITS`` (see ``clamp_scales``).
 
     Returns:
         (calibrated_image, scales) — corrected float32 image and the
@@ -137,7 +159,9 @@ def photometric_color_calibrate(img: np.ndarray,
         return img.copy(), None
 
     # Clamp corrections to a sensible range (avoid overcorrecting)
-    scales = np.clip(scales, 0.5, 2.0)
+    scales, note = clamp_scales(scales)
+    if info is not None:
+        info['clamp_note'] = note
 
     if verbose:
         print(f"    Photometric calibration scales: "

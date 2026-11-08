@@ -38,6 +38,7 @@ except Exception:
     HAS_ASTROPY_WCS = False
 
 from src import net_query
+from src.photometric_calibration import SCALE_LIMITS, clamp_scales
 from src.photometry_core import _pixel_coords, aperture_photometry_batch
 
 # ---------------------------------------------------------------------------
@@ -141,6 +142,16 @@ def _aperture_flux(img: np.ndarray, px: np.ndarray, py: np.ndarray,
 # ---------------------------------------------------------------------------
 # Scale-factor fitting
 # ---------------------------------------------------------------------------
+
+def _clamp_report(r: float, g: float, b: float) -> Tuple[float, float, float]:
+    """Clamp the fitted scales to ``SCALE_LIMITS``; a clamp is always printed with
+    the values the fit wanted (a bare 0.500 looks like a measurement)."""
+    (r, g, b), note = clamp_scales((r, g, b))
+    if note:
+        from src.utils import safe_print
+        safe_print(f"  [colour cal] {note}")
+    return float(r), float(g), float(b)
+
 
 def _bp_rp_to_bv(bp_rp: np.ndarray) -> np.ndarray:
     """Approximate conversion: Gaia BP-RP → Johnson B-V.
@@ -316,10 +327,7 @@ def fit_channel_scales_spcc(img: np.ndarray, header, catalog,
         scale_g /= mean_scale
         scale_b /= mean_scale
 
-    lo, hi = 0.5, 2.0
-    scale_r = float(np.clip(scale_r, lo, hi))
-    scale_g = float(np.clip(scale_g, lo, hi))
-    scale_b = float(np.clip(scale_b, lo, hi))
+    scale_r, scale_g, scale_b = _clamp_report(scale_r, scale_g, scale_b)
 
     if verbose:
         print(f"  [SPCC] {n} stars used ({n_bb} via blackbody Teff, "
@@ -404,10 +412,7 @@ def fit_channel_scales(img: np.ndarray, header,
         scale_b /= mean_scale
 
     # Clamp to a reasonable range to guard against bad fits
-    lo, hi = 0.5, 2.0
-    scale_r = float(np.clip(scale_r, lo, hi))
-    scale_g = float(np.clip(scale_g, lo, hi))
-    scale_b = float(np.clip(scale_b, lo, hi))
+    scale_r, scale_g, scale_b = _clamp_report(scale_r, scale_g, scale_b)
 
     if verbose:
         n_used = valid.sum()
@@ -578,9 +583,14 @@ def fit_channel_scales_solar(img: np.ndarray, header, verbose: bool = False,
             print(f"  [colour cal] star colours scatter {info['scatter_br']:.2f} mag about "
                   f"the fit (> {_SOLAR_MAX_SCATTER}; crowded field?) -- not applied")
         return None
-    if not all(0.5 <= v <= 2.0 for v in (s_r, s_b)):
+    if not all(SCALE_LIMITS[0] <= v <= SCALE_LIMITS[1] for v in (s_r, s_b)):
         if verbose:
-            print(f"  [colour cal] implausible scales R={s_r:.3f} B={s_b:.3f} -- not applied")
+            from src.utils import safe_print
+            safe_print(f"  [colour cal] implausible scales R={s_r:.3f} B={s_b:.3f} (outside "
+                       f"{SCALE_LIMITS[0]:g}-{SCALE_LIMITS[1]:g}; {info['n']} stars, B-R scatter "
+                       f"{info['scatter_br']:.3f} mag) -- not applied. The fit is not noisy: the "
+                       f"stack's star colours are far from white (channels on different scales? "
+                       f"check calibration/merge)")
         return None
     return (float(s_r), float(s_g), float(s_b)), info
 
