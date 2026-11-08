@@ -6,6 +6,9 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+### Fixed
+- A red (and green) strip along the bottom edge of a Whirlpool stack: the Phase 4 edge-band step smoothed its depth profile with a kernel as wide as a tenth of the 400-row band, which smeared the ~35 row strip (R +390, G +120 ADU) into its surroundings. At the edge it removed only 60% (R +95 left), and 40-100 rows deep it over-subtracted (R -60). The smoothing is now 2-3 rows; the edge medians match the interior (R 164 / G 326 / B 162 against 160 / 324 / 164) on that stack, and the Black Eye and Sagittarius stacks are unchanged to a few ADU.
+
 ### Changed
 - The NN deconvolution step measures the stars' FWHM several times faster (about 1.7 s -> 0.2-0.3 s for its two measurements on a 2000 x 3000 stack): the ~60 star fits run as one batched Levenberg-Marquardt solve instead of one scipy fit each, and the second measurement of the same image is no longer repeated. Same stars, same accept/reject decisions, FWHM identical to ~1e-6 on five real stacks.
 - Linux and macOS bundles drop the same unused Qt payload as the Windows one (QML, Quick, PDF, Network, Qt translations, unused image plugins); the path tokens now match the Linux/macOS wheel layout.

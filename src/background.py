@@ -2119,6 +2119,9 @@ def wavelet_background_extraction(
         diffuse_threshold_sigma=diffuse_threshold_sigma)
 
 
+_EDGE_BAND_MAX_SMOOTH = 3.0   # px, depth smoothing of the edge-band profile
+
+
 def remove_edge_bands(img: np.ndarray, sky_mask: np.ndarray,
                       band_frac: float = 0.20, min_band: int = 24,
                       max_band: int = 400, min_snr: float = 3.0,
@@ -2179,7 +2182,12 @@ def remove_edge_bands(img: np.ndarray, sky_mask: np.ndarray,
             idx = np.arange(band)
             good = np.isfinite(delta)
             delta = np.interp(idx, idx[good], delta[good])
-            delta = ndimage.gaussian_filter1d(delta, sigma=max(2.0, band / 10.0), mode='nearest')
+            # Smooth over a few rows only: each row's median already averages a
+            # whole frame width, and a wider kernel (band / 10 = 40 px on a
+            # tall frame) smears a ~30 row strip into its surroundings, leaving
+            # a coloured residue at the edge and over-subtracting inside it.
+            delta = ndimage.gaussian_filter1d(
+                delta, sigma=float(np.clip(band / 10.0, 2.0, _EDGE_BAND_MAX_SMOOTH)), mode='nearest')
             se = 1.2533 * sigma / np.sqrt(np.maximum(n_ok[:band], 1))
             se = np.interp(idx, idx, se)
             sig_mask = np.abs(delta) > min_snr * se
