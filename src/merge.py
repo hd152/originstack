@@ -247,6 +247,38 @@ def _match_flux_scale(ref: np.ndarray, img: np.ndarray, valid: np.ndarray
     return gains, offsets, int(n_min or 0)
 
 
+_SKY_MISMATCH_RATIO = 4.0     # sky levels (after the gain) further apart than this ...
+_SKY_MISMATCH_MIN_ADU = 5000.0    # ... and more than this many ADU apart are not a gradient
+
+
+def sky_level_mismatch(ref: np.ndarray, img: np.ndarray, valid: np.ndarray,
+                       gains: np.ndarray) -> Optional[str]:
+    """Why ``img``'s sky (times its per-channel ``gains``) cannot belong with ``ref``'s, or None.
+
+    The merge matches a stack's sky to the reference's with an offset and takes the gain from
+    the sources, so a stack calibrated with a wrong dark (a ~100,000 ADU pedestal, in the
+    reference or in an input) merges without complaint: the offset just absorbs it, and the
+    result sits on the bad stack's scale. A healthy pair differs by a gradient of hundreds of
+    ADU; here the medians over the overlap must be within ``_SKY_MISMATCH_RATIO`` of each
+    other, or within ``_SKY_MISMATCH_MIN_ADU``. A channel is named when it fails."""
+    bad = []
+    for c in range(3):
+        r = ref[::4, ::4, c][valid[::4, ::4]]
+        i = img[::4, ::4, c][valid[::4, ::4]]
+        if r.size < 100:
+            continue
+        sr, si = float(np.median(r)), float(gains[c]) * float(np.median(i))
+        lo, hi = min(sr, si), max(sr, si)
+        if hi - lo > _SKY_MISMATCH_MIN_ADU and hi > _SKY_MISMATCH_RATIO * max(lo, 1.0):
+            bad.append(f"{'RGB'[c]} {sr:.0f} vs {si:.0f}")
+    if not bad:
+        return None
+    return ("sky level (ADU, current stack vs this stack after its flux scale): "
+            + ", ".join(bad) + " -- far apart: one of the two stacks probably carries a "
+            "calibration pedestal (a dark that does not match its lights); re-run that "
+            "session before trusting this combine")
+
+
 # Clipped-core neutralisation reaches this far past each stack's plateau: a
 # wing clipped in some sessions and not others, scaled by their per-channel
 # gains, left a blue ring (B/R 1.4-1.7 at 5-9 px) around neutral Lagoon cores.
@@ -731,6 +763,10 @@ def merge_previous_stacks(stacked: np.ndarray, new_frame_count: int,
             gains, offsets, n_fit = _match_flux_scale(stacked, aligned, valid)
             surface = _sky_offset_surface(stacked, aligned, valid, gains)
             scaled = aligned.astype(np.float64) * gains + (surface if surface is not None else offsets)
+            _why = sky_level_mismatch(stacked, aligned, valid, gains)
+            if _why:
+                safe_print(f"  WARNING: {os.path.basename(path)}: {_why}")
+                info.setdefault('sky_mismatch', []).append(os.path.basename(path))
             if np.any(gains != 1.0):
                 safe_print(f"    flux scale vs current stack: R x{gains[0]:.3f}  "
                            f"G x{gains[1]:.3f}  B x{gains[2]:.3f} ({n_fit} px in fit)")
