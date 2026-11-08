@@ -77,3 +77,20 @@ def test_edge_mostly_masked_is_skipped():
     mask[-45:, :] = 0.0                       # nothing left to measure there
     out = remove_edge_bands(img, mask)
     np.testing.assert_array_equal(out[-45:, :, 0], img[-45:, :, 0])
+
+
+def test_narrow_strong_strip_on_a_tall_frame_is_fully_removed():
+    # Whirlpool stack: 2000 rows (band = 400), a ~35 row strip of R +390 / G +120.
+    # A depth smoothing wide as band / 10 left a third of it at the edge and
+    # over-subtracted the rows behind it.
+    img, sky = _sky(H=2000, W=600, sigma=15.0)
+    d = np.arange(2000)[::-1].astype(np.float32)          # depth from the bottom edge
+    prof = np.exp(-d / 20.0)
+    strip = img.copy()
+    strip[:, :, 0] += 390.0 * prof[:, None]
+    strip[:, :, 1] += 120.0 * prof[:, None]
+    out = remove_edge_bands(strip, sky)
+    ref = _band_offset(out, slice(1000, 1200))
+    for rows in (slice(-10, None), slice(-60, -40), slice(-120, -80)):
+        off = _band_offset(out, rows)
+        assert max(abs(o - r) for o, r in zip(off, ref)) < 5.0
