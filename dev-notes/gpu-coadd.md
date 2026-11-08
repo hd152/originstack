@@ -100,7 +100,14 @@ p99.99 0.006 ADU, mean -8e-4 ADU; the 4547 brightest pixels differ by at most 8e
 ## Not done
 
 - Mixed-radix sizes (a 3000 px width pads to 4096), more than 3 channels, frames above 4064 px.
-- Packing two PSFs per plane would save about 15% of the FFT work.
+- Packing two PSFs per plane: **tried, no gain, reverted.** Frames go through in pairs, the two (sum 1,
+  same magnitude) PSFs share one complex plane (`psf_a + i psf_b`, split by Hermitian symmetry in the
+  accumulate kernel), which removes one of the six column FFTs per pair. Accuracy was unchanged
+  (difference to the CPU path 1.3e-5 of noise, bright pixels 3.5e-7, all 23 GPU tests incl. the float64
+  PSF-precision test passed), so same-magnitude PSFs do pack safely. Speed: combine pass of 48 synthetic
+  1990 x 2945 frames, 10 alternating runs each, median 1.9 s before and 1.9-2.0 s after (49 frames,
+  odd tail: 2.0 s vs 2.1 s), within noise, for +2 planes and +2 upload slots (about +0.3 GB). The pass is
+  not limited by the FFT work saved (the row pass of the PSF is already only 2r+1 rows).
 - Sky and noise per frame are still CPU work (about 3.6 s over 206 frames, hidden behind the device).
 - The experiment also tried a GPU Lanczos warp (about 2x, 7 s of a run), a per-pixel sigma-clip combine
   (6x *slower* than the CPU: per-thread quickselect in local memory), the NN U-Net and the Phase 1 pixel
