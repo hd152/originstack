@@ -70,8 +70,9 @@ _WIDGET_HINTS: Dict[str, str] = {
 }
 
 # Flags the desktop app doesn't drive a run through (they either watch/loop
-# forever with no cancel support yet, or exit without stacking).
-_UNSUPPORTED_DESTS = {'live', 'stream', 'quality_sweep', 'sweep_undo'}
+# forever with no cancel support yet, or exit without stacking). 'gpu_coadd' needs an
+# astro_native built with the gpu feature, which the packaged app is not (dev-notes/gpu-coadd.md).
+_UNSUPPORTED_DESTS = {'live', 'stream', 'quality_sweep', 'sweep_undo', 'gpu_coadd'}
 
 
 # One-line descriptions shown under a field in the desktop form, written for

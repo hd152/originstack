@@ -74,6 +74,83 @@ jobs:
       - name: Native kernel parity tests
         run: pytest -q -n auto tests/test_native.py
 
+  # The optional `gpu` feature (wgpu; --gpu-coadd) is not in any released wheel, so the default
+  # jobs never compile it. Build it on all three platforms (clippy: the repo's correctness gate
+  # for the whole crate, and no warning at all in the gpu modules, which the older code would
+  # fail). The runners have no GPU; Linux also runs tests/test_gpu_coadd.py on Mesa's software
+  # Vulkan driver (lavapipe, admitted by ORIGINSTACK_GPU_ALLOW_SOFTWARE) so the kernels execute.
+  gpu-build:
+    name: gpu feature (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ext/astro_native
+          key: gpu
+
+      - name: Clippy (gpu feature)
+        shell: bash
+        working-directory: ext/astro_native
+        run: |
+          cargo clippy --release --features gpu -- -D clippy::correctness -D clippy::suspicious -A clippy::redundant_locals
+          # The crate has older style warnings; the gpu modules must have none.
+          cargo clippy --release --features gpu --message-format=short 2>&1 | tee clippy.txt
+          if grep -E 'src[/\]gpu' clippy.txt; then echo "::error::clippy warnings in the gpu modules"; exit 1; fi
+
+  gpu-test:
+    name: gpu tests (lavapipe)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ext/astro_native
+          key: gpu
+
+      - name: Software Vulkan (lavapipe)
+        run: sudo apt-get update && sudo apt-get install -y mesa-vulkan-drivers libvulkan1 vulkan-tools
+
+      - name: Install deps + build astro_native with the gpu feature
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest maturin
+          cd ext/astro_native
+          maturin build --release --features gpu
+          pip install --force-reinstall --no-deps target/wheels/astro_native-*.whl
+          python -c "import astro_native; print('astro_native', astro_native.__version__, hasattr(astro_native, 'gpu_coadd_begin'))"
+
+      - name: GPU coadd tests
+        env:
+          ORIGINSTACK_GPU_ALLOW_SOFTWARE: "1"
+        run: |
+          vulkaninfo --summary | head -30 || true
+          python -c "import astro_native as a; print('adapter:', a.gpu_available(), a.gpu_info())"
+          pytest -v -rs --durations=10 tests/test_gpu_coadd.py
+
   test:
     runs-on: ubuntu-latest
     strategy:
