@@ -16,7 +16,7 @@ python tools/ab_gpu_coadd.py --synthetic 96       # CPU vs GPU on one stack: tim
 exists, the frames do not fit (3 channels only, planes of at most 4096 px = frames up to 4064 px), the
 device runs out of memory, or anything in the driver fails. `RunCancelled` propagates and the device
 session is released. `ORIGINSTACK_GPU_DISABLE=1` forces "no adapter" (tests; read once per process),
-`ORIGINSTACK_GPU_ADAPTER=<substring>` picks an adapter by name, `ORIGINSTACK_GPU_MAX_MB` (default 3072)
+`ORIGINSTACK_GPU_ADAPTER=<substring>` picks an adapter by name, `ORIGINSTACK_GPU_ALLOW_SOFTWARE=1` admits a software rasteriser (lavapipe; CI's `gpu-test` job), `ORIGINSTACK_GPU_MAX_MB` (default 3072)
 caps the device memory a run may ask for. The option is hidden from the desktop form
 (`desktop_control._UNSUPPORTED_DESTS`): the packaged app cannot have it.
 

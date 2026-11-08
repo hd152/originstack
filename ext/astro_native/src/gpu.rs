@@ -6,7 +6,8 @@
 //! `src/` can fall back to the CPU path. wgpu's own default for an uncaptured error is to panic;
 //! this module installs a handler that records the message instead and every entry point checks
 //! it (`check`). `ORIGINSTACK_GPU_DISABLE=1` makes `gpu_available()` report False (tests, and a
-//! way to force the CPU path); `ORIGINSTACK_GPU_ADAPTER=<substring>` picks an adapter by name.
+//! way to force the CPU path); `ORIGINSTACK_GPU_ADAPTER=<substring>` picks an adapter by name;
+//! `ORIGINSTACK_GPU_ALLOW_SOFTWARE=1` admits a software rasteriser (lavapipe) as a last resort.
 
 use crate::*;
 use std::sync::{Mutex, OnceLock};
@@ -58,11 +59,14 @@ fn init() -> Result<Gpu, String> {
     let instance = wgpu::Instance::default();
     let want = std::env::var("ORIGINSTACK_GPU_ADAPTER").ok().map(|s| s.to_lowercase());
     let mut adapters = pollster::block_on(instance.enumerate_adapters(wgpu::Backends::all()));
-    // Prefer a discrete GPU, then an integrated one; never a software rasteriser.
+    // Prefer a discrete GPU, then an integrated one; a software rasteriser (lavapipe, WARP) only
+    // when ORIGINSTACK_GPU_ALLOW_SOFTWARE is set (CI runs the GPU tests on lavapipe), and last.
+    let software = std::env::var_os("ORIGINSTACK_GPU_ALLOW_SOFTWARE").is_some_and(|v| v != "0" && !v.is_empty());
     let rank = |t: wgpu::DeviceType| match t {
         wgpu::DeviceType::DiscreteGpu => Some(0),
         wgpu::DeviceType::IntegratedGpu => Some(1),
         wgpu::DeviceType::VirtualGpu => Some(2),
+        wgpu::DeviceType::Cpu if software => Some(3),
         _ => None,
     };
     adapters.retain(|a| {
