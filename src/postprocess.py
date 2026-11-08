@@ -1145,12 +1145,15 @@ def postprocess_stack(
         _diag_save(stacked, _diag_dir, _diag_counter, 'before_photo_cal')
         print("\n  Applying photometric color calibration (gray-locus method)...")
         pc_start = time.time()
+        _pc_info: dict = {}
         stacked, _pc_scales = photometric_color_calibrate(
-            stacked, _pp_sources, verbose=args.verbose)
+            stacked, _pp_sources, verbose=args.verbose, info=_pc_info)
         if _pc_scales is not None:
             safe_print(f"  ✓ Photometric calibration "
                        f"(R×{_pc_scales[0]:.3f} G×{_pc_scales[1]:.3f} B×{_pc_scales[2]:.3f}, "
                        f"{format_time(time.time() - pc_start)})")
+            if _pc_info.get('clamp_note'):
+                safe_print(f"  ⚠ Photometric calibration: {_pc_info['clamp_note']}")
         else:
             safe_print("  ⚠ Photometric calibration skipped (insufficient stars)")
         stacked = _sanitize(stacked, "photometric calibration")

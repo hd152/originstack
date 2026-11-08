@@ -388,7 +388,7 @@ def test_gray_locus_skipped_after_gaia_calibration(monkeypatch):
     from src import cli
     calls = []
     monkeypatch.setattr(pp, 'photometric_color_calibrate',
-                        lambda img, src, verbose=False: (calls.append(1) or img, None))
+                        lambda img, src, verbose=False, info=None: (calls.append(1) or img, None))
     img, _ = _coloured_stars()
     args = cli.parse_args(['-d', '.', '--skip-step', 'background'])
     args.photometric_calibration = True
