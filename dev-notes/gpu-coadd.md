@@ -71,6 +71,25 @@ profile showed that stacking a batch of disk-backed frames into one array before
 single-read version) cost ~19 ms per frame of host copying; `gpu_coadd_add_list` takes the frames as they
 are (disk-backed 2.0 s vs 1.9 s in RAM for 48 frames).
 
+Whirlpool on the 16 GB laptop (295 frames, disk-backed stack, ms per frame, profile mode), crate 0.67.0:
+
+| stage | RTX 3050 Laptop | Radeon iGPU | GTX 1650 Ti (synthetic, RAM) |
+|---|---|---|---|
+| upload | 53 | 35 | 16 |
+| prep | 7 | 20 | 3 |
+| row FFTs | 26 | 44 | 6 |
+| transposes | 8 | 64 | 4 |
+| column FFTs | 37 | 121 | 8 |
+| accumulate | 6 | 18 | 3 |
+| device total | 137 | 303 | 41 |
+
+Combine pass without profiling: RTX 3050 **43.6 s** (80.9 s before the single read, 53.1 s with it, CPU
+32.2 s); Radeon 90.0 s. The host is waiting on the device (device 40.3 s of 40.4 s in the host's add calls
+on the 3050; waiting on host prep 1.2 s), so the host side is not the limit. Every 3050 stage is 3-5x
+slower than the same stage on the 1650 Ti, including the FFTs, which touch neither the disk nor the PCIe
+bus: that points at the GPU's clocks/power state (or contention) on that laptop rather than at the
+pipeline. Whole runs: 3050 GPU 398-402 s vs CPU 438 s (the CPU run varies ~15%).
+
 ## Numerics (the output is not bit-identical to the CPU path)
 
 - f32 throughout (WGSL has no f64). Twiddles are built in f64 on the host: GPU `sin`/`cos` are only
@@ -148,9 +167,7 @@ p99.99 0.006 ADU, mean -8e-4 ADU; the 4547 brightest pixels differ by at most 8e
   `n_thr + 8` frames) took the RTX 3050's combine from 80.9 s to **53.1 s** (whole run 436 -> 402 s, CPU
   run 438 s; ~15% run-to-run) and left the Radeon iGPU where it was (92.6 -> 90.0 s). So the double read
   was real but is not the whole story: the combine is still 1.6x (3050) and 2.8x (iGPU) the CPU's 32.2 s.
-  What remains is not identified; candidates are the 70 MB upload per frame, the 36% padding to a
-  2048 x 4096 plane, and a laptop GPU that is simply slower than the 12-thread CPU at this work. Splitting
-  the time on the device (upload, prep, FFT, accumulate) is the next measurement.
+  The stage profile below is the follow-up.
 - Sky and noise per frame are still CPU work (about 3.6 s over 206 frames, hidden behind the device).
 - The experiment also tried a GPU Lanczos warp (about 2x, 7 s of a run), a per-pixel sigma-clip combine
   (6x *slower* than the CPU: per-thread quickselect in local memory), the NN U-Net and the Phase 1 pixel

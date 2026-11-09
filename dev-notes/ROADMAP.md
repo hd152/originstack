@@ -49,7 +49,8 @@ It is verified on Origin, Seestar S50 and LCO mono only.
 - `--gpu-coadd`: 2x on a GTX 1650 Ti with the stack in RAM, but 2.5-3x slower than the CPU on two laptop
   GPUs with a disk-backed stack. Reading each frame once (PR "GPU coadd: read a disk-backed frame
   once") took the RTX 3050's combine from 80.9 to 53.1 s, still above the CPU's 32.2 s, and did nothing for
-  the Radeon iGPU; the remaining cost is not identified (see [gpu-coadd.md](gpu-coadd.md)). Do not promote
+  the Radeon iGPU; the stage profile (crate 0.67) puts the 3050's combine at 43.6 s with every stage 3-5x slower than the same stage
+  on the GTX 1650 Ti: probably that laptop's GPU power state, being checked (see [gpu-coadd.md](gpu-coadd.md)). Do not promote
   it until a discrete card beats the CPU on a real session. **code**, M.
 - Re-bench the whole pipeline against current Siril and PixInsight WBPP on the same data once per
   release; keep `bench_vs_siril.py` results in the compare page. **code**, S per release.
