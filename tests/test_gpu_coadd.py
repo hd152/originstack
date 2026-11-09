@@ -306,6 +306,31 @@ def test_cancellation_propagates_and_releases_the_session(monkeypatch):
     assert 'abort' in fake.calls
 
 
+@pytest.fixture(autouse=True)
+def _allow_integrated(monkeypatch):
+    """The kernel tests must run on a machine whose only GPU is integrated."""
+    monkeypatch.setenv('ORIGINSTACK_GPU_ALLOW_INTEGRATED', '1')
+
+
+def test_integrated_gpu_is_declined_unless_asked_for(monkeypatch):
+    A = np.zeros((3, 40, 50, 3), np.float32)
+    info = {'v': 'AMD Radeon(TM) Graphics (Vulkan, IntegratedGpu)'}
+    fake = type('N', (), {'gpu_coadd_begin': None, 'gpu_available': staticmethod(lambda: True),
+                          'gpu_info': staticmethod(lambda: info['v'])})()
+    monkeypatch.setattr(pc, '_native', fake)
+    monkeypatch.setenv('ORIGINSTACK_GPU_ALLOW_INTEGRATED', '0')
+    monkeypatch.delenv('ORIGINSTACK_GPU_ADAPTER', raising=False)
+    assert 'integrated' in pc._gpu_unusable(A, 3, 40, 50)
+    monkeypatch.setenv('ORIGINSTACK_GPU_ALLOW_INTEGRATED', '1')
+    assert pc._gpu_unusable(A, 3, 40, 50) is None
+    monkeypatch.setenv('ORIGINSTACK_GPU_ALLOW_INTEGRATED', '0')
+    monkeypatch.setenv('ORIGINSTACK_GPU_ADAPTER', 'AMD')          # naming the adapter opts in
+    assert pc._gpu_unusable(A, 3, 40, 50) is None
+    monkeypatch.delenv('ORIGINSTACK_GPU_ADAPTER')
+    info['v'] = 'NVIDIA GeForce RTX 3050 Laptop GPU (Vulkan, DiscreteGpu)'
+    assert pc._gpu_unusable(A, 3, 40, 50) is None
+
+
 def test_unusable_stacks_are_declined_with_a_reason(monkeypatch):
     A = np.zeros((3, 40, 50, 3), np.float32)
     monkeypatch.setattr(pc, '_native', None)
