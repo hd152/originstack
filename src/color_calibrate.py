@@ -66,7 +66,14 @@ def _field_radius_deg(header) -> float:
         return 0.5
 
 
-def query_gaia_stars(header, max_stars: int = 500):
+# The colour-calibration cone query; src/prefetch.py issues the same one ahead of time.
+GAIA_COLUMNS = ("ra", "dec", "phot_g_mean_mag", "phot_bp_mean_mag", "phot_rp_mean_mag",
+                "teff_gspphot")
+GAIA_NOT_NULL = ("phot_bp_mean_mag", "phot_rp_mean_mag")
+GAIA_MAX_STARS = 500
+
+
+def query_gaia_stars(header, max_stars: int = GAIA_MAX_STARS):
     """Query Gaia DR3 for stars within the image field.
 
     Returns an astropy Table with columns: ra, dec, phot_g_mean_mag,
@@ -88,10 +95,9 @@ def query_gaia_stars(header, max_stars: int = 500):
 
     table = net_query.gaia_cone_search(
         ra, dec, radius_deg,
-        columns=["ra", "dec", "phot_g_mean_mag",
-                 "phot_bp_mean_mag", "phot_rp_mean_mag", "teff_gspphot"],
+        columns=list(GAIA_COLUMNS),
         max_rows=max_stars,
-        require_not_null=["phot_bp_mean_mag", "phot_rp_mean_mag"])
+        require_not_null=list(GAIA_NOT_NULL))
     if table is None or len(table) == 0:
         return None
     return table if len(table) >= 10 else None

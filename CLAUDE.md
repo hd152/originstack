@@ -166,6 +166,7 @@ files from different sessions have landed in the wrong PR before). So:
 | `observing_geometry.py` | Alt/az, airmass, parallactic angle (closed-form fallbacks, no IERS needed) |
 | `plate_solve.py` / `local_solve.py` | `--plate-solve` backend dispatch; built-in Gaia-tile solver |
 | `annotation.py` | `--annotate` (SIMBAD) |
+| `prefetch.py` | Background thread (started with the SIMBAD prefetch before Phase 1, joined at the top of `_settle_stack_wcs`) that fills the Gaia tile index and the colour-calibration cone cache for the field from `info.json`/pointing; the cone is wider (1.25x) with 2x rows because `gaia_cache` answers a smaller cone only when enough rows remain; `color_calibrate.GAIA_*` keep the two queries identical |
 | `net_query.py` | All HTTP (Gaia/VizieR/SIMBAD/astrometry.net/Horizons/update check); `--offline` guard |
 | `gaia_cache.py` | Local cache of brightest-first Gaia cone queries (`star_index_dir()/gaia_cones`); answers only when the cached rows are the server's own answer (cone contained, entry untruncated or still >= n rows, float32 G for the `min_mag` cut); misses fetch a 5%-wider cone with 25% more rows so the next night hits |
 | `target_inference.py` / `auto_settings.py` | Target from headers/folder/SIMBAD; `--auto` advisor (blended presets) |
