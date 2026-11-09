@@ -639,7 +639,6 @@
  "Frame report": "帧报告",
  "Merge consistency": "合并一致性",
  "Merge proper": "合并(proper)",
- "Nn deconv blend": "NN反卷积比例",
  "With --deconvolve nn: the share (0-1) of the deconvolver output kept.": "配合 --deconvolve nn:保留的反卷积器输出所占比例(0-1)。",
  "With --deconvolve nn: the share (0-1) of the deconvolver output kept; the rest is the neural denoiser output. Lower values leave less sky noise and keep faint galaxy contrast, higher values sharpen more. Default: automatic (0.75; with --auto galaxies 0.35).": "配合 --deconvolve nn:保留的反卷积器输出所占比例(0-1);其余为神经网络降噪器的输出。较低的值留下的天空噪声更少并保留星系的暗弱对比度,较高的值锐化更多。默认:自动(0.75;使用 --auto 时星系为 0.35)。",
  "With --merge or a multi-session combine: reject what only one night shows.": "配合 --merge 或多次观测合并:剔除只有一晚出现的内容。",
@@ -781,5 +780,6 @@
  "score {score}, FWHM {fwhm} px, SNR {snr}, {stars} stars": "得分 {score}，FWHM {fwhm} px，信噪比 {snr}，{stars} 颗恒星",
  "{n} left out of {total}": "共 {total} 帧，已排除 {n} 帧",
  "{sigma:.1f}σ above the sky · {pct:.2f}% of pixels darker": "高于天空 {sigma:.1f}σ · {pct:.2f}% 的像素更暗",
- "{total} frames": "{total} 帧"
+ "{total} frames": "{total} 帧",
+ "Learned sharpening strength": "学习式锐化强度"
 }

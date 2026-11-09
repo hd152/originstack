@@ -639,7 +639,6 @@
  "Frame report": "Frame-Bericht",
  "Merge consistency": "Merge-Konsistenz",
  "Merge proper": "Merge proper",
- "Nn deconv blend": "Anteil Nn-Dekonvolution",
  "With --deconvolve nn: the share (0-1) of the deconvolver output kept.": "Mit --deconvolve nn: Anteil (0-1) der Ausgabe des Dekonvolvers, der behalten wird.",
  "With --deconvolve nn: the share (0-1) of the deconvolver output kept; the rest is the neural denoiser output. Lower values leave less sky noise and keep faint galaxy contrast, higher values sharpen more. Default: automatic (0.75; with --auto galaxies 0.35).": "Mit --deconvolve nn: Anteil (0-1) der Ausgabe des Dekonvolvers, der behalten wird; der Rest ist die Ausgabe des neuronalen Entrauschers. Niedrigere Werte lassen weniger Himmelsrauschen und erhalten den schwachen Galaxienkontrast, höhere Werte schärfen stärker. Standard: automatisch (0,75; mit --auto bei Galaxien 0,35).",
  "With --merge or a multi-session combine: reject what only one night shows.": "Mit --merge oder einer Mehrsitzungs-Kombination: verwirft, was nur eine Nacht zeigt.",
@@ -781,5 +780,6 @@
  "score {score}, FWHM {fwhm} px, SNR {snr}, {stars} stars": "Wert {score}, FWHM {fwhm} px, SNR {snr}, {stars} Sterne",
  "{n} left out of {total}": "{n} von {total} ausgeschlossen",
  "{sigma:.1f}σ above the sky · {pct:.2f}% of pixels darker": "{sigma:.1f}σ über dem Himmel · {pct:.2f} % der Pixel dunkler",
- "{total} frames": "{total} Frames"
+ "{total} frames": "{total} Frames",
+ "Learned sharpening strength": "Stärke der gelernten Schärfung"
 }
