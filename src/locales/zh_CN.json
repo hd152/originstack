@@ -781,5 +781,6 @@
  "{n} left out of {total}": "共 {total} 帧，已排除 {n} 帧",
  "{sigma:.1f}σ above the sky · {pct:.2f}% of pixels darker": "高于天空 {sigma:.1f}σ · {pct:.2f}% 的像素更暗",
  "{total} frames": "{total} 帧",
- "Learned sharpening strength": "学习式锐化强度"
+ "Learned sharpening strength": "学习式锐化强度",
+ "Add {n} earlier stack(s) of {name} ({frames} frames) to this one": "将 {name} 的 {n} 个早期叠加结果（{frames} 帧）加入本次叠加"
 }

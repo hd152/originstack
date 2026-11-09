@@ -470,6 +470,14 @@ def _gpu_unusable(aligned, C: int, H: int, W: int) -> Optional[str]:
         return "this astro_native build has no GPU support (needs astro_native 0.66+, built with its default features)"
     if not _native.gpu_available():
         return "no usable GPU adapter"
+    # An integrated GPU (shared memory) measured slower than the CPU: 3x on the combine pass of
+    # a real session (AMD Radeon, dev-notes/gpu-coadd.md). Naming an adapter or setting
+    # ORIGINSTACK_GPU_ALLOW_INTEGRATED=1 opts in.
+    info = _native.gpu_info() if hasattr(_native, 'gpu_info') else None
+    if (info and 'IntegratedGpu' in str(info) and not os.environ.get('ORIGINSTACK_GPU_ADAPTER')
+            and os.environ.get('ORIGINSTACK_GPU_ALLOW_INTEGRATED', '0') in ('', '0')):
+        return ("the only usable GPU is an integrated one (%s), which is slower than the CPU here; "
+                "set ORIGINSTACK_GPU_ALLOW_INTEGRATED=1 to use it anyway" % info)
     if C != 3:
         return "only 3-channel frames are supported"
     if (getattr(aligned, 'dtype', None) != np.float32 or not isinstance(aligned, np.ndarray)

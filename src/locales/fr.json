@@ -781,5 +781,6 @@
  "{n} left out of {total}": "{n} exclue(s) sur {total}",
  "{sigma:.1f}σ above the sky · {pct:.2f}% of pixels darker": "{sigma:.1f}σ au-dessus du ciel · {pct:.2f} % des pixels plus sombres",
  "{total} frames": "{total} images",
- "Learned sharpening strength": "Force de la netteté apprise"
+ "Learned sharpening strength": "Force de la netteté apprise",
+ "Add {n} earlier stack(s) of {name} ({frames} frames) to this one": "Ajouter {n} empilement(s) précédent(s) de {name} ({frames} images) à celui-ci"
 }

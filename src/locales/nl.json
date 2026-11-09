@@ -781,5 +781,6 @@
  "{n} left out of {total}": "{n} van {total} uitgesloten",
  "{sigma:.1f}σ above the sky · {pct:.2f}% of pixels darker": "{sigma:.1f}σ boven de hemel · {pct:.2f}% van de pixels donkerder",
  "{total} frames": "{total} frames",
- "Learned sharpening strength": "Sterkte van geleerde verscherping"
+ "Learned sharpening strength": "Sterkte van geleerde verscherping",
+ "Add {n} earlier stack(s) of {name} ({frames} frames) to this one": "{n} eerdere stack(s) van {name} ({frames} beelden) aan deze toevoegen"
 }
