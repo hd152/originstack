@@ -19,6 +19,37 @@
 use crate::gpu::{arg_err, bytes_of, check, dispatch, gpu, make_kernel, read_back, rt_err, storage_buf, uniform_buf, wait, Bind, Gpu, Kernel};
 use crate::*;
 use std::sync::{Mutex, OnceLock};
+use std::time::Instant;
+
+// ORIGINSTACK_GPU_PROFILE=1: every frame's device work is cut into stages that are submitted and
+// waited for one by one, so the time of each can be read (`gpu_coadd_profile`). That serialises
+// the pipeline: the total is slower than a normal run; only the proportions mean anything.
+const STAGES: usize = 6; // upload, prep, row FFTs, transposes, column FFTs, accumulate
+static PROFILE: Mutex<[f64; STAGES + 1]> = Mutex::new([0.0; STAGES + 1]);
+
+fn profiling() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var("ORIGINSTACK_GPU_PROFILE").is_ok_and(|v| !v.is_empty() && v != "0"))
+}
+
+fn lap(g: &Gpu, enc: &mut wgpu::CommandEncoder, stage: usize, t: &mut Instant) -> PyResult<()> {
+    let done = std::mem::replace(enc, g.device.create_command_encoder(&Default::default()));
+    let sub = g.queue.submit(Some(done.finish()));
+    wait(g, Some(sub))?;
+    PROFILE.lock().unwrap_or_else(|p| p.into_inner())[stage] += t.elapsed().as_secs_f64();
+    *t = Instant::now();
+    Ok(())
+}
+
+/// Seconds spent per stage since the last call (upload, prep, row FFTs, transposes, column FFTs,
+/// accumulate) and the number of frames, then reset. All zero unless ORIGINSTACK_GPU_PROFILE is set.
+#[pyfunction]
+pub(crate) fn gpu_coadd_profile() -> Vec<f64> {
+    let mut p = PROFILE.lock().unwrap_or_else(|p| p.into_inner());
+    let out = p.to_vec();
+    *p = [0.0; STAGES + 1];
+    out
+}
 
 const FFT_WGSL: &str = r#"
 struct U { n: u32, log2n: u32, inverse: u32, skip: u32, scale: f32, ph: u32, _b: f32, _c: f32 };
@@ -489,7 +520,55 @@ pub(crate) fn gpu_coadd_add(
         if dims != (s.h, s.w, 3) || sd[1] != 2 * s.r + 1 || sd[2] != 2 * s.r + 1 {
             return Err(arg_err("frame or stamp shape differs from the session"));
         }
-        let res = add_frames(g, ks, s, alf, &idx, &f, &sky, &sig2, &wn, &wf, stf, sd[1] * sd[2]);
+        let hwc = s.h * s.w * 3;
+        let frames: Vec<&[f32]> = idx.iter().map(|&j| &alf[j * hwc..(j + 1) * hwc]).collect();
+        let res = add_frames(g, ks, s, &frames, &f, &sky, &sig2, &wn, &wf, stf, sd[1] * sd[2]);
+        if res.is_err() {
+            *guard = None;
+        }
+        res
+    })
+}
+
+/// Like `gpu_coadd_add`, but the frames are separate (H, W, 3) arrays (a disk-backed stack's frames
+/// already read into memory), so nothing has to be stacked into one array first.
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn gpu_coadd_add_list(
+    py: Python<'_>,
+    frames: Vec<PyReadonlyArray3<'_, f32>>,
+    f: Vec<f32>,
+    sky: Vec<[f32; 3]>,
+    sig2: Vec<[f32; 3]>,
+    wn: Vec<[f32; 3]>,
+    wf: Vec<[f32; 3]>,
+    stamps: PyReadonlyArray3<'_, f32>,
+) -> PyResult<()> {
+    let g = gpu()?;
+    let ks = kernels(g)?;
+    let views: Vec<_> = frames.iter().map(|a| a.as_array()).collect();
+    let mut slices: Vec<&[f32]> = Vec::with_capacity(views.len());
+    for v in &views {
+        slices.push(v.as_slice().ok_or_else(|| arg_err("each frame must be C-contiguous"))?);
+    }
+    let st = stamps.as_array();
+    let sd = st.shape().to_vec();
+    let stf = st.as_slice().ok_or_else(|| arg_err("stamps must be C-contiguous"))?;
+    let nf = slices.len();
+    if [f.len(), sky.len(), sig2.len(), wn.len(), wf.len(), sd[0]].iter().any(|&n| n != nf) {
+        return Err(arg_err("per-frame argument lengths differ"));
+    }
+    let shape0 = views.first().map(|v| (v.shape()[0], v.shape()[1], v.shape()[2]));
+    if views.iter().any(|v| Some((v.shape()[0], v.shape()[1], v.shape()[2])) != shape0) {
+        return Err(arg_err("the frames differ in shape"));
+    }
+    py.detach(|| {
+        let mut guard = session();
+        let s = guard.as_mut().ok_or_else(|| arg_err("gpu_coadd_begin was not called"))?;
+        if nf > 0 && (shape0 != Some((s.h, s.w, 3)) || sd[1] != 2 * s.r + 1 || sd[2] != 2 * s.r + 1) {
+            return Err(arg_err("frame or stamp shape differs from the session"));
+        }
+        let res = add_frames(g, ks, s, &slices, &f, &sky, &sig2, &wn, &wf, stf, sd[1] * sd[2]);
         if res.is_err() {
             *guard = None;
         }
@@ -498,13 +577,14 @@ pub(crate) fn gpu_coadd_add(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn add_frames(g: &Gpu, ks: &Kernels, s: &mut Session, alf: &[f32], idx: &[usize], f: &[f32], sky: &[[f32; 3]],
+fn add_frames(g: &Gpu, ks: &Kernels, s: &mut Session, frames: &[&[f32]], f: &[f32], sky: &[[f32; 3]],
               sig2: &[[f32; 3]], wn: &[[f32; 3]], wf: &[[f32; 3]], stf: &[f32], stamp_len: usize) -> PyResult<()> {
-    let hwc = s.h * s.w * 3;
     let (h, w, ph, pw, pad, r) = (s.h, s.w, s.ph, s.pw, s.pad, s.r);
-    for j in 0..idx.len() {
+    let prof = profiling();
+    for j in 0..frames.len() {
+        let mut t = Instant::now();
         let src = &s.srcs[s.done % 2];
-        g.queue.write_buffer(src, 0, bytes_of(&alf[idx[j] * hwc..(idx[j] + 1) * hwc]));
+        g.queue.write_buffer(src, 0, bytes_of(frames[j]));
         g.queue.write_buffer(&s.stamp, 0, bytes_of(&stf[j * stamp_len..(j + 1) * stamp_len]));
         let mut ub = u32s([h as u32, w as u32, ph as u32, pw as u32]);
         ub.extend_from_slice(&u32s([pad as u32, r as u32, 0, 0]));
@@ -519,17 +599,36 @@ fn add_frames(g: &Gpu, ks: &Kernels, s: &mut Session, alf: &[f32], idx: &[usize]
         let mut enc = g.device.create_command_encoder(&Default::default());
         let (z1, z2, z3) = (&s.z[0], &s.z[1], &s.z[2]);
         let (t1, t2, t3) = (&s.t[0], &s.t[1], &s.t[2]);
+        if prof {
+            lap(g, &mut enc, 0, &mut t)?; // the queued uploads are flushed by this submit
+        }
         dispatch(g, &mut enc, &ks.prep, &[&pu, src, &s.refbuf, &s.stamp, z1, z2, z3], (gx(pw, 16), gx(ph, 16), 1));
+        if prof {
+            lap(g, &mut enc, 1, &mut t)?;
+        }
         enc_fft(g, ks, &mut enc, &s.tw, z1, t1, pw, ph, false, 1.0, 0, 0);
         enc_fft(g, ks, &mut enc, &s.tw, z2, t2, pw, ph, false, 1.0, 0, 0);
         enc_fft(g, ks, &mut enc, &s.tw, z3, &s.t4, pw, ph, false, 1.0, r, ph);
+        if prof {
+            lap(g, &mut enc, 2, &mut t)?;
+        }
         enc_transpose(g, ks, &mut enc, t1, z1, ph, pw);
         enc_transpose(g, ks, &mut enc, t2, z2, ph, pw);
         enc_transpose(g, ks, &mut enc, &s.t4, z3, ph, pw);
+        if prof {
+            lap(g, &mut enc, 3, &mut t)?;
+        }
         enc_fft(g, ks, &mut enc, &s.tw, z1, t1, ph, pw, false, 1.0, 0, 0);
         enc_fft(g, ks, &mut enc, &s.tw, z2, t2, ph, pw, false, 1.0, 0, 0);
         enc_fft(g, ks, &mut enc, &s.tw, z3, t3, ph, pw, false, 1.0, 0, 0);
+        if prof {
+            lap(g, &mut enc, 4, &mut t)?;
+        }
         dispatch(g, &mut enc, &ks.accum, &[&aub, t1, t2, t3, &s.num, &s.den], (gx(ph, 64), (pw / 2 + 1) as u32, 1));
+        if prof {
+            lap(g, &mut enc, 5, &mut t)?;
+            PROFILE.lock().unwrap_or_else(|p| p.into_inner())[STAGES] += 1.0;
+        }
         let sub = g.queue.submit(Some(enc.finish()));
         // Two upload slots: waiting for the previous frame makes the slot used next idle.
         if let Some(p) = s.prev.take() {

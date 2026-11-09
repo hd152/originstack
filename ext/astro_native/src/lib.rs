@@ -131,8 +131,10 @@ fn astro_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(gpu_coadd::gpu_fft2, m)?)?;
         m.add_function(wrap_pyfunction!(gpu_coadd::gpu_coadd_begin, m)?)?;
         m.add_function(wrap_pyfunction!(gpu_coadd::gpu_coadd_add, m)?)?;
+        m.add_function(wrap_pyfunction!(gpu_coadd::gpu_coadd_add_list, m)?)?;
         m.add_function(wrap_pyfunction!(gpu_coadd::gpu_coadd_finish, m)?)?;
         m.add_function(wrap_pyfunction!(gpu_coadd::gpu_coadd_abort, m)?)?;
+        m.add_function(wrap_pyfunction!(gpu_coadd::gpu_coadd_profile, m)?)?;
     }
     m.add_function(wrap_pyfunction!(sigma_clip_combine, m)?)?;
     m.add_function(wrap_pyfunction!(online_sigma_clip_seed_burnin, m)?)?;
