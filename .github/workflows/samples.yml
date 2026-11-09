@@ -1,0 +1,77 @@
+name: Sample sessions
+
+# Stacks public sample sessions (Zenodo, CC BY 4.0) and compares them with
+# tools/data/samples_baseline.json (tools/check_samples.py). Weekly and on demand only: a session
+# takes minutes and the download is hundreds of MB, so it never gates a PR. A failure is not
+# necessarily a bug (an intended change moves the numbers): look, then run
+# `python tools/check_samples.py SAMPLES_DIR --update` locally to accept.
+
+on:
+  schedule:
+    - cron: "0 5 * * 1"
+  workflow_dispatch:
+    inputs:
+      only:
+        description: "Session name prefixes, comma-separated (e.g. 01,11); empty = the default pair"
+        required: false
+        default: ""
+
+jobs:
+  samples:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      # One galaxy and the comet: the two code paths that differ most. Override with the input.
+      ONLY: ${{ github.event.inputs.only || '01,11' }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ext/astro_native
+
+      - name: Install dependencies and build astro_native
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt maturin
+          cd ext/astro_native
+          maturin build --release
+          pip install --force-reinstall --no-deps target/wheels/astro_native-*.whl
+
+      - name: Download the sample sessions
+        run: |
+          mkdir -p samples
+          python - <<'PY'
+          import json, os, subprocess, zipfile, shutil
+          only = [p.strip() for p in os.environ["ONLY"].split(",") if p.strip()]
+          records = json.load(open("tools/data/zenodo_records.json"))
+          for name, rec in records.items():
+              if only and not any(name.startswith(p) for p in only):
+                  continue
+              zpath = f"samples/{name}.zip"
+              url = f"https://zenodo.org/records/{rec}/files/{name}.zip?download=1"
+              subprocess.check_call(["curl", "-fL", "--retry", "3", "-o", zpath, url])
+              dest = f"samples/{name}"
+              with zipfile.ZipFile(zpath) as z:
+                  z.extractall(dest)
+              os.remove(zpath)
+              # a zip that wraps everything in one folder of the same name: flatten it
+              inner = os.path.join(dest, name)
+              if os.path.isdir(inner) and os.listdir(dest) == [name]:
+                  for f in os.listdir(inner):
+                      shutil.move(os.path.join(inner, f), dest)
+                  os.rmdir(inner)
+              print("ready:", dest, len(os.listdir(dest)), "entries")
+          PY
+
+      - name: Stack and compare with the baseline
+        run: python tools/check_samples.py samples --only "$ONLY"
