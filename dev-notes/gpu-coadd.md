@@ -59,6 +59,18 @@ completed by Hermitian symmetry, is inverse-transformed and cropped.
   limits before anything is allocated; wgpu errors (out of memory, device lost) are recorded by an
   uncaptured-error handler and raised as `RuntimeError` at the next call, instead of wgpu's default panic.
 
+## Profiling
+
+`ORIGINSTACK_GPU_PROFILE=1` cuts each frame's device work into stages (upload, prep, row FFTs, transposes,
+column FFTs, accumulate), submits and waits for each, and prints the per-stage time plus the host's time in
+`gpu_coadd_add`, waiting on host prep and in `finish` after the pass (`_print_gpu_profile`,
+`gpu_coadd_profile`). It serialises the pipeline (about 25% slower), so read proportions, not totals.
+GTX 1650 Ti, 1990 x 2945 x 3 frames, stack in RAM: **upload 16 ms, prep 3, row FFTs 6, transposes 4, column
+FFTs 8, accumulate 3 per frame**: the 70 MB upload is 39% of the device time, as much as the FFTs. The same
+profile showed that stacking a batch of disk-backed frames into one array before the call (the first
+single-read version) cost ~19 ms per frame of host copying; `gpu_coadd_add_list` takes the frames as they
+are (disk-backed 2.0 s vs 1.9 s in RAM for 48 frames).
+
 ## Numerics (the output is not bit-identical to the CPU path)
 
 - f32 throughout (WGSL has no f64). Twiddles are built in f64 on the host: GPU `sin`/`cos` are only

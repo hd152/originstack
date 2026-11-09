@@ -489,6 +489,20 @@ def _gpu_unusable(aligned, C: int, H: int, W: int) -> Optional[str]:
     return None
 
 
+def _print_gpu_profile(tm: dict, st: list, memmap: bool) -> None:
+    """ORIGINSTACK_GPU_PROFILE=1: where the GPU combine's time went. The device stages ran one
+    by one (each submitted and waited for), so their sum is longer than an unprofiled pass; the
+    host numbers are wall time on the calling thread."""
+    names = ('upload', 'prep', 'row FFTs', 'transposes', 'column FFTs', 'accumulate')
+    n = max(st[6], 1.0)
+    dev = sum(st[:6])
+    safe_print(f"    GPU profile ({int(st[6])} frames, {'disk' if memmap else 'RAM'}-backed stack): device "
+               f"{dev:.1f}s serialised = " + ", ".join(f"{k} {v:.1f}s ({v / n * 1000:.0f} ms/frame)"
+                                                       for k, v in zip(names, st[:6])))
+    safe_print(f"    GPU profile: host add calls {tm['add']:.1f}s, waiting on host prep "
+               f"{tm['wait_host']:.1f}s, finish {tm['finish']:.1f}s")
+
+
 def _combine_gpu(aligned, ref_sig, use, meas, n_thr: int, tick, verbose: bool):
     """The combine pass of ``proper_coadd`` on the GPU (``--gpu-coadd``, src/gpu_coadd.rs).
 
@@ -509,6 +523,8 @@ def _combine_gpu(aligned, ref_sig, use, meas, n_thr: int, tick, verbose: bool):
     wsum, w2f, sky_acc = np.zeros(C), np.zeros(C), np.zeros(C)
     used = 0
     memmap = isinstance(aligned, np.memmap)
+    prof = os.environ.get('ORIGINSTACK_GPU_PROFILE', '0') not in ('', '0')
+    tm = {'wait_host': 0.0, 'add': 0.0, 'finish': 0.0}
 
     def host_prep(j):
         p, F = meas[j]
@@ -541,11 +557,16 @@ def _combine_gpu(aligned, ref_sig, use, meas, n_thr: int, tick, verbose: bool):
                 w2f[c] += (F * F / sig[c] ** 2) ** 2 / F
                 sky_acc[c] += (F * F / sig[c] ** 2) * sky[c] / F
         stamps = np.ascontiguousarray(np.stack(sts))
+        t_add = time.time()
         if memmap:      # the frames already read for sky and noise, not a second read of the memmap
-            _native.gpu_coadd_add(np.stack([b[5] for b in batch]), list(range(len(batch))),
-                                  fs, sks, s2s, wns, wfs, stamps)
+            if hasattr(_native, 'gpu_coadd_add_list'):
+                _native.gpu_coadd_add_list([b[5] for b in batch], fs, sks, s2s, wns, wfs, stamps)
+            else:       # astro_native older than 0.67: stack the frames first (one more copy)
+                _native.gpu_coadd_add(np.stack([b[5] for b in batch]), list(range(len(batch))),
+                                      fs, sks, s2s, wns, wfs, stamps)
         else:
             _native.gpu_coadd_add(aligned, ids, fs, sks, s2s, wns, wfs, stamps)
+        tm['add'] += time.time() - t_add
         used += len(batch)
 
     ex = ThreadPoolExecutor(max_workers=n_thr)
@@ -570,7 +591,9 @@ def _combine_gpu(aligned, ref_sig, use, meas, n_thr: int, tick, verbose: bool):
 
         refill()
         while pending:
+            t_w = time.time()
             hp = pending.popleft().result()
+            tm['wait_host'] += time.time() - t_w
             refill()
             tick()                                            # progress, and RunCancelled
             if hp is not None:
@@ -581,7 +604,11 @@ def _combine_gpu(aligned, ref_sig, use, meas, n_thr: int, tick, verbose: bool):
         flush(batch)
         if used == 0:
             raise RuntimeError("no frame had a usable noise level")
+        t_f = time.time()
         img = np.asarray(_native.gpu_coadd_finish())
+        tm['finish'] = time.time() - t_f
+        if prof and hasattr(_native, 'gpu_coadd_profile'):
+            _print_gpu_profile(tm, _native.gpu_coadd_profile(), memmap)
     except RunCancelled:
         _native.gpu_coadd_abort()
         raise
