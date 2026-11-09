@@ -242,6 +242,8 @@ def _prefetch_session_lookups(lights: List[FrameInfo], args, directory: str,
     fut_t = ex.submit(infer_target_from_metadata, directory, list(lights), use_simbad=use_simbad,
                       session_name=_si.object_name if _si else None)
     ex.shutdown(wait=False)
+    from src import prefetch
+    prefetch.start(args, lights)        # Gaia tiles and the colour-calibration cone, cached
     return fut_t
 
 
@@ -715,6 +717,8 @@ def _settle_stack_wcs(args, lights: List[FrameInfo], final: List[FrameInfo],
     header all read the same WCS. Never raises.
     """
     args._stack_wcs_origin = (int(top), int(left))   # stack pixel -> reference grid
+    from src import prefetch
+    prefetch.join(args)             # the catalogue prefetch fills the caches read below
     si = getattr(args, '_session_info', None)
     has_si = si is not None and si.has_wcs
     if not has_si and not getattr(args, 'wcs_refine', True):

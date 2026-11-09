@@ -10,6 +10,7 @@ match the `VERSION` file and `v*` git tags.
 - **`--gpu-coadd`: the proper coadd's combine pass on the GPU** (opt-in; Vulkan, DX12 or Metal through wgpu, any vendor). On a real 206-frame session the pass took 9 s instead of 17 s and the stack differed from the CPU stack by about 1e-5 of its noise (float32 on the GPU: close, not bit-identical). The GPU code is in every `astro_native` build (the `gpu` Cargo feature is on by default, crate 0.66.0: wheel 1.0 -> 3.2 MB, import +3-4 ms); the run falls back to the CPU pass, with a note, when the GPU is missing, too small or fails. Details, numbers and limits: [dev-notes/gpu-coadd.md](dev-notes/gpu-coadd.md); `tools/ab_gpu_coadd.py` compares the two paths.
 
 ### Changed
+- **Catalogue prefetch**: the Gaia index tiles under the field and the colour-calibration Gaia cone are fetched in a background thread from the start of Phase 1 (the field is known from `info.json` or the pointing keywords), instead of after stacking. A cold run saved the ~7 s of network wait (3.7 s per tile, 3.1 s for the cone); a warm cache saves nothing and nothing changes in the result. `src/prefetch.py`.
 - **`--gpu-coadd` declines an integrated GPU**: on an AMD Radeon iGPU the combine pass took 92.6 s against 30.8 s on the CPU (output identical to 1.3e-5 of the noise), so the run uses the CPU, with a note. Name the adapter (`ORIGINSTACK_GPU_ADAPTER`) or set `ORIGINSTACK_GPU_ALLOW_INTEGRATED=1` to use it anyway.
 
 ### Fixed
