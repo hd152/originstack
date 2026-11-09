@@ -371,3 +371,122 @@ def test_disk_backed_stack_gives_the_same_result_with_one_read_per_frame(tmp_pat
     assert ram is not None and disk is not None
     assert np.array_equal(ram, disk)
     del mm
+
+
+# --- explicit frame reads and the slow-GPU self-check ---------------------------------------
+
+
+def test_frame_reader_reads_the_same_bytes_as_the_memmap(tmp_path):
+    rng = np.random.default_rng(3)
+    data = rng.random((5, 12, 17, 3), dtype=np.float32)
+    mm = np.memmap(tmp_path / 'a.f32', np.float32, 'w+', shape=data.shape)
+    mm[...] = data
+    reader = pc._FrameReader(mm)
+    buf = None
+    for j in (3, 0, 4):
+        buf = reader.read(j, buf)                         # the buffer is reused
+        assert np.array_equal(buf, data[j])
+    mm2 = np.memmap(tmp_path / 'a.f32', np.float32, 'r', offset=0, shape=data.shape)
+    assert np.array_equal(pc._FrameReader(mm2).read(2), data[2])
+    short = pc._FrameReader(mm)
+    short.nbytes += 4                                     # reads past the end of the file
+    with pytest.raises(OSError):
+        short.read(4)
+    del mm, mm2
+
+
+def test_frame_reader_declines_what_it_cannot_read(tmp_path):
+    ram = np.zeros((2, 4, 4, 3), np.float32)
+    with pytest.raises(OSError):
+        pc._FrameReader(ram).read(0)                      # not file-backed
+
+
+class _SlowNative:
+    """The parts of astro_native `_combine_gpu` calls, with a per-frame device time."""
+
+    def __init__(self, ms_per_frame):
+        self.ms = ms_per_frame
+        self.calls = []
+
+    gpu_coadd_begin = staticmethod(lambda *a: None)
+    gpu_available = staticmethod(lambda: True)
+    gpu_info = staticmethod(lambda: 'Fake Discrete (Vulkan, DiscreteGpu)')
+
+    def gpu_coadd_add(self, aligned, ids, *a):
+        self._add(len(ids))
+
+    def gpu_coadd_add_list(self, frames, *a):
+        self._add(len(frames))
+
+    def _add(self, n):
+        import time as _t
+        _t.sleep(self.ms / 1000 * n)
+        self.calls.append(n)
+
+    def gpu_coadd_finish(self):
+        self.calls.append('finish')
+        return np.zeros((3, 8, 8), np.float32)
+
+    def gpu_coadd_abort(self):
+        self.calls.append('abort')
+
+
+def _selfcheck_problem(monkeypatch, ms, n=48):
+    A = np.random.default_rng(0).random((n, 40, 50, 3), dtype=np.float32) + 1.0   # needs a measurable noise
+    fake = _SlowNative(ms)
+    monkeypatch.setattr(pc, '_native', fake)
+    monkeypatch.setattr(pc, '_moffat_grid', lambda yy, xx, p: np.ones_like(yy))
+    monkeypatch.setattr(pc, '_sky_noise', lambda fr: (np.ones(3), np.ones(3)))   # the logic is under test, not the estimator
+    meas = {j: ((2.0, 3.0), 1.0) for j in range(n)}
+    return A, fake, meas
+
+
+def test_self_check_drops_a_gpu_that_is_clearly_slower_than_the_cpu(monkeypatch):
+    A, fake, meas = _selfcheck_problem(monkeypatch, ms=90)          # 90 ms/frame > the 70 ms trigger
+    probed = []
+    res = pc._combine_gpu(A, np.zeros((3, 8, 8), np.float32), list(range(48)), meas, 2, lambda: None,
+                          False, cpu_probe=lambda: probed.append(1) or 40.0)
+    assert res is None and probed == [1]
+    assert fake.calls[-1] == 'abort' and 'finish' not in fake.calls
+    assert sum(c for c in fake.calls if isinstance(c, int)) == 24    # stopped after three batches
+
+
+def test_self_check_keeps_a_gpu_that_is_not_slower(monkeypatch):
+    A, fake, meas = _selfcheck_problem(monkeypatch, ms=90)
+    res = pc._combine_gpu(A, np.zeros((3, 8, 8), np.float32), list(range(48)), meas, 2, lambda: None,
+                          False, cpu_probe=lambda: 95.0)             # 90 < 95
+    assert res is not None and fake.calls[-1] == 'finish'
+
+
+def test_self_check_costs_nothing_for_a_fast_gpu(monkeypatch):
+    A, fake, meas = _selfcheck_problem(monkeypatch, ms=5)
+    probed = []
+    res = pc._combine_gpu(A, np.zeros((3, 8, 8), np.float32), list(range(48)), meas, 2, lambda: None,
+                          False, cpu_probe=lambda: probed.append(1) or 1.0)
+    assert res is not None and probed == []                          # never timed the CPU
+
+
+def test_self_check_skips_short_passes(monkeypatch):
+    A, fake, meas = _selfcheck_problem(monkeypatch, ms=90, n=24)
+    probed = []
+    res = pc._combine_gpu(A, np.zeros((3, 8, 8), np.float32), list(range(24)), meas, 2, lambda: None,
+                          False, cpu_probe=lambda: probed.append(1) or 1.0)
+    assert res is not None and probed == []
+
+
+@needs_gpu
+def test_add_list_matches_add_and_the_profile_counts_frames(monkeypatch):
+    """`gpu_coadd_add_list` (separate frames) gives the same image as `gpu_coadd_add` (one stack);
+    with ORIGINSTACK_GPU_PROFILE the per-stage timings and a frame count are reported."""
+    aligned, ref_sig, stamps, F, sky, s2, wn, wf = _small_problem()
+    K = aligned.shape[0]
+    f32 = lambda x: [float(np.float32(v)) for v in x]            # noqa: E731
+    one = _gpu_accumulate(aligned, ref_sig, stamps, F, sky, s2, wn, wf, 128, 128)
+    _NAT.gpu_coadd_begin(ref_sig, float(pc._REJECT_K), float(pc._SIGNAL_FRAC), pc._PAD, pc._PSF_R, 128, 128)
+    _NAT.gpu_coadd_add_list([np.ascontiguousarray(aligned[j]) for j in range(K)], f32(F),
+                            [f32(s) for s in sky], [f32(s) for s in s2], wn, wf,
+                            np.ascontiguousarray(np.stack(stamps)))
+    listed = np.asarray(_NAT.gpu_coadd_finish())
+    assert np.array_equal(one, listed)
+    prof = _NAT.gpu_coadd_profile()
+    assert len(prof) == 7 and all(v >= 0 for v in prof)         # stage seconds + frames (0 unless profiling is on)

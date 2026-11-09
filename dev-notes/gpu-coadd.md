@@ -71,6 +71,23 @@ profile showed that stacking a batch of disk-backed frames into one array before
 single-read version) cost ~19 ms per frame of host copying; `gpu_coadd_add_list` takes the frames as they
 are (disk-backed 2.0 s vs 1.9 s in RAM for 48 frames).
 
+## Self-check and frame reads (crate 0.67, 2026-11)
+
+- **Self-check.** A GPU held at a low clock by the Windows power plan was 2.5x slower than the CPU and
+  nothing noticed. `_combine_gpu` now times the device over frames 9-24 (the first add call carries the
+  warm-up); only when that exceeds `_GPU_SUSPECT_MS` (70 ms per frame; healthy cards measured 30-50) does it
+  time the CPU path that would run (`cpu_probe`: a warm-up round and a timed round of 2 frames per thread,
+  after which the probe reads ~10-15% high: 88-93 vs 80 ms measured) and drops the GPU, with a note that names
+  the power plan, if the GPU is slower than that (`_GPU_SLOW_FACTOR` 1.0). A healthy GPU pays nothing; passes
+  under 48 frames are not checked. On the Balanced-plan laptop (137 ms per frame against a CPU near 109) it
+  would have stopped the 3050 after 24 frames.
+- **Disk-backed frames** are read with explicit sequential reads (`_FrameReader`, one handle per thread, a
+  small buffer pool, read-ahead `n_thr + 4` frames) instead of `np.array(memmap[j])` page-fault copies:
+  14.7 vs 9.6 ms per 73 MB frame with the file in the cache. On a warm dev machine this changes nothing
+  (the device is the limit, 3.6 vs 3.8 s for 96 frames); it is meant for a cold disk, where the
+  laptop's combine waited 8.9 s of 28.6 s on the host. `ORIGINSTACK_GPU_PROFILE` also reports the summed
+  frame-read and sky/noise time of the host threads.
+
 ## Numerics (the output is not bit-identical to the CPU path)
 
 - f32 throughout (WGSL has no f64). Twiddles are built in f64 on the host: GPU `sin`/`cos` are only

@@ -39,6 +39,8 @@ from __future__ import annotations
 import collections
 import logging
 import os
+import queue
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
@@ -489,6 +491,46 @@ def _gpu_unusable(aligned, C: int, H: int, W: int) -> Optional[str]:
     return None
 
 
+_GPU_SUSPECT_MS = 70.0          # device ms per frame above which the CPU is timed for comparison
+_GPU_SLOW_FACTOR = 1.0          # ... and the GPU is dropped when it is slower than that (the probe reads ~10-15% high)
+_SELFCHECK_MIN_FRAMES = 48      # below this the pass is too short to be worth checking
+
+
+class _FrameReader:
+    """Explicit sequential reads of a memmapped stack's frames (one file handle per thread).
+
+    ``np.array(memmap[j])`` copies through page faults; reading the frame's bytes straight into a
+    buffer was 1.5x faster with the file in the cache (14.7 vs 9.6 ms per 73 MB frame) and
+    avoids the per-page fault cost on a cold disk. The stack must be C-contiguous float32."""
+
+    def __init__(self, mm):
+        self.path = getattr(mm, 'filename', None)
+        self.base = int(getattr(mm, 'offset', 0) or 0)
+        self.shape = mm.shape[1:]
+        self.nbytes = int(np.prod(self.shape)) * 4
+        self._local = threading.local()
+        self.ok = bool(self.path) and mm.flags.c_contiguous and mm.dtype == np.float32 and mm.ndim == 4
+        if self.ok:
+            try:
+                mm.flush()                      # reads through the file must see what was written
+            except Exception:
+                _log.debug("proper coadd: flushing the memmap failed", exc_info=True)
+
+    def read(self, j: int, buf=None) -> np.ndarray:
+        if not self.ok:
+            raise OSError("not a plain float32 file-backed stack")
+        f = getattr(self._local, 'f', None)
+        if f is None:
+            f = self._local.f = open(self.path, 'rb', buffering=0)
+        if buf is None or buf.shape != self.shape:
+            buf = np.empty(self.shape, np.float32)
+        f.seek(self.base + j * self.nbytes)
+        n = f.readinto(memoryview(buf).cast('B'))
+        if n != self.nbytes:
+            raise OSError(f"short read of frame {j}: {n} of {self.nbytes} bytes")
+        return buf
+
+
 def _print_gpu_profile(tm: dict, st: list, memmap: bool) -> None:
     """ORIGINSTACK_GPU_PROFILE=1: where the GPU combine's time went. The device stages ran one
     by one (each submitted and waited for), so their sum is longer than an unprofiled pass; the
@@ -500,10 +542,11 @@ def _print_gpu_profile(tm: dict, st: list, memmap: bool) -> None:
                f"{dev:.1f}s serialised = " + ", ".join(f"{k} {v:.1f}s ({v / n * 1000:.0f} ms/frame)"
                                                        for k, v in zip(names, st[:6])))
     safe_print(f"    GPU profile: host add calls {tm['add']:.1f}s, waiting on host prep "
-               f"{tm['wait_host']:.1f}s, finish {tm['finish']:.1f}s")
+               f"{tm['wait_host']:.1f}s, finish {tm['finish']:.1f}s; host prep threads (summed): "
+               f"frame reads {tm['read']:.1f}s, sky/noise {tm['noise']:.1f}s")
 
 
-def _combine_gpu(aligned, ref_sig, use, meas, n_thr: int, tick, verbose: bool):
+def _combine_gpu(aligned, ref_sig, use, meas, n_thr: int, tick, verbose: bool, cpu_probe=None):
     """The combine pass of ``proper_coadd`` on the GPU (``--gpu-coadd``, src/gpu_coadd.rs).
 
     Sky and noise per frame (CPU, in a thread pool that runs ahead) overlap the device, which
@@ -511,7 +554,12 @@ def _combine_gpu(aligned, ref_sig, use, meas, n_thr: int, tick, verbose: bool):
     wsum, w2_over_f, sky_acc, n_bad)`` -- ``img`` is the raw inverse transform, the caller adds
     the weight scale and the sky -- or None when the GPU cannot be used or fails (then nothing
     has been added to the caller's sums and the CPU path runs). ``RunCancelled`` propagates.
-    The sums are local until the end, so a failure part-way leaves no trace."""
+    The sums are local until the end, so a failure part-way leaves no trace.
+
+    ``cpu_probe`` (a callable returning the CPU combine's ms per frame, or None) is the self-check:
+    when the device takes more than ``_GPU_SUSPECT_MS`` per frame over frames 9-24 the CPU is timed,
+    and the pass returns None (so the CPU runs) if the GPU is clearly slower. A GPU held at a low
+    clock by the power plan was 2.5x slower than the CPU, and nothing else notices that."""
     from src.models import RunCancelled
     N, H, W, C = aligned.shape
     why = _gpu_unusable(aligned, C, H, W)
@@ -522,17 +570,41 @@ def _combine_gpu(aligned, ref_sig, use, meas, n_thr: int, tick, verbose: bool):
     yy, xx = np.mgrid[-R:R + 1, -R:R + 1].astype(np.float64)
     wsum, w2f, sky_acc = np.zeros(C), np.zeros(C), np.zeros(C)
     used = 0
+    add_log = []                        # (frames, seconds) of each add call
+    checked = cpu_probe is None or len(use) < _SELFCHECK_MIN_FRAMES
     memmap = isinstance(aligned, np.memmap)
     prof = os.environ.get('ORIGINSTACK_GPU_PROFILE', '0') not in ('', '0')
-    tm = {'wait_host': 0.0, 'add': 0.0, 'finish': 0.0}
+    tm = {'wait_host': 0.0, 'add': 0.0, 'finish': 0.0, 'read': 0.0, 'noise': 0.0}
+    tm_lock = threading.Lock()
+    reader = _FrameReader(aligned) if memmap else None
+    pool = queue.SimpleQueue()          # frame buffers of a disk-backed stack, reused
+
+    def read_frame(j):
+        buf = None
+        try:
+            buf = pool.get_nowait()
+        except queue.Empty:
+            pass
+        if reader is not None:
+            try:
+                return reader.read(j, buf)
+            except OSError:
+                _log.debug("proper coadd: explicit frame read failed; using the memmap", exc_info=True)
+        return np.array(aligned[j])
 
     def host_prep(j):
         p, F = meas[j]
         # an in-RAM frame is read in place; a disk-backed one is read once, sequentially, and
         # that copy is what the device gets (``flush``): with the stack larger than the free RAM
         # the page cache cannot keep it for a second read from the memmap
-        fr = np.array(aligned[j]) if memmap else None
+        t_r = time.time()
+        fr = read_frame(j) if memmap else None
+        t_n = time.time()
         sky, sig = _sky_noise(fr if memmap else aligned[j])
+        if prof:
+            with tm_lock:
+                tm['read'] += t_n - t_r
+                tm['noise'] += time.time() - t_n
         if not (np.all(np.isfinite(sig)) and np.all(sig > 0)):
             return None
         k = _moffat_grid(yy, xx, p)
@@ -566,8 +638,13 @@ def _combine_gpu(aligned, ref_sig, use, meas, n_thr: int, tick, verbose: bool):
                                       fs, sks, s2s, wns, wfs, stamps)
         else:
             _native.gpu_coadd_add(aligned, ids, fs, sks, s2s, wns, wfs, stamps)
-        tm['add'] += time.time() - t_add
+        dt = time.time() - t_add
+        tm['add'] += dt
+        add_log.append((len(batch), dt))
         used += len(batch)
+        if memmap:
+            for b in batch:
+                pool.put(b[5])
 
     ex = ThreadPoolExecutor(max_workers=n_thr)
     try:
@@ -578,7 +655,7 @@ def _combine_gpu(aligned, ref_sig, use, meas, n_thr: int, tick, verbose: bool):
         batch = []
         # host prep runs ahead of the device; for a disk-backed stack each result carries a
         # frame (~70 MB), so the read-ahead is bounded
-        ahead = n_thr + 8 if memmap else len(use)
+        ahead = n_thr + 4 if memmap else len(use)
         todo = iter(use)
         pending = collections.deque()
 
@@ -601,6 +678,18 @@ def _combine_gpu(aligned, ref_sig, use, meas, n_thr: int, tick, verbose: bool):
             if len(batch) >= 8:
                 flush(batch)
                 batch = []
+                if not checked and len(add_log) >= 3:
+                    checked = True
+                    n_f = sum(n for n, _ in add_log[1:3])      # the first call includes warm-up
+                    g_ms = sum(d for _, d in add_log[1:3]) / max(n_f, 1) * 1000
+                    if g_ms > _GPU_SUSPECT_MS:
+                        c_ms = cpu_probe()
+                        if c_ms is not None and g_ms > _GPU_SLOW_FACTOR * c_ms:
+                            _native.gpu_coadd_abort()
+                            safe_print(f"    --gpu-coadd: the GPU takes {g_ms:.0f} ms per frame, the CPU "
+                                       f"{c_ms:.0f} ms; using the CPU (on a laptop, a high-performance "
+                                       f"power plan keeps the GPU at full clock)")
+                            return None
         flush(batch)
         if used == 0:
             raise RuntimeError("no frame had a usable noise level")
@@ -725,16 +814,16 @@ def proper_coadd(aligned, reference: np.ndarray, fwhm: float = 5.0,
     tick = _progress_ticker('Proper coadd', len(use), cancel_event, verbose=verbose)
 
     t1 = time.time()
-    gpu_res = _combine_gpu(aligned, ref_sig, use, meas, n_thr, tick, verbose) if gpu else None
 
-    def worker(k):
+    def worker(k, frames=None, quiet=False):
         planes = np.zeros((C + 1, PH, PW), np.float32)
         a_num = np.zeros((C,) + fshape, np.complex64 if acc32 else np.complex128)
         a_den = np.zeros((C,) + fshape, np.float32 if acc32 else np.float64)
         s_w = np.zeros(C); s_w2f = np.zeros(C); s_sky = np.zeros(C)
         nbad = nrep = 0
-        for j in use[k::n_thr]:
-            tick()
+        for j in (use[k::n_thr] if frames is None else frames):
+            if not quiet:
+                tick()
             p, F = meas[j]
             # one sequential read into RAM: the strided sky/noise samples below touched
             # nearly every page of a disk-backed aligned frame once per channel (34 s of
@@ -766,8 +855,9 @@ def proper_coadd(aligned, reference: np.ndarray, fwhm: float = 5.0,
                 s_w2f[c] += wf * wf / F
                 s_sky[c] += wf * sky[c] / F
         del planes
-        with lock:
-            n_rep_box[0] += nrep
+        if not quiet:
+            with lock:
+                n_rep_box[0] += nrep
         return a_num, a_den, s_w, s_w2f, s_sky, nbad
 
     def worker_tiled(k):
@@ -775,6 +865,27 @@ def proper_coadd(aligned, reference: np.ndarray, fwhm: float = 5.0,
         with lock:
             n_rep_box[0] += nrep
         return tuple(part)
+
+    probe = None
+    if gpu and acc32:
+        tiled = _tiled_ok(aligned)
+
+        def probe():
+            """ms per frame of the CPU combine (the path that would run), from a warm-up round and a timed
+            round of 2 frames per thread."""
+            sample = list(use[-4 * n_thr:])
+            rounds = [sample[:len(sample) // 2], sample[len(sample) // 2:]]
+            t_round = 0.0
+            for rnd in rounds:                  # the first round only warms the buffers and FFT plans
+                chunks = [c for c in (rnd[i::n_thr] for i in range(n_thr)) if c]
+                t0 = time.time()
+                with ThreadPoolExecutor(max_workers=len(chunks)) as pex:
+                    list(pex.map(lambda c: (_combine_tiled(aligned, c, meas, ref_sig, PH, PW) if tiled
+                                            else worker(0, c, quiet=True)), chunks))
+                t_round = time.time() - t0
+            return t_round / max(len(rounds[-1]), 1) * 1000
+    gpu_res = (_combine_gpu(aligned, ref_sig, use, meas, n_thr, tick, verbose, cpu_probe=probe)
+               if gpu else None)
 
     if gpu_res is not None:
         gpu_img, g_wsum, g_w2f, g_sky, n_bad_noise = gpu_res
