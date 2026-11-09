@@ -36,6 +36,7 @@ _FIELD_LABELS = {
     'color_calibrate': N_('Colour calibrate'),
     'remove_stars': N_('Starless sidecar'),
     'deconvolve_mode': N_('Deconvolution'),
+    'nn_deconv_blend': N_('Learned sharpening strength'),
     'session_cfa_eq': N_('Session colour equalisation'),
     'ca_correction': N_('Chromatic aberration fix'),
     'cfa_drizzle': N_('Bayer drizzle'),

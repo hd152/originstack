@@ -639,7 +639,6 @@
  "Frame report": "フレームレポート",
  "Merge consistency": "マージの一貫性",
  "Merge proper": "マージ(proper)",
- "Nn deconv blend": "NNデコンボリューション比率",
  "With --deconvolve nn: the share (0-1) of the deconvolver output kept.": "--deconvolve nn使用時: デコンボルバーの出力を残す割合(0-1)。",
  "With --deconvolve nn: the share (0-1) of the deconvolver output kept; the rest is the neural denoiser output. Lower values leave less sky noise and keep faint galaxy contrast, higher values sharpen more. Default: automatic (0.75; with --auto galaxies 0.35).": "--deconvolve nn使用時: デコンボルバーの出力を残す割合(0-1)。残りはニューラルデノイザーの出力です。小さい値は空のノイズが少なく、銀河の淡いコントラストを保ち、大きい値はよりシャープになります。既定: 自動(0.75、--auto使用時の銀河は0.35)。",
  "With --merge or a multi-session combine: reject what only one night shows.": "--mergeまたは複数セッションの結合時: 1晩にしか写っていないものを除外します。",
@@ -781,5 +780,6 @@
  "score {score}, FWHM {fwhm} px, SNR {snr}, {stars} stars": "スコア {score}、FWHM {fwhm} px、SNR {snr}、星 {stars} 個",
  "{n} left out of {total}": "{total} 枚中 {n} 枚を除外",
  "{sigma:.1f}σ above the sky · {pct:.2f}% of pixels darker": "空より {sigma:.1f}σ 上 · {pct:.2f}% のピクセルがより暗い",
- "{total} frames": "{total} フレーム"
+ "{total} frames": "{total} フレーム",
+ "Learned sharpening strength": "学習済みシャープ化の強さ"
 }
