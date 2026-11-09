@@ -122,10 +122,16 @@ p99.99 0.006 ADU, mean -8e-4 ADU; the 4547 brightest pixels differ by at most 8e
   disk)**: the GPU combine is *slower* than the CPU one on both its GPUs. Radeon iGPU (Vulkan): 92.6 s vs
   30.8 s CPU; RTX 3050 Laptop (Vulkan): 80.9 s vs 32.2 s CPU (whole runs 431 s vs 382 s and 436 s vs
   438 s, ~15% run-to-run). Output correct (23/23 GPU tests on both). The 2x gain above is the GTX
-  1650 Ti on the 64 GB desktop-class machine with the stack in RAM. Untested suspicion: with the aligned
-  stack on disk and little free RAM, `host_prep` reads each frame (`np.array(aligned[j])`) and
-  `gpu_coadd_add` then reads it again from the memmap, so the 21 GB are read twice; the CPU path reads
-  them once. Passing the already-read frames to the device would test that.
+  1650 Ti on the 64 GB desktop-class machine with the stack in RAM. Suspected cause, tested:
+  with the aligned stack on disk and little free RAM, `host_prep` read each frame
+  (`np.array(aligned[j])`) and `gpu_coadd_add` then read it again from the memmap, so the 21 GB were read
+  twice. Handing the device the frame already read (one read per frame, read-ahead bounded to
+  `n_thr + 8` frames) took the RTX 3050's combine from 80.9 s to **53.1 s** (whole run 436 -> 402 s, CPU
+  run 438 s; ~15% run-to-run) and left the Radeon iGPU where it was (92.6 -> 90.0 s). So the double read
+  was real but is not the whole story: the combine is still 1.6x (3050) and 2.8x (iGPU) the CPU's 32.2 s.
+  What remains is not identified; candidates are the 70 MB upload per frame, the 36% padding to a
+  2048 x 4096 plane, and a laptop GPU that is simply slower than the 12-thread CPU at this work. Splitting
+  the time on the device (upload, prep, FFT, accumulate) is the next measurement.
 - Sky and noise per frame are still CPU work (about 3.6 s over 206 frames, hidden behind the device).
 - The experiment also tried a GPU Lanczos warp (about 2x, 7 s of a run), a per-pixel sigma-clip combine
   (6x *slower* than the CPU: per-thread quickselect in local memory), the NN U-Net and the Phase 1 pixel
