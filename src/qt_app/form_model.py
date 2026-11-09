@@ -67,6 +67,7 @@ class FormModel(QObject):
         # (name, type, source) the session/header/folder suggest -- local lookups only.
         self.inferred: Tuple[Optional[str], Optional[str], Optional[str]] = (None, None, None)
         self.camera_note = ''
+        self.previous_stacks: List[Dict[str, Any]] = []   # earlier stacks of this target
         self.count_text = ''          # shown under the folder field
         self.suggested: Optional[str] = None       # the target card the folder suggests
 
@@ -167,6 +168,7 @@ class FormModel(QObject):
         self.frame_counts = {}
         self.inferred = (None, None, None)
         self.camera_note = ''
+        self.previous_stacks = []
         self.count_text = ''
         self.suggested = None
         if directory and os.path.isdir(directory):
@@ -205,6 +207,7 @@ class FormModel(QObject):
             if ttype == 'unknown':
                 ttype = None
             self.inferred = (name, ttype, src)
+            self.previous_stacks = self._find_previous(directory, name)
             cam_name = unprofiled_camera(lights)
             if cam_name:
                 self.camera_note = _(
@@ -214,6 +217,34 @@ class FormModel(QObject):
             if name:
                 text += f'  ·  {name}' + (f', {_from_source(src)}' if _from_source(src) else '')
         self.count_text = text
+
+    def _find_previous(self, directory: str, name: Optional[str]) -> List[Dict[str, Any]]:
+        """Earlier stacks of this target next to the folder, in the output folder and in the
+        last output folder."""
+        from src.desktop_control import load_app_setting
+        from src.previous_stacks import find_previous_stacks
+        out = str(self.get('output')).strip()
+        if out.lower().endswith(('.fits', '.fit')):
+            out = os.path.dirname(out)
+        last = load_app_setting('last_output', '')
+        dirs = [out, last if isinstance(last, str) else '', directory,
+                os.path.dirname(os.path.abspath(directory))]
+        try:
+            return find_previous_stacks(name, dirs)
+        except Exception:
+            return []
+
+    def merge_previous(self) -> bool:
+        """True when the merge field holds exactly the earlier stacks found for this folder."""
+        paths = ','.join(s['path'] for s in self.previous_stacks)
+        return bool(paths) and str(self.get('merge')) == paths
+
+    def set_merge_previous(self, on: bool) -> None:
+        """One click: add the earlier stacks of this target (``--merge``), or clear them."""
+        if on:
+            self.set('merge', ','.join(s['path'] for s in self.previous_stacks))
+        elif self.merge_previous():
+            self.set('merge', '')
 
     def auto_card_text(self) -> str:
         """The Auto-detect card's description: what it will start from, once known."""

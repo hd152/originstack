@@ -1837,3 +1837,28 @@ def test_setup_form_builds_in_every_language(code, qapp):
         form.close()
     finally:
         i18n.set_language('en')
+
+
+def test_merge_previous_stacks_one_click(qapp, tmp_path, monkeypatch):
+    from src.qt_app.form_model import FormModel
+    from src.qt_app.setup_form import SetupForm
+    m = FormModel()
+    stack = tmp_path / 'M101_stacked.fits'
+    stack.write_bytes(b'')
+    monkeypatch.setattr(m, '_find_previous', lambda d, n: [
+        {'path': str(stack), 'frames': 40, 'date': '2026-01-01'}])
+    m.previous_stacks = m._find_previous('x', 'M101')
+    assert not m.merge_previous()
+    m.set_merge_previous(True)
+    assert m.get('merge') == str(stack) and m.merge_previous()
+    assert m.read_form()['merge'] == str(stack)
+    m.set_merge_previous(False)
+    assert m.get('merge') == ''
+    # a hand-typed merge list is not cleared by unticking
+    m.set('merge', 'other.fits')
+    m.set_merge_previous(False)
+    assert m.get('merge') == 'other.fits'
+    form = SetupForm(m)
+    form._refresh_merge_box()
+    assert not form.merge_box.isHidden()
+    assert '40' in form.merge_box.text()
