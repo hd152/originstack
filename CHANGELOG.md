@@ -11,6 +11,7 @@ match the `VERSION` file and `v*` git tags.
 
 ### Changed
 - **Catalogue prefetch**: the Gaia index tiles under the field and the colour-calibration Gaia cone are fetched in a background thread from the start of Phase 1 (the field is known from `info.json` or the pointing keywords), instead of after stacking. A cold run saved the ~7 s of network wait (3.7 s per tile, 3.1 s for the cone); a warm cache saves nothing and nothing changes in the result. `src/prefetch.py`.
+- **`--gpu-coadd` declines an integrated GPU**: on an AMD Radeon iGPU the combine pass took 92.6 s against 30.8 s on the CPU (output identical to 1.3e-5 of the noise), so the run uses the CPU, with a note. Name the adapter (`ORIGINSTACK_GPU_ADAPTER`) or set `ORIGINSTACK_GPU_ALLOW_INTEGRATED=1` to use it anyway.
 
 ### Fixed
 - A red (and green) strip along the bottom edge of a Whirlpool stack: the Phase 4 edge-band step smoothed its depth profile with a kernel as wide as a tenth of the 400-row band, which smeared the ~35 row strip (R +390, G +120 ADU) into its surroundings. At the edge it removed only 60% (R +95 left), and 40-100 rows deep it over-subtracted (R -60). The smoothing is now 2-3 rows; the edge medians match the interior (R 164 / G 326 / B 162 against 160 / 324 / 164) on that stack, and the Black Eye and Sagittarius stacks are unchanged to a few ADU.

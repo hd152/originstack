@@ -781,5 +781,6 @@
  "{n} left out of {total}": "{total} 枚中 {n} 枚を除外",
  "{sigma:.1f}σ above the sky · {pct:.2f}% of pixels darker": "空より {sigma:.1f}σ 上 · {pct:.2f}% のピクセルがより暗い",
  "{total} frames": "{total} フレーム",
- "Learned sharpening strength": "学習済みシャープ化の強さ"
+ "Learned sharpening strength": "学習済みシャープ化の強さ",
+ "Add {n} earlier stack(s) of {name} ({frames} frames) to this one": "{name} の以前のスタック {n} 件（{frames} フレーム）をこのスタックに追加"
 }

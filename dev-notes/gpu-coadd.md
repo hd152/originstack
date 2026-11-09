@@ -6,6 +6,13 @@ crate 0.66.0 (the `gpu` Cargo feature is a default feature; `maturin build --rel
 leaves it out). Measured when it was made default (Windows, GTX 1650 Ti): wheel 1.0 -> 3.2 MB, `import astro_native`
 +3-4 ms, no behaviour change without the flag; with the GPU disabled or the feature absent the run uses the CPU pass.
 
+**Integrated GPUs are declined.** On a 16 GB laptop with an AMD Radeon iGPU (Vulkan, 2 GB shared, 2026-11-09,
+300-light Whirlpool session) the GPU combine took 92.6 s against 30.8 s on the CPU (whole run 431 s vs 382 s), and
+the 96-frame synthetic stack 28.5 s vs 8.4 s; the output matched the CPU (1.3e-5 of the noise, tests 23/23).
+`--gpu-coadd` therefore falls back to the CPU, with a note, when the adapter in use is an integrated one;
+`ORIGINSTACK_GPU_ADAPTER=<name>` (naming it) or `ORIGINSTACK_GPU_ALLOW_INTEGRATED=1` opts in. The default pick already
+prefers a discrete card (the same laptop's RTX 3050 was chosen over the Radeon).
+
 ```bash
 cd ext/astro_native
 maturin build --release                           # includes astro_native.gpu_* (+2.2 MB wheel, +5.6 MB .pyd)
