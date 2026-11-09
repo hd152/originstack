@@ -355,3 +355,19 @@ def test_the_option_is_off_by_default_and_part_of_the_checkpoint_fingerprint():
     b = ck.stack_fingerprint(parse_args(['-d', 'x', '--gpu-coadd']), [])
     assert a['p23'] != b['p23'] and 'gpu_coadd' in b['p23']          # a stale CPU checkpoint is not reused
     assert a['p1'] == b['p1']
+
+
+@needs_gpu
+def test_disk_backed_stack_gives_the_same_result_with_one_read_per_frame(tmp_path):
+    """A memmapped stack hands the device the frames already read for sky and noise (a second
+    read of a stack larger than free RAM goes to disk): the result must equal the in-RAM one."""
+    A, ref = _field()
+    path = tmp_path / 'aligned.f32'
+    mm = np.memmap(path, np.float32, 'w+', shape=A.shape)
+    mm[...] = A
+    mm.flush()
+    ram = pc.proper_coadd(A, ref, fwhm=5.0, verbose=False, gpu=True)
+    disk = pc.proper_coadd(mm, ref, fwhm=5.0, verbose=False, gpu=True)
+    assert ram is not None and disk is not None
+    assert np.array_equal(ram, disk)
+    del mm

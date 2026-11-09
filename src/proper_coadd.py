@@ -36,6 +36,7 @@ matched filters do not wrap around the edges.
 """
 from __future__ import annotations
 
+import collections
 import logging
 import os
 import time
@@ -511,20 +512,23 @@ def _combine_gpu(aligned, ref_sig, use, meas, n_thr: int, tick, verbose: bool):
 
     def host_prep(j):
         p, F = meas[j]
-        # an in-RAM frame is read in place; a disk-backed one is read once, sequentially
-        sky, sig = _sky_noise(np.array(aligned[j]) if memmap else aligned[j])
+        # an in-RAM frame is read in place; a disk-backed one is read once, sequentially, and
+        # that copy is what the device gets (``flush``): with the stack larger than the free RAM
+        # the page cache cannot keep it for a second read from the memmap
+        fr = np.array(aligned[j]) if memmap else None
+        sky, sig = _sky_noise(fr if memmap else aligned[j])
         if not (np.all(np.isfinite(sig)) and np.all(sig > 0)):
             return None
         k = _moffat_grid(yy, xx, p)
         k /= k.sum()
-        return j, F, sky, sig, k
+        return j, F, sky, sig, k, fr
 
     def flush(batch):
         nonlocal used
         if not batch:
             return
         ids, fs, sks, s2s, wns, wfs, sts = [], [], [], [], [], [], []
-        for j, F, sky, sig, k in batch:
+        for j, F, sky, sig, k, _fr in batch:
             ids.append(j)
             fs.append(float(np.float32(F)))
             sks.append([float(np.float32(v)) for v in sky])
@@ -536,7 +540,12 @@ def _combine_gpu(aligned, ref_sig, use, meas, n_thr: int, tick, verbose: bool):
                 wsum[c] += F * F / sig[c] ** 2
                 w2f[c] += (F * F / sig[c] ** 2) ** 2 / F
                 sky_acc[c] += (F * F / sig[c] ** 2) * sky[c] / F
-        _native.gpu_coadd_add(aligned, ids, fs, sks, s2s, wns, wfs, np.ascontiguousarray(np.stack(sts)))
+        stamps = np.ascontiguousarray(np.stack(sts))
+        if memmap:      # the frames already read for sky and noise, not a second read of the memmap
+            _native.gpu_coadd_add(np.stack([b[5] for b in batch]), list(range(len(batch))),
+                                  fs, sks, s2s, wns, wfs, stamps)
+        else:
+            _native.gpu_coadd_add(aligned, ids, fs, sks, s2s, wns, wfs, stamps)
         used += len(batch)
 
     ex = ThreadPoolExecutor(max_workers=n_thr)
@@ -546,8 +555,23 @@ def _combine_gpu(aligned, ref_sig, use, meas, n_thr: int, tick, verbose: bool):
         if verbose:
             safe_print(f"    proper coadd: on the GPU ({_native.gpu_info()})")
         batch = []
-        for fu in [ex.submit(host_prep, j) for j in use]:     # host prep runs ahead of the device
-            hp = fu.result()
+        # host prep runs ahead of the device; for a disk-backed stack each result carries a
+        # frame (~70 MB), so the read-ahead is bounded
+        ahead = n_thr + 8 if memmap else len(use)
+        todo = iter(use)
+        pending = collections.deque()
+
+        def refill():
+            while len(pending) < ahead:
+                j = next(todo, None)
+                if j is None:
+                    return
+                pending.append(ex.submit(host_prep, j))
+
+        refill()
+        while pending:
+            hp = pending.popleft().result()
+            refill()
             tick()                                            # progress, and RunCancelled
             if hp is not None:
                 batch.append(hp)
