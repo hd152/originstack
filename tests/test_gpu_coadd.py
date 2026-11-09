@@ -1,6 +1,6 @@
 """GPU proper coadd (src/gpu_coadd.rs, src/proper_coadd._combine_gpu, --gpu-coadd).
 
-The kernel tests need an astro_native built with ``--features gpu`` and a usable adapter and skip
+The kernel tests need an astro_native built with the ``gpu`` feature (default since 0.66.0) and a usable adapter and skip
 otherwise; the fallback, option and fingerprint tests run everywhere, so the default CI covers the
 Python side of the feature without a GPU."""
 import subprocess

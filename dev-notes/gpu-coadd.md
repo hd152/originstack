@@ -1,12 +1,14 @@
 # GPU proper coadd (`--gpu-coadd`)
 
 The combine pass of the proper coadd ([src/proper_coadd.py](../src/proper_coadd.py)) on the GPU, through
-wgpu (Vulkan, DX12 or Metal: any vendor, no CUDA). Opt-in, and **not in the packaged app or the PyPI
-wheels**: it lives behind the `gpu` Cargo feature of `astro_native`.
+wgpu (Vulkan, DX12 or Metal: any vendor, no CUDA). Opt-in at run time (`--gpu-coadd`); the code is in every build since
+crate 0.66.0 (the `gpu` Cargo feature is a default feature; `maturin build --release --no-default-features`
+leaves it out). Measured when it was made default (Windows, GTX 1650 Ti): wheel 1.0 -> 3.2 MB, `import astro_native`
++3-4 ms, no behaviour change without the flag; with the GPU disabled or the feature absent the run uses the CPU pass.
 
 ```bash
 cd ext/astro_native
-maturin build --release --features gpu            # adds astro_native.gpu_* (+2.2 MB wheel, +5.6 MB .pyd)
+maturin build --release                           # includes astro_native.gpu_* (+2.2 MB wheel, +5.6 MB .pyd)
 pip install --force-reinstall target/wheels/astro_native-*.whl   # then confirm astro_native.__version__
 python originstack.py -d lights/ -o stacked.fits --gpu-coadd
 python tools/ab_gpu_coadd.py --synthetic 96       # CPU vs GPU on one stack: time and difference

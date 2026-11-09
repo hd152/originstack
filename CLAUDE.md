@@ -132,7 +132,7 @@ files from different sessions have landed in the wrong PR before). So:
 | `distortion.py` | Radial distortion model (`--distortion-model`); null result on Origin data |
 | `stacking.py` | Combines (sigma-clip, percentile, ESD, linear fit, IVW, wavelet, median), drizzle (resample / `--drizzle-method splat`, kernels lanczos/psf/magic, `--super-res-iters`), lacosmic, online sigma-clip, `run_stacking_phase`; the numpy combines share one tile driver (`_tile_grid`, `_combine_tiles`) |
 | `quick_look.py` | Desktop app only (`UIEvents.active`): after registration, mean of the 8 sharpest frames warped into the common crop and binned to preview size, published as the `quick-look` named preview before Phase 3's combine; skipped with elastic registration; never touches the stack, a failure is logged and swallowed (a cancel is not) |
-| `proper_coadd.py` | Zackay-Ofek proper coaddition, on by default (`--no-proper-coadd`); `--gpu-coadd` (opt-in, `astro_native` built with `--features gpu`, not in release builds) runs its combine pass on the GPU via wgpu (`ext/astro_native/src/gpu.rs`, `gpu_coadd.rs`), falling back to the CPU on any failure; output close to, not bit-identical with, the CPU path: [gpu-coadd](dev-notes/gpu-coadd.md) |
+| `proper_coadd.py` | Zackay-Ofek proper coaddition, on by default (`--no-proper-coadd`); `--gpu-coadd` (opt-in; the `gpu` Cargo feature is on by default since crate 0.66.0) runs its combine pass on the GPU via wgpu (`ext/astro_native/src/gpu.rs`, `gpu_coadd.rs`), falling back to the CPU on any failure; output close to, not bit-identical with, the CPU path: [gpu-coadd](dev-notes/gpu-coadd.md) |
 | `cfa_drizzle.py` | Bayer drizzle (`--cfa-drizzle`, opt-in, not recommended for Origin data) |
 | `full_field.py` | Extend the stack beyond the common crop (`--full-field`, on by default at FRAC 0.5; `--no-full-field` / `--full-field 0` off; skipped silently with drizzle, comet mode, elastic registration, uncertainty map) |
 | `merge.py` | `--merge` and the hierarchical combine (`merge_previous_stacks`) |
@@ -304,8 +304,8 @@ cd ext/astro_native && python -m maturin build --release
 pip install --force-reinstall target/wheels/astro_native-*.whl
 # optional transient-triage model support (tract ONNX runtime; off by default)
 python -m maturin build --release --features triage
-# optional GPU proper coadd (wgpu; --gpu-coadd; off by default, not in any release build)
-python -m maturin build --release --features gpu
+# the GPU proper coadd (wgpu; --gpu-coadd) is built in by default; leave it out with
+python -m maturin build --release --no-default-features
 ```
 PyPI wheels (Windows x64, Linux x86_64 manylinux, macOS arm64 and x86_64, plus an sdist) come from `.github/workflows/native-wheels.yml`: it builds and smoke-tests on every PR that touches `ext/astro_native/`, and publishes only on a `native-v<Cargo version>` tag (or a manual run with `publish`), through the `pypi` environment with trusted publishing. The crate version lives in `Cargo.toml` only (`pyproject.toml` reads it).
 The startup banner reports native status (`native_status()`); accelerated steps log `[rust] ...`. Benchmark kernel changes with [tools/bench_native.py](tools/bench_native.py).

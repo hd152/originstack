@@ -1,6 +1,6 @@
 [package]
 name = "astro_native"
-version = "0.65.0"
+version = "0.66.0"
 edition = "2021"
 description = "Native (Rust) hot-path kernels for OriginStack: stacking combine, etc."
 license = "GPL-3.0-or-later"
@@ -20,17 +20,17 @@ lz4_flex = "0.14"
 # ~120 transitive crates). Release packaging builds without it.
 tract-onnx = { version = "0.23", optional = true }
 # GPU compute through wgpu (Vulkan / DX12 / Metal), for --gpu-coadd. Optional: only built with
-# `--features gpu`; the default, PyPI and packaged builds do not contain it. See `src/gpu.rs`.
+# the `gpu` feature, which is on by default (`--no-default-features` builds without it). See `src/gpu.rs`.
 wgpu = { version = "30.0.1", optional = true, default-features = false, features = ["std", "parking_lot", "dx12", "vulkan", "metal", "wgsl"] }
 pollster = { version = "1.0.1", optional = true }
 
 [features]
-default = []
+default = ["gpu"]
 # `maturin build --release --features triage` adds
 # astro_native.transient_triage_score (--transient-triage).
 triage = ["dep:tract-onnx"]
-# `maturin build --release --features gpu` adds astro_native.gpu_* (the GPU proper coadd,
-# `--gpu-coadd`; see dev-notes/gpu-coadd.md).
+# astro_native.gpu_* (the GPU proper coadd, `--gpu-coadd`; see dev-notes/gpu-coadd.md). On by
+# default since 0.66.0: +2.2 MB wheel, ~3 ms import, falls back to the CPU without an adapter.
 gpu = ["dep:wgpu", "dep:pollster"]
 
 [profile.release]

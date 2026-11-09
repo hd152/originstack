@@ -74,8 +74,8 @@ jobs:
       - name: Native kernel parity tests
         run: pytest -q -n auto tests/test_native.py
 
-  # The optional `gpu` feature (wgpu; --gpu-coadd) is not in any released wheel, so the default
-  # jobs never compile it. Build it on all three platforms (clippy: the repo's correctness gate
+  # The `gpu` feature (wgpu; --gpu-coadd) is a default feature, so every job compiles it; this
+  # job is its dedicated gate. Build it on all three platforms (clippy: the repo's correctness gate
   # for the whole crate, and no warning at all in the gpu modules, which the older code would
   # fail). The runners have no GPU; Linux also runs tests/test_gpu_coadd.py on Mesa's software
   # Vulkan driver (lavapipe, admitted by ORIGINSTACK_GPU_ALLOW_SOFTWARE) so the kernels execute.
