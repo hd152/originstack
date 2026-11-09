@@ -46,12 +46,15 @@ It is verified on Origin, Seestar S50 and LCO mono only.
   16 GB laptop (300 lights: frame store compressed in Phase 1, aligned stack on disk, no out-of-memory;
   Phase 1 dropped to 2 workers when only 0.8 GB was free). Open: what dominates the 380-430 s there.
   **code**, S.
-- `--gpu-coadd`: 2x on a GTX 1650 Ti with the stack in RAM, but 2.5-3x slower than the CPU on two laptop
-  GPUs with a disk-backed stack. Reading each frame once (PR "GPU coadd: read a disk-backed frame
-  once") took the RTX 3050's combine from 80.9 to 53.1 s, still above the CPU's 32.2 s, and did nothing for
-  the Radeon iGPU; the stage profile (crate 0.67) puts the 3050's combine at 43.6 s with every stage 3-5x slower than the same stage
-  on the GTX 1650 Ti: its SM clock reads 210 MHz of 2100 under load (P3, 48-52 C, plugged in), likely a driver/power-management limit: check the clock throttle reasons and the NVIDIA power-management mode before drawing conclusions (see [gpu-coadd.md](gpu-coadd.md)). Do not promote
-  it until a discrete card beats the CPU on a real session. **code**, M.
+- `--gpu-coadd`: solved the mystery of the slow laptop GPU, not yet the speed. The RTX 3050 laptop ran its
+  compute clock at 210 MHz of 2100 under the Windows "Balanced" plan; on Ultimate Performance it ran at
+  800-1700 MHz and every stage dropped to GTX 1650 Ti speed (synthetic 48 frames: GPU 4.7 s vs CPU 8.3 s;
+  Whirlpool combine 28.6 s vs ~32 s on the CPU). On the real session the GPU is now waiting for the host
+  (device 14.8 s of the 28.6 s; 8.9 s waiting on frame reads and sky/noise, upload 30 ms per frame), so
+  the gain is limited by reading the 21 GB disk-backed stack. Open: hide the read behind the GPU, and
+  say in the docs/help that a laptop needs a high-performance power plan (done in the help text); a
+  start-up self-check that falls back to the CPU when the GPU is clearly slow. See
+  [gpu-coadd.md](gpu-coadd.md). **code**, M.
 - Re-bench the whole pipeline against current Siril and PixInsight WBPP on the same data once per
   release; keep `bench_vs_siril.py` results in the compare page. **code**, S per release.
 - GPU stays opt-in; revisit only if VRAM-bound workers go away. Low priority.

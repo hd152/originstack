@@ -96,8 +96,27 @@ trustworthy and the 210 MHz may be a reporting quirk. If it is real, it explains
 210 MHz against the 1650 Ti's 1024 at ~1.5 GHz is ~3.6x slower, and the stages are 3-5x slower. A RAM-backed
 48-frame synthetic run on the same laptop gives the same per-stage times as the disk-backed session (column
 FFTs 38 vs 37 ms), so disk and session are ruled out; its GPU run took 7.0 s against 7.1 s on the CPU.
-Next: `nvidia-smi -q -d PERFORMANCE` during a run (clock throttle reasons), then the NVIDIA power-management
-mode ("Prefer maximum performance" for the Python executable), Windows graphics setting and plan, and a rerun. Whole runs: 3050 GPU 398-402 s vs CPU 438 s (the CPU run varies ~15%).
+**Resolved: it was real, and it was the Windows power plan.** On "Balanced" the RTX 3050 held a 210 MHz
+compute clock under load; after the user switched the plan to Ultimate Performance the same laptop (idle:
+P3, SM 810 MHz, clock event reasons Idle only; no SW power cap, HW slowdown, thermal or power brake) ran at
+787-1725 MHz in P0/P3 during the combine and every stage dropped to 1650 Ti speed:
+
+| per frame, ms | Balanced (Whirlpool) | Ultimate Performance (Whirlpool) | same, 48 synthetic RAM frames |
+|---|---|---|---|
+| upload | 53 | 30 | 50 |
+| prep / accumulate | 7 / 6 | 3 / 4 | 3 / 4 |
+| row FFTs | 26 | 4 | 4 |
+| transposes | 8 | 3 | 3 |
+| column FFTs | 37 | 6 | 6 |
+| device total | 137 | 50 | 70 |
+
+48 synthetic RAM-backed frames: GPU 4.7 s vs CPU 8.3 s. Whirlpool (295 frames, disk-backed, free RAM 5.3 GB):
+combine **28.6 s on the GPU** (43.6 s on Balanced) against ~32 s on the CPU; Proper coadd stage 38.1 s vs
+53.1 s on the CPU; whole runs 452 s vs 465 s (both slower than the earlier runs on this laptop, which
+varies ~15% with free RAM). The GPU is now waiting on the host: device 14.8 s of the 28.6 s, 8.9 s waiting
+on the frame reads and sky/noise, upload still 30 ms per frame. The Radeon iGPU was not rerun on the new
+plan (90 s on Balanced) and stays declined. Lesson: on a laptop, check the power plan before judging a GPU
+path (`nvidia-smi --query-gpu=clocks.sm,clocks.max.sm,pstate --format=csv -l 2` during a run). Whole runs: 3050 GPU 398-402 s vs CPU 438 s (the CPU run varies ~15%).
 
 ## Numerics (the output is not bit-identical to the CPU path)
 
