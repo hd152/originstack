@@ -220,6 +220,12 @@ jobs:
           python tools/create_synthetic.py
           python originstack.py -d synthetic_data -o ci_synthetic_stack.fits --debayer-method malvar --white-balance grayworld --stack-method median
 
+      - name: Performance budget (time and peak memory)
+        # Catches a slowdown or memory blow-up; wide time margin since runners have fewer cores.
+        run: |
+          pip install psutil
+          python tools/perf_budget.py --time-margin 8
+
       - name: Upload synthetic stack artifact
         if: success()
         uses: actions/upload-artifact@v7
