@@ -8,6 +8,7 @@ Written as ``<stem>_frames.csv`` / ``<stem>_frames.json`` and published through
 """
 import csv
 import json
+import logging
 import os
 from typing import Dict, List, Optional
 
@@ -15,6 +16,8 @@ import numpy as np
 
 from src.effective_exposure import LOW_T_EFF, frame_t_eff
 from src.utils import safe_print
+
+_log = logging.getLogger("originstack")
 
 # A kept frame is annotated (never rejected) when it is this far off the session median.
 FWHM_FLAG_RATIO = 1.5
@@ -137,7 +140,7 @@ def emit_frame_report(lights, rejected_reasons, final, args, output_path: str) -
         from src.ui_events import get_ui_events
         get_ui_events().frame_report(rows)
     except Exception:
-        pass
+        _log.debug("emit_frame_report: ignored error", exc_info=True)
     if len(paths) == 2:
         safe_print(f"  Frame report: {os.path.basename(paths[0])}, "
                    f"{os.path.basename(paths[1])} ({len(rows)} frames)")

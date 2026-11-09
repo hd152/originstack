@@ -979,7 +979,7 @@ def compute_quality_metrics(img: np.ndarray, level: str = 'full',
         try:
             psf_ellipticity, psf_pa_scatter, psf_anisotropy_type = measure_psf_anisotropy(sources_s)
         except Exception:
-            pass
+            _log.debug("compute_quality_metrics: ignored error", exc_info=True)
         # Star ellipticity: median(1 - b/a) for SEP sources; median|roundness1| for DAO
         try:
             if 'a' in sources_s.dtype.names and 'b' in sources_s.dtype.names:

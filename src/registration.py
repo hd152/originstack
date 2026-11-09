@@ -96,7 +96,7 @@ def match_stars_affine(ref_positions: Optional[Any], img_positions: Optional[Any
         if inliers is not None and inliers.sum() >= 3:
             return model
     except Exception:
-        pass
+        _log.debug("match_stars_affine: ignored error", exc_info=True)
     return None
 
 
@@ -395,7 +395,7 @@ def calculate_shift(ref: np.ndarray, img: np.ndarray, upsample: int = 10, verbos
                 f.write(f"Reference:\n  min={np.min(ref):.2f}, max={np.max(ref):.2f}, mean={np.mean(ref):.2f}, std={np.std(ref):.2f}\n")
                 f.write(f"Image:\n  min={np.min(img):.2f}, max={np.max(img):.2f}, mean={np.mean(img):.2f}, std={np.std(img):.2f}\n")
         except Exception:
-            pass
+            _log.debug("calculate_shift: ignored error", exc_info=True)
 
     # Step 1: Multi-scale pyramid registration (coarse-to-fine).
     # A caller-supplied seed (from the reference-selection pyramid pass) lets us
@@ -442,7 +442,7 @@ def calculate_shift(ref: np.ndarray, img: np.ndarray, upsample: int = 10, verbos
                 ref = ref_lum_m
                 img_shifted = img_lum_m
         except Exception:
-            pass
+            _log.debug("calculate_shift: ignored error", exc_info=True)
 
     # Use phase cross correlation for subpixel shifts
     if not skip_phase_cc:
@@ -624,7 +624,7 @@ def calculate_shift(ref: np.ndarray, img: np.ndarray, upsample: int = 10, verbos
 
             debug_info.append(f"centroid(p{percentile}): n_ref={n_ref}, n_img={n_img}")
         except Exception:
-            pass
+            _log.debug("calculate_shift: ignored error", exc_info=True)
 
     if verbose and debug_info:
         print("      [CRITICAL: no registration method succeeded] " + " | ".join(debug_info))
@@ -745,7 +745,7 @@ def _xcorr_window(ref: np.ndarray, img: np.ndarray, radius: int) -> np.ndarray:
                                                    np.ascontiguousarray(img, dtype=np.float32),
                                                    int(radius)))
         except Exception:
-            pass
+            _log.debug("_xcorr_window: ignored error", exc_info=True)
     return _xcorr_window_numpy(ref, img, radius)
 
 
@@ -1057,7 +1057,7 @@ def select_reference_frame(
             if np.isfinite(sy) and np.isfinite(sx):
                 return j, float(sy), float(sx)
         except Exception:
-            pass
+            _log.debug("_pyramid_one: ignored error", exc_info=True)
         return j, 0.0, 0.0
 
     safe_print(f"  Pyramid pass for reference selection ({len(final)} frames, {n_workers} workers)...")
@@ -1174,7 +1174,7 @@ def _residual_warp(lum: np.ndarray, shift, transform) -> np.ndarray:
             return _native.ndimage_affine_order1(lum, np.ascontiguousarray(M, np.float64),
                                                  np.ascontiguousarray(offset, np.float64))
         except Exception:
-            pass
+            _log.debug("_residual_warp: ignored error", exc_info=True)
     if M is None:
         return ndimage.shift(lum, shift=shift, order=1, mode='constant', cval=0.0)
     return ndimage.affine_transform(lum.astype(np.float64), M, offset=offset,
@@ -1416,7 +1416,7 @@ def compute_patch_scores(lum: np.ndarray, grid_size: int = None) -> np.ndarray:
             # (69 ms per frame under Phase 1's load); equal up to summation order
             return _native.patch_brenner_scores(np.ascontiguousarray(lum), ph, pw, ny, nx)
         except Exception:
-            pass
+            _log.debug("compute_patch_scores: ignored error", exc_info=True)
     patch_scores = np.zeros((ny, nx), dtype=np.float32)
     lum_f = lum.astype(np.float64)
     for iy in range(ny):
@@ -2283,7 +2283,7 @@ def find_comet_centroid(lum: np.ndarray,
             if result is not None:
                 return result
     except Exception:
-        pass
+        _log.debug("find_comet_centroid: ignored error", exc_info=True)
 
     # --- Fallback: original Gaussian-blur + threshold method ---
     smoothed = _gaussian_blur(lum64, smooth_sigma)
@@ -3040,7 +3040,7 @@ def run_comet_registration_phase(
             from src.quality import detect_stars_auto
             ref_stars = detect_stars_auto(ref_lum, float(np.std(ref_lum)))
         except Exception:
-            pass
+            _log.debug("run_comet_registration_phase: ignored error", exc_info=True)
 
         if ref_stars is not None and len(ref_stars) >= 3:
             for j, orig_idx in enumerate(final_indices):

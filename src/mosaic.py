@@ -55,6 +55,10 @@ try:
 except Exception:
     HAS_SCIPY = False
 
+import logging
+
+_log = logging.getLogger("originstack")
+
 # Sessions closer than this fraction of the (smaller) field are the same pointing:
 # nights of one target differ by 7-70 px of 2048 (< 0.04), up to 0.15 when re-centred,
 # and a mis-aimed Whirlpool session sat 0.32 off (0.25 made it a two-panel "mosaic" of
@@ -720,7 +724,7 @@ def stitch_mosaic_panels(panel_paths: List[str], output_path: str, args) -> bool
             try:
                 hdr[key] = base[key]
             except Exception:
-                pass
+                _log.debug("stitch_mosaic_panels: ignored error", exc_info=True)
     hdr['RAWSTACK'] = (True, 'Linear stack (before post-processing)')
     hdr['MOSAIC'] = (True, 'Stitched from several panels')
     hdr['NPANELS'] = (len(placed), 'Number of mosaic panels')
@@ -732,7 +736,7 @@ def stitch_mosaic_panels(panel_paths: List[str], output_path: str, args) -> bool
         try:
             hdr[f'PANEL{i:03d}'] = os.path.basename(path)[:68]
         except Exception:
-            pass
+            _log.debug("stitch_mosaic_panels: ignored error", exc_info=True)
     fits.PrimaryHDU(data=np.transpose(mosaic, (2, 0, 1)), header=hdr).writeto(output_path, overwrite=True)
     safe_print(f"  ✓ Mosaic: {os.path.basename(output_path)} ({Ho}x{Wo}, {len(placed)} panels, "
                f"{np.mean(cov > 0) * 100:.1f}% of the grid covered, {np.mean(cov > 1) * 100:.1f}% overlap)")

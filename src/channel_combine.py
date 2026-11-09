@@ -27,6 +27,10 @@ except Exception:
     _native = None
     _HAS_NATIVE = False
 
+import logging
+
+_log = logging.getLogger("originstack")
+
 
 # ---------------------------------------------------------------------------
 # Internal helpers
@@ -176,7 +180,7 @@ def _continuum_scale_moments(a: np.ndarray, b: np.ndarray) -> tuple:
                 np.ascontiguousarray(a, dtype=np.float64),
                 np.ascontiguousarray(b, dtype=np.float64))
         except Exception:
-            pass
+            _log.debug("_continuum_scale_moments: ignored error", exc_info=True)
     return _continuum_scale_moments_numpy(a, b)
 
 

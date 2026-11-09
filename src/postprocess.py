@@ -117,7 +117,7 @@ def _diag_save(img: np.ndarray, diag_dir: Optional[str], counter: list, slug: st
             wv.preview(img, f"Post-processing: {slug.replace('_', ' ')}",
                        args=None)
     except Exception:
-        pass
+        _log.debug("_diag_save: ignored error", exc_info=True)
     if not diag_dir:
         return
     try:
@@ -358,7 +358,7 @@ def _postprocess_early(stacked: np.ndarray, args: argparse.Namespace,
                     _bg_star_mask = wing_aware_star_mask(
                         _pp_lum, _pp_sources, pp_star_mask, verbose=args.verbose)
         except Exception:
-            pass
+            _log.debug("_postprocess_early: ignored error", exc_info=True)
     if _bg_star_mask is None:
         _bg_star_mask = pp_star_mask
 
@@ -665,14 +665,14 @@ def _postprocess_early(stacked: np.ndarray, args: argparse.Namespace,
                         sky_mask &= (dist >= excl_radius)
                         remaining_lum[dist < excl_radius] = float(np.min(remaining_lum))
             except Exception:
-                pass
+                _log.debug("_postprocess_early: ignored error", exc_info=True)
             try:
                 if sigma_clipped_stats is not None:
                     sample = lum_s[sky_mask].ravel() if sky_mask.any() else lum_s.ravel()
                     _, lum_med, lum_std = sigma_clipped_stats(sample, sigma=3.0, maxiters=5)
                     sky_mask &= (lum_s < float(lum_med) + 3.0 * float(lum_std))
             except Exception:
-                pass
+                _log.debug("_postprocess_early: ignored error", exc_info=True)
             if sky_mask.sum() > 1000:
                 for c in range(3):
                     col = stacked[:, :, c][sky_mask].ravel()
@@ -689,7 +689,7 @@ def _postprocess_early(stacked: np.ndarray, args: argparse.Namespace,
                         if args.verbose:
                             safe_print(f"    Sky floor correction ch{c}: -{sky_floor:.2f}")
         except Exception:
-            pass
+            _log.debug("_postprocess_early: ignored error", exc_info=True)
 
     # 4.5. Sky residual correction (always after background extraction)
     if args.background_extraction and 'sky_residual' not in skip_steps:
@@ -1566,7 +1566,7 @@ def _early_cache_key(stacked: np.ndarray, args, skip_steps: set) -> Optional[str
         from src.utils import read_version
         h.update(str(read_version()).encode())
     except Exception:
-        pass
+        _log.debug("_early_cache_key: ignored error", exc_info=True)
     return h.hexdigest()
 
 

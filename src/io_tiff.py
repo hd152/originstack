@@ -16,9 +16,12 @@ key (the same mechanism already used for FITS/RAW) to override this.
 """
 from __future__ import annotations
 
+import logging
 from typing import Tuple
 
 import numpy as np
+
+_log = logging.getLogger("originstack")
 
 TIFF_EXTENSIONS: Tuple[str, ...] = ('.tif', '.tiff')
 
@@ -44,7 +47,7 @@ def read_tiff_header(path: str) -> dict:
         if len(shape) == 3:
             hdr['NAXIS3'] = shape[2]
     except Exception:
-        pass
+        _log.debug("read_tiff_header: ignored error", exc_info=True)
     return hdr
 
 

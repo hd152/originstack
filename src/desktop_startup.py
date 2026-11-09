@@ -4,11 +4,14 @@ verification run and the hard exit after the window closes."""
 from __future__ import annotations
 
 import datetime
+import logging
 import os
 import sys
 import traceback
 from pathlib import Path
 from typing import List
+
+_log = logging.getLogger("originstack")
 
 
 def _log_dir() -> Path:
@@ -98,16 +101,16 @@ def _shutdown_and_exit(code: int = 0, wait_s: float = 5.0) -> None:
         for p in multiprocessing.active_children():
             p.terminate()
     except Exception:
-        pass
+        _log.debug("_shutdown_and_exit: ignored error", exc_info=True)
     try:
         import psutil
         for child in psutil.Process().children(recursive=True):
             try:
                 child.kill()
             except Exception:
-                pass
+                _log.debug("_shutdown_and_exit: ignored error", exc_info=True)
     except Exception:
-        pass
+        _log.debug("_shutdown_and_exit: ignored error", exc_info=True)
     if not run_stopped:
         # with its workers gone, a run waiting on them fails at once
         try:
@@ -115,7 +118,7 @@ def _shutdown_and_exit(code: int = 0, wait_s: float = 5.0) -> None:
                 rm.thread.join(timeout=wait_s)
             run_stopped = not rm.is_running()
         except Exception:
-            pass
+            _log.debug("_shutdown_and_exit: ignored error", exc_info=True)
     if run_stopped:
         # with the run still inside a phase its memory-mapped files are in use; a
         # later run's start-up sweep removes them instead
@@ -123,12 +126,12 @@ def _shutdown_and_exit(code: int = 0, wait_s: float = 5.0) -> None:
             from src.cleanup import cleanup_now
             cleanup_now()
         except Exception:
-            pass
+            _log.debug("_shutdown_and_exit: ignored error", exc_info=True)
     try:
         import logging
         logging.shutdown()
         sys.stdout.flush()
         sys.stderr.flush()
     except Exception:
-        pass
+        _log.debug("_shutdown_and_exit: ignored error", exc_info=True)
     os._exit(code)

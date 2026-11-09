@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import io
 import json
+import logging
 import os
 import ssl
 import time
@@ -42,6 +43,8 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
+
+_log = logging.getLogger("originstack")
 
 _USER_AGENT = "originstack-net_query/1.0"
 _DEFAULT_TIMEOUT = 30.0
@@ -61,7 +64,7 @@ def _ssl_context() -> ssl.SSLContext:
         import certifi
         ctx.load_verify_locations(cafile=certifi.where())
     except Exception:
-        pass
+        _log.debug("_ssl_context: ignored error", exc_info=True)
     return ctx
 
 
@@ -408,7 +411,7 @@ def astrometry_net_login(api_key: str, timeout: float = 30.0) -> Optional[str]:
         if r.get("status") == "success":
             return r["session"]
     except Exception:
-        pass
+        _log.debug("astrometry_net_login: ignored error", exc_info=True)
     return None
 
 
@@ -432,7 +435,7 @@ def astrometry_net_upload(session: str, fits_path: str,
         if r.get("status") == "success":
             return str(r["subid"])
     except Exception:
-        pass
+        _log.debug("astrometry_net_upload: ignored error", exc_info=True)
     return None
 
 
@@ -448,7 +451,7 @@ def astrometry_net_poll_submission(subid: str, deadline: float,
             if jobs and jobs[0] is not None:
                 return str(jobs[0])
         except Exception:
-            pass
+            _log.debug("astrometry_net_poll_submission: ignored error", exc_info=True)
         time.sleep(poll_interval)
     return None
 
@@ -467,7 +470,7 @@ def astrometry_net_poll_job(job_id: str, deadline: float,
             if status == "failure":
                 return False
         except Exception:
-            pass
+            _log.debug("astrometry_net_poll_job: ignored error", exc_info=True)
         time.sleep(poll_interval)
     return None
 

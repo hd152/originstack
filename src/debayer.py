@@ -111,13 +111,13 @@ def _sigma_clipped_median(arr, sigma: float = 3.0, iters: int = 3, xp=np) -> flo
         try:
             return float(_native.strided_sigma_clipped_median(arr, float(sigma), int(iters)))
         except Exception:
-            pass
+            _log.debug("_sigma_clipped_median: ignored error", exc_info=True)
     if xp is np and _HAS_NATIVE and hasattr(_native, 'sigma_clipped_median_native'):
         try:
             flat = np.ascontiguousarray(arr.ravel(), dtype=np.float32)
             return float(_native.sigma_clipped_median_native(flat, float(sigma), int(iters)))
         except Exception:
-            pass
+            _log.debug("_sigma_clipped_median: ignored error", exc_info=True)
     x = arr.ravel()
     for _ in range(iters):
         med = float(xp.median(x))
@@ -172,7 +172,7 @@ def green_equalize(raw, pattern: str = 'RGGB', inplace: bool = False):
             _native.green_equalize_inplace(work, g1_r, g1_c, g2_r, g2_c)
             return work
         except Exception:
-            pass
+            _log.debug("green_equalize: ignored error", exc_info=True)
     try:
         import cupy as _cp
         xp = _cp.get_array_module(raw)
@@ -225,7 +225,7 @@ def _equalize_bayer_grid(rgb: np.ndarray, inplace: bool = False) -> np.ndarray:
             work = rgb if inplace else rgb.copy()
             return work if _native.bayer_grid_equalize_inplace(work) or inplace else rgb
         except Exception:
-            pass
+            _log.debug("_equalize_bayer_grid: ignored error", exc_info=True)
     G = rgb[:, :, 1]
     ee = _sigma_clipped_median(G[::2,  ::2])   # R positions (even row, even col)
     eo = _sigma_clipped_median(G[::2,  1::2])  # G1 positions (even row, odd col)
@@ -382,13 +382,13 @@ def _malvar_raw(raw: np.ndarray, pattern: str,
             _native.debayer_malvar_into(np.ascontiguousarray(raw), out, pattern.upper())
             return out
         except Exception:
-            pass
+            _log.debug("_malvar_raw: ignored error", exc_info=True)
     if _HAS_NATIVE and hasattr(_native, 'debayer_malvar'):
         try:
             return _native.debayer_malvar(np.ascontiguousarray(raw, dtype=np.float32),
                                           pattern.upper())
         except Exception:
-            pass
+            _log.debug("_malvar_raw: ignored error", exc_info=True)
     result = _debayer_malvar_numpy(raw, pattern)
     if out is not None:
         out[...] = result
@@ -987,7 +987,7 @@ def white_balance_grayworld(rgb: np.ndarray, inplace: bool = False) -> np.ndarra
             _native.white_balance_grayworld_inplace(rgb)
             return rgb
         except Exception:
-            pass
+            _log.debug("white_balance_grayworld: ignored error", exc_info=True)
     img = xp.asarray(rgb, dtype=xp.float32)
     if (xp is np and _HAS_NATIVE and hasattr(_native, 'white_balance_grayworld')
             and img.ndim == 3 and img.shape[2] == 3):
@@ -995,7 +995,7 @@ def white_balance_grayworld(rgb: np.ndarray, inplace: bool = False) -> np.ndarra
         try:
             return _native.white_balance_grayworld(np.ascontiguousarray(img))
         except Exception:
-            pass
+            _log.debug("white_balance_grayworld: ignored error", exc_info=True)
     # float64 accumulation: a float32 running sum over ~6M pixels drifts ~1.5% on real frames
     mean = img.mean(axis=(0, 1), dtype=xp.float64).astype(xp.float32)
     scale = mean.mean() / (mean + 1e-12)
@@ -1018,7 +1018,7 @@ def white_balance_grayworld_lum(rgb: np.ndarray):
         try:
             return rgb, _native.white_balance_grayworld_lum_inplace(rgb)
         except Exception:
-            pass
+            _log.debug("white_balance_grayworld_lum: ignored error", exc_info=True)
     rgb = white_balance_grayworld(rgb, inplace=True)
     return rgb, luminance(get_gpu().to_host(rgb))
 
@@ -1189,7 +1189,7 @@ def _fix_hot_bayer(data: np.ndarray, threshold: Optional[float] = _DETECT,
                 data, float(threshold), None if star_support is None else float(star_support))
             return data
         except Exception:
-            pass
+            _log.debug("_fix_hot_bayer: ignored error", exc_info=True)
     if (_HAS_NATIVE and hasattr(_native, 'hot_pixel_bayer') and isinstance(data, np.ndarray)
             and (has_map or do_stat) and not (has_map and do_stat)):
         try:
@@ -1201,7 +1201,7 @@ def _fix_hot_bayer(data: np.ndarray, threshold: Optional[float] = _DETECT,
                 src, None, float(threshold),
                 None if star_support is None else float(star_support))
         except Exception:
-            pass
+            _log.debug("_fix_hot_bayer: ignored error", exc_info=True)
 
     result = data.astype(np.float32, copy=True)
     if not has_map and not do_stat:
@@ -1271,7 +1271,7 @@ def _median_filter3(arr, xp, _nd):
         try:
             return _native.median_filter_native(arr, 3)
         except Exception:
-            pass
+            _log.debug("_median_filter3: ignored error", exc_info=True)
     return _nd.median_filter(arr, size=3)
 
 
@@ -1322,7 +1322,7 @@ def _fix_hot_rgb_impl(rgb, threshold, xp, _nd, inplace=False):
             lum_fixed = luminance(result)
             return result, lum_fixed
         except Exception:
-            pass
+            _log.debug("_fix_hot_rgb_impl: ignored error", exc_info=True)
 
     result = xp.empty_like(rgb)
     for c in range(rgb.shape[2]):
@@ -1374,7 +1374,7 @@ def _fix_hot_mono_impl(img, threshold, xp, _nd):
                 img3, np.ascontiguousarray(mask, dtype=np.uint8))
             return result[:, :, 0]
         except Exception:
-            pass
+            _log.debug("_fix_hot_mono_impl: ignored error", exc_info=True)
 
     return xp.where(mask, _nd.uniform_filter(img, size=3), img)
 
@@ -1498,7 +1498,7 @@ def remove_spikes_bayer(data: np.ndarray, k: Optional[float] = None,
             return _native.spike_reject_bayer(np.ascontiguousarray(data, dtype=np.float32),
                                               float(k), float(contrast), float(support_frac))
         except Exception:
-            pass
+            _log.debug("remove_spikes_bayer: ignored error", exc_info=True)
     return _spike_reject_bayer_numpy(data, k, contrast, support_frac)
 apply_hot_pixel_map_bayer = lambda data, hot_map: fix_hot_pixels(data, mode='bayer', hot_map=hot_map, threshold=None)
 
@@ -1512,7 +1512,7 @@ def luminance(rgb):
         try:
             return _native.luminance_native(rgb)
         except Exception:
-            pass
+            _log.debug("luminance: ignored error", exc_info=True)
     return 0.299 * rgb[:, :, 0] + 0.587 * rgb[:, :, 1] + 0.114 * rgb[:, :, 2]
 
 
@@ -1541,7 +1541,7 @@ def calibrate_frame_be16(raw, bzero, bias, dark, dark_scale, flat_norm, out=None
                 None if flat_norm is None else flat_norm.reshape(-1))
             return out, bool(finite)
         except Exception:
-            pass
+            _log.debug("calibrate_frame_be16: ignored error", exc_info=True)
     data = (raw.byteswap().view(np.int16).astype(np.int32) + int(bzero)).astype(np.float32)
     return calibrate_frame(data, bias, dark, dark_scale, flat_norm)
 
@@ -1576,7 +1576,7 @@ def calibrate_frame(data, bias, dark, dark_scale, flat_norm):
                 None if flat_norm is None else flat_norm.reshape(-1))
             return work, bool(finite)
         except Exception:
-            pass
+            _log.debug("calibrate_frame: ignored error", exc_info=True)
 
     if bias is not None:
         data = data.astype(np.float32, copy=False)
@@ -1715,7 +1715,7 @@ def apply_chromatic_aberration(rgb: np.ndarray, shifts: dict) -> np.ndarray:
                     [1.0, 0.0, 0.0, 1.0], off, H, W, 0.0)[:, :, 0]
                 continue
             except Exception:
-                pass
+                _log.debug("apply_chromatic_aberration: ignored error", exc_info=True)
         result[:, :, c_idx] = ndimage.shift(
             rgb[:, :, c_idx], shift=shift,
             order=3, mode='reflect').astype(np.float32)

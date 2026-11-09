@@ -22,7 +22,7 @@ OS003  Library code under src/ should not call bare print(); use safe_print /
 OS006  `except Exception:` (or bare `except:`) whose whole body is `pass` hides real
        failures (a cupy array and an IERS lookup each diverged silently this way).
        Log at debug level on the "originstack" logger instead. Summarised per file
-       unless --verbose; diff-scoped under --git. (warning)
+       unless --verbose; diff-scoped under --git. (error)
 OS004  Every #[pyfunction] exported from the native crate should be referenced by
        name somewhere under tests/ (parity / smoke coverage). (warning)
 OS005  --git only: if ext/astro_native/src/ changed vs BASE, the crate version in
@@ -175,7 +175,7 @@ def check_silent_except(path, tree, out):
         if broad and len(node.body) == 1 and isinstance(node.body[0], ast.Pass):
             out.append(Finding(path, node.lineno, "OS006",
                                "broad except with a bare `pass` -- log it (debug) on the "
-                               '"originstack" logger so the failure is visible', level="warning"))
+                               '"originstack" logger so the failure is visible'))
 
 
 def check_native_parity(out):

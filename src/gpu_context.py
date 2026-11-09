@@ -137,11 +137,11 @@ class GpuContext:
             try:
                 cp.get_default_memory_pool().free_all_blocks()
             except Exception:
-                pass
+                _log.debug("free_pool: ignored error", exc_info=True)
             try:
                 cp.get_default_pinned_memory_pool().free_all_blocks()
             except Exception:
-                pass
+                _log.debug("free_pool: ignored error", exc_info=True)
 
     def disable(self):
         """Permanently fall back to CPU for this session after an unrecoverable GPU error."""
@@ -225,11 +225,11 @@ class _CudaStreamContext:
         try:
             self._stream.synchronize()
         except Exception:
-            pass
+            _log.debug("__exit__: ignored error", exc_info=True)
         try:
             self._stream.__exit__(*exc)
         except Exception:
-            pass
+            _log.debug("__exit__: ignored error", exc_info=True)
         return False
 
 

@@ -3,10 +3,13 @@ from __future__ import annotations
 
 import atexit
 import gc
+import logging
 import os
 import shutil
 import threading
 from typing import List
+
+_log = logging.getLogger("originstack")
 
 _lock: threading.Lock = threading.Lock()
 _paths: List[str] = []
@@ -35,7 +38,7 @@ def _do_cleanup() -> None:
         from src.frame_store import cleanup_all_stores
         cleanup_all_stores()
     except Exception:
-        pass
+        _log.debug("_do_cleanup: ignored error", exc_info=True)
     gc.collect()
     with _lock:
         remaining = list(_paths)
@@ -47,7 +50,7 @@ def _do_cleanup() -> None:
             elif os.path.isdir(p):
                 shutil.rmtree(p, ignore_errors=True)
         except Exception:
-            pass
+            _log.debug("_do_cleanup: ignored error", exc_info=True)
 
 
 atexit.register(_do_cleanup)
@@ -65,7 +68,7 @@ def cleanup_now() -> None:
         from src.frame_store import cleanup_all_stores
         cleanup_all_stores()
     except Exception:
-        pass
+        _log.debug("cleanup_now: ignored error", exc_info=True)
     gc.collect()
     with _lock:
         remaining = list(_paths)
@@ -78,7 +81,7 @@ def cleanup_now() -> None:
             if not os.path.exists(p):
                 deregister(p)
         except Exception:
-            pass
+            _log.debug("cleanup_now: ignored error", exc_info=True)
 
 
 # Temp files only OriginStack writes (frame arrays, rejection masks, per-session

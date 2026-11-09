@@ -35,6 +35,10 @@ except Exception:
     _native = None
     HAS_NATIVE = False
 
+import logging
+
+_log = logging.getLogger("originstack")
+
 
 class RigidTransform:
     """Minimal stand-in for skimage's EuclideanTransform: every consumer in
@@ -180,7 +184,7 @@ def fit_rigid_ransac(src: np.ndarray, dst: np.ndarray,
                 return None, None
             return RigidTransform(np.asarray(params)), np.asarray(inliers, dtype=bool)
         except Exception:
-            pass  # fall through to numpy mirror
+            _log.debug("fit_rigid_ransac: ignored error", exc_info=True)  # fall through to numpy mirror
 
     rng = None if seed is None else np.random.default_rng(seed)
     return _ransac_rigid_numpy(src, dst, min_samples, residual_threshold,

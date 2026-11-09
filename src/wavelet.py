@@ -59,6 +59,10 @@ except Exception:
     _native = None
     _HAS_NATIVE = False
 
+import logging
+
+_log = logging.getLogger("originstack")
+
 # bior1.3 filter bank -- pywt.Wavelet('bior1.3').filter_bank, verbatim.
 _DEC_LO = np.array([-0.08838834764831845, 0.08838834764831845, 0.7071067811865476,
                     0.7071067811865476, 0.08838834764831845, -0.08838834764831845])
@@ -172,7 +176,7 @@ def _dwt2(img: np.ndarray, bank: _FilterBank) -> Tuple[np.ndarray, Tuple[np.ndar
                 bank.lo_kernel, bank.hi_kernel, bank.offset)
             return c_a, (c_h, c_v, c_d)
         except Exception:
-            pass
+            _log.debug("_dwt2: ignored error", exc_info=True)
     La, Lh = _dwt_1d(img, axis=0, bank=bank)
     cA, cV = _dwt_1d(La, axis=1, bank=bank)
     cH, cD = _dwt_1d(Lh, axis=1, bank=bank)
@@ -199,7 +203,7 @@ def _idwt2(cA: np.ndarray, detail: Tuple[np.ndarray, np.ndarray, np.ndarray],
                 np.ascontiguousarray(cD, dtype=np.float64),
                 _REC_LO, _REC_HI, _IDWT_OFFSET, row_out_len, col_out_len)
         except Exception:
-            pass
+            _log.debug("_idwt2: ignored error", exc_info=True)
     La = _idwt_1d(cA, cV, axis=1, out_len=col_out_len)
     Lh = _idwt_1d(cH, cD, axis=1, out_len=col_out_len)
     return _idwt_1d(La, Lh, axis=0, out_len=row_out_len)

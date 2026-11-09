@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import functools
+import logging
 import os
 import threading
 import time
@@ -55,6 +56,8 @@ from src.utils import (
     tqdm,
 )
 
+_log = logging.getLogger("originstack")
+
 
 def _get_ui_events():
     from src.ui_events import get_ui_events
@@ -79,7 +82,7 @@ def _publish_frame_thumb(wv, args, name: str, rgb, counter: list) -> None:
         try:
             wv.frame_preview(name, np.asarray(rgb() if callable(rgb) else rgb), args=args)
         except Exception:
-            pass
+            _log.debug("_publish_frame_thumb: ignored error", exc_info=True)
 
 
 def _get_frame_rotation(hdr: dict) -> Optional[float]:
@@ -427,7 +430,7 @@ def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[n
         try:
             data, _n_spk = remove_spikes_bayer(data)
         except Exception:
-            pass
+            _log.debug("_process_single_frame: ignored error", exc_info=True)
     timings['spike_reject'], _t = time.perf_counter() - _t, time.perf_counter()
 
     # Row/column banding removal (--banding-removal): on the calibrated mosaic,
@@ -442,7 +445,7 @@ def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[n
                     else remove_banding_bayer(data, _amt, _sig) if data.ndim == 2
                     else remove_banding_rgb(data, _amt, _sig))
         except Exception:
-            pass
+            _log.debug("_process_single_frame: ignored error", exc_info=True)
     timings['banding'], _t = time.perf_counter() - _t, time.perf_counter()
 
     # Session CFA probe (`_measure_session_cfa`): report what the per-frame
@@ -578,14 +581,14 @@ def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[n
             else:
                 rgb = correct_chromatic_aberration(rgb)
         except Exception:
-            pass
+            _log.debug("_process_single_frame: ignored error", exc_info=True)
     timings['ca_correction'], _t = time.perf_counter() - _t, time.perf_counter()
 
     if cosmic_ray_rejection:
         try:
             rgb = lacosmic_reject(rgb)
         except Exception:
-            pass
+            _log.debug("_process_single_frame: ignored error", exc_info=True)
     timings['cosmic_ray_rejection'], _t = time.perf_counter() - _t, time.perf_counter()
 
     # Satellite / aircraft trail rejection — erase long straight streaks before
@@ -596,7 +599,7 @@ def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[n
             from src.trail_reject import reject_trails
             rgb, _ = reject_trails(rgb, verbose=False)
         except Exception:
-            pass
+            _log.debug("_process_single_frame: ignored error", exc_info=True)
     timings['trail_reject'], _t = time.perf_counter() - _t, time.perf_counter()
 
     # Recompute lum only when white balance or post-processing changed the image.
@@ -616,7 +619,7 @@ def _process_single_frame(path: str, header: dict, masters: Dict[str, Optional[n
         try:
             lum = _pre_gradient_removal(rgb, lum)
         except Exception:
-            pass
+            _log.debug("_process_single_frame: ignored error", exc_info=True)
     timings['pre_gradient_removal'], _t = time.perf_counter() - _t, time.perf_counter()
 
     frame_stats = collect_frame_statistics(lum)
@@ -1022,7 +1025,7 @@ def _measure_session_ca(frames: List[FrameInfo], args) -> Optional[dict]:
                     if s is not None:
                         samples.append(s)
                 except Exception:
-                    pass
+                    _log.debug("_measure_session_ca: ignored error", exc_info=True)
     except Exception:
         return None
 
@@ -1295,7 +1298,7 @@ def execute_frame_processing(
                            f"(avail RAM {avail_mb:.0f} MB, ~{per_worker_mb:.0f} MB/worker)")
                 workers = safe_workers
         except Exception:
-            pass
+            _log.debug("execute_frame_processing: ignored error", exc_info=True)
 
         _worker_count_used = max(workers, 1)
         safe_print(f"  Processing {n} frames in parallel ({workers} workers x {_rayon_threads} native threads)...")
@@ -1399,7 +1402,7 @@ def execute_frame_processing(
                     shm.close()
                     shm.unlink()
                 except Exception:
-                    pass
+                    _log.debug("execute_frame_processing: ignored error", exc_info=True)
 
         # No flush here. The workers wrote through their own mappings of these temp
         # files; views of one file are coherent across processes without msync, and
@@ -1737,7 +1740,7 @@ def reload_accepted_frames(
                            f"(avail RAM {avail_mb:.0f} MB, ~{per_worker_mb:.0f} MB/worker)")
                 return safe
         except Exception:
-            pass
+            _log.debug("_worker_count_cap: ignored error", exc_info=True)
         return n_workers
 
     use_process_pool = (getattr(args, 'parallel', 1) != 1
@@ -1791,7 +1794,7 @@ def reload_accepted_frames(
                     shm.close()
                     shm.unlink()
                 except Exception:
-                    pass
+                    _log.debug("reload_accepted_frames: ignored error", exc_info=True)
 
         mem_rgb.flush()
         mem_lum.flush()

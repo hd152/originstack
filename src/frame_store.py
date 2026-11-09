@@ -298,7 +298,7 @@ def cleanup_all_stores() -> None:
         try:
             store.cleanup()
         except Exception:
-            pass
+            _log.debug("cleanup_all_stores: ignored error", exc_info=True)
 
 
 class FrameStore:
@@ -394,7 +394,7 @@ class FrameStore:
                 for path in paths:
                     _cleanup_register(path)
             except Exception:
-                pass
+                _log.debug("create: ignored error", exc_info=True)
             self.placement[prefix] = f'compressed ({nbytes / 1e9:.1f} GB uncompressed)'
             return arr, COMPRESSED_PREFIX + compressed_prefix
         if nbytes > 0 and self._want_ram(nbytes, reserve_mb, prefer):
@@ -419,7 +419,7 @@ class FrameStore:
             from src.cleanup import register as _cleanup_register
             _cleanup_register(path)
         except Exception:
-            pass
+            _log.debug("create: ignored error", exc_info=True)
         mm = _ScratchMemmap(path, dtype=dt, mode='w+', shape=shape)
         self._files.append(path)
         self._memmaps.append(mm)
@@ -436,19 +436,19 @@ class FrameStore:
                 if getattr(mm, '_mmap', None) is not None:
                     mm._mmap.close()
             except Exception:
-                pass
+                _log.debug("cleanup: ignored error", exc_info=True)
         self._memmaps.clear()
         gc.collect()
         for p in self._files:
             try:
                 os.remove(p)
             except Exception:
-                pass
+                _log.debug("cleanup: ignored error", exc_info=True)
             try:
                 from src.cleanup import deregister as _cleanup_deregister
                 _cleanup_deregister(p)
             except Exception:
-                pass
+                _log.debug("cleanup: ignored error", exc_info=True)
         self._files.clear()
         for shm in self._shms:
             _close_shm(shm)
@@ -488,11 +488,11 @@ def _close_shm(shm: shared_memory.SharedMemory) -> None:
         # a numpy view still exports the buffer; unlink anyway (freed when it dies)
         pass
     except Exception:
-        pass
+        _log.debug("_close_shm: ignored error", exc_info=True)
     try:
         shm.unlink()
     except Exception:
-        pass
+        _log.debug("_close_shm: ignored error", exc_info=True)
 
 
 # --- worker side ------------------------------------------------------------

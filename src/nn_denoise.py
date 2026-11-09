@@ -32,6 +32,10 @@ except Exception:
     _HAS_NATIVE = False
     _HAS_FORWARD = False
 
+import logging
+
+_log = logging.getLogger("originstack")
+
 _MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'nn_denoise.npz')
 # The same network trained on seeing pairs (--deconvolve nn, dev-notes/nn-deconv-runbook.md):
 # sharpest-30% stack as target, so it sharpens as well as denoises. Run with nn_denoise().
@@ -463,7 +467,7 @@ def star_mask(img: np.ndarray, fwhm: float) -> Optional[np.ndarray]:
             try:
                 _mark(detect_stars_matched_filter(np.pad(lum, pad, mode=mode)), pad, border)
             except Exception:
-                pass
+                _log.debug("star_mask: ignored error", exc_info=True)
     if not pts.any():
         return None
     dist = ndi.distance_transform_edt(~pts)

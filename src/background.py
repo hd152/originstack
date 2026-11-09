@@ -59,7 +59,7 @@ def _gaussian_blur(a: np.ndarray, sigma: float) -> np.ndarray:
                 np.ascontiguousarray(a, dtype=np.float64), float(sigma)))
             return out.astype(a.dtype, copy=False) if out.dtype != a.dtype else out
         except Exception:
-            pass
+            _log.debug("_gaussian_blur: ignored error", exc_info=True)
     return gaussian_filter(a, sigma=sigma)
 
 
@@ -187,7 +187,7 @@ def _sigma_sky(arr: np.ndarray, sigma: float = 3.0, maxiters: int = 5) -> Tuple[
             _, med, std = sigma_clipped_stats(arr, sigma=sigma, maxiters=maxiters)
             return float(med), float(std)
         except Exception:
-            pass
+            _log.debug("_sigma_sky: ignored error", exc_info=True)
     return float(np.median(arr)), float(np.std(arr))
 
 
@@ -269,7 +269,7 @@ def extract_background(img: np.ndarray, mesh_size: int = 256, filter_size: int =
                         bg_grid[iy, ix] = float(median_val)
                         continue
                 except Exception:
-                    pass
+                    _log.debug("extract_background: ignored error", exc_info=True)
 
             # Fallback: Manual sigma-clipping
             clipped = cell.copy()
@@ -445,7 +445,7 @@ def apply_background_extraction(rgb: np.ndarray, mesh_size: int = 256,
             if excl.shape == (H, W):
                 np.clip(combined_mask + excl, 0.0, 1.0, out=combined_mask)
         except Exception:
-            pass
+            _log.debug("apply_background_extraction: ignored error", exc_info=True)
 
     try:
         smooth_sigma = max(20.0, min(H, W) / 50.0)
@@ -685,7 +685,7 @@ def remove_sky_residual(img: np.ndarray, mesh_size: int = 128,
                 dist = np.sqrt((yy - py) ** 2 + (xx - px) ** 2)
                 remaining_lum[dist < excl_radius] = float(np.min(remaining_lum))
     except Exception:
-        pass
+        _log.debug("remove_sky_residual: ignored error", exc_info=True)
 
     result = np.empty_like(img, dtype=np.float32)
 
@@ -955,7 +955,7 @@ def _dbe_prepare_emission_mask(rgb: np.ndarray, star_mask: Optional[np.ndarray],
             if excl.shape == emission_mask.shape:
                 np.clip(emission_mask + excl, 0.0, 1.0, out=emission_mask)
         except Exception:
-            pass
+            _log.debug("_dbe_prepare_emission_mask: ignored error", exc_info=True)
 
     masked_pct = float(np.mean(emission_mask >= 0.5))
     dense_field = masked_pct > Config.DBE_DENSE_FIELD_THRESH

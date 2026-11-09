@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 from collections import Counter
@@ -11,6 +12,8 @@ from typing import Dict, List, Optional
 from src.io_fits import _read_fits_header
 from src.models import FrameInfo
 from src.utils import safe_print
+
+_log = logging.getLogger("originstack")
 
 
 def discover_frames(directory: str) -> Dict[str, List[FrameInfo]]:
@@ -110,7 +113,7 @@ def _merge_json_sidecar(fits_path: str, hdr: dict) -> None:
                 val = data[jkey]
                 hdr[fkey] = transform(val) if transform else val
             except Exception:
-                pass
+                _log.debug("_merge_json_sidecar: ignored error", exc_info=True)
 
 
 def is_os_metadata(name: str) -> bool:

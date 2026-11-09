@@ -362,7 +362,7 @@ def bilateral_denoise(img: np.ndarray, sigma_color: Optional[float] = None,
             return np.asarray(_native.bilateral_filter(
                 np.ascontiguousarray(img_f32), sigma_color, float(sigma_space), radius))
         except Exception:
-            pass
+            _log.debug("bilateral_denoise: ignored error", exc_info=True)
     return _bilateral_filter_numpy(img_f32, sigma_color, float(sigma_space), radius)
 
 
@@ -547,7 +547,7 @@ def reduce_chroma_noise(img: np.ndarray, sigma: float = 2.0,
                         sky_std = float(np.std(pos))
                     sky_std = float(sky_std) / 0.603  # half-normal correction
                 except Exception:
-                    pass
+                    _log.debug("reduce_chroma_noise: ignored error", exc_info=True)
 
         # protect = 0 -> sky (smooth), protect = 1 -> star (leave alone)
         # Ramp from sky_med to sky_med + 3*sky_std

@@ -1610,7 +1610,7 @@ def process_directory(directory: str, output: str, args: argparse.Namespace):
                             f_quality = "Severe vignetting — check flat exposure/optics"
                         safe_print(f"    Flat:  {ratio_str}  vignetting={vign:.1f}%  -> {f_quality}")
             except Exception:
-                pass
+                _log.debug("process_directory: ignored error", exc_info=True)
 
         if getattr(args, 'health_check', False):
             run_health_check(frames, masters, d)
@@ -1699,7 +1699,7 @@ def process_directory(directory: str, output: str, args: argparse.Namespace):
             try:
                 os.remove(p)
             except Exception:
-                pass
+                _log.debug("process_directory: ignored error", exc_info=True)
             _cleanup_deregister(p)
 
     # Overall summary
@@ -3339,7 +3339,7 @@ def apply_temp_dir(temp_dir) -> str:
                 safe_print(f"  Removed {n} leftover temp file(s) of an earlier run "
                            f"({freed / 1e9:.1f} GB) from {folder}")
         except Exception:
-            pass
+            _log.debug("apply_temp_dir: ignored error", exc_info=True)
     return folder
 
 

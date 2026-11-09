@@ -20,11 +20,14 @@ from __future__ import annotations
 
 import json
 import locale
+import logging
 import os
 import subprocess
 import sys
 from pathlib import Path
 from typing import Dict, Optional
+
+_log = logging.getLogger("originstack")
 
 _LOCALE_DIR = Path(__file__).resolve().parent / 'locales'
 
@@ -102,7 +105,7 @@ def system_language() -> str:
             candidates += [s.strip().strip('",') for s in out.splitlines()
                            if s.strip() not in ('(', ')', '')][:3]
     except Exception:
-        pass
+        _log.debug("system_language: ignored error", exc_info=True)
     for var in ('LANGUAGE', 'LC_ALL', 'LC_MESSAGES', 'LANG'):
         value = os.environ.get(var)
         if value:

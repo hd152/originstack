@@ -8,9 +8,12 @@ Supported extensions: CR2, CR3, NEF, ARW, DNG, ORF, RW2, RAF, PEF, 3FR, …
 """
 from __future__ import annotations
 
+import logging
 from typing import Tuple
 
 import numpy as np
+
+_log = logging.getLogger("originstack")
 
 # Canonical set of extensions handled by rawpy
 RAW_EXTENSIONS: Tuple[str, ...] = (
@@ -100,13 +103,13 @@ def _exif_from_pillow(path: str) -> dict:
                 try:
                     out['EXPTIME'] = float(et[0]) / float(et[1])
                 except Exception:
-                    pass
+                    _log.debug("_exif_from_pillow: ignored error", exc_info=True)
         if 'ISOSpeedRatings' in exif:
             try:
                 out['ISO'] = int(exif['ISOSpeedRatings'])
                 out['ISOSPEED'] = out['ISO']
             except Exception:
-                pass
+                _log.debug("_exif_from_pillow: ignored error", exc_info=True)
         if 'Model' in exif:
             out['INSTRUME'] = str(exif['Model']).strip()
         if 'Make' in exif:
@@ -141,7 +144,7 @@ def read_raw_header(path: str) -> dict:
             })
         hdr.update(_exif_from_pillow(path))
     except Exception:
-        pass
+        _log.debug("read_raw_header: ignored error", exc_info=True)
     return hdr
 
 
