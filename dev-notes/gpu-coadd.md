@@ -87,8 +87,9 @@ Combine pass without profiling: RTX 3050 **43.6 s** (80.9 s before the single re
 32.2 s); Radeon 90.0 s. The host is waiting on the device (device 40.3 s of 40.4 s in the host's add calls
 on the 3050; waiting on host prep 1.2 s), so the host side is not the limit. Every 3050 stage is 3-5x
 slower than the same stage on the 1650 Ti, including the FFTs, which touch neither the disk nor the PCIe
-bus: that points at the GPU's clocks/power state (or contention) on that laptop rather than at the
-pipeline. Whole runs: 3050 GPU 398-402 s vs CPU 438 s (the CPU run varies ~15%).
+bus: that points at the GPU's clocks or power limit (or contention, or the hybrid-graphics path) on that
+laptop rather than at the pipeline. Both laptops were plugged in, so it is not battery mode; the nvidia-smi
+clock/power/PCIe samples during a run are still to come. Whole runs: 3050 GPU 398-402 s vs CPU 438 s (the CPU run varies ~15%).
 
 ## Numerics (the output is not bit-identical to the CPU path)
 
@@ -160,7 +161,7 @@ p99.99 0.006 ADU, mean -8e-4 ADU; the 4547 brightest pixels differ by at most 8e
   disk)**: the GPU combine is *slower* than the CPU one on both its GPUs. Radeon iGPU (Vulkan): 92.6 s vs
   30.8 s CPU; RTX 3050 Laptop (Vulkan): 80.9 s vs 32.2 s CPU (whole runs 431 s vs 382 s and 436 s vs
   438 s, ~15% run-to-run). Output correct (23/23 GPU tests on both). The 2x gain above is the GTX
-  1650 Ti on the 64 GB desktop-class machine with the stack in RAM. Suspected cause, tested:
+  1650 Ti laptop GPU (i9-10885H, 64 GB) with the stack in RAM. Suspected cause, tested:
   with the aligned stack on disk and little free RAM, `host_prep` read each frame
   (`np.array(aligned[j])`) and `gpu_coadd_add` then read it again from the memmap, so the 21 GB were read
   twice. Handing the device the frame already read (one read per frame, read-ahead bounded to
