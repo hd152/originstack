@@ -88,8 +88,16 @@ Combine pass without profiling: RTX 3050 **43.6 s** (80.9 s before the single re
 on the 3050; waiting on host prep 1.2 s), so the host side is not the limit. Every 3050 stage is 3-5x
 slower than the same stage on the 1650 Ti, including the FFTs, which touch neither the disk nor the PCIe
 bus: that points at the GPU's clocks or power limit (or contention, or the hybrid-graphics path) on that
-laptop rather than at the pipeline. Both laptops were plugged in, so it is not battery mode; the nvidia-smi
-clock/power/PCIe samples during a run are still to come. Whole runs: 3050 GPU 398-402 s vs CPU 438 s (the CPU run varies ~15%).
+laptop rather than at the pipeline. Both laptops were plugged in (the 3050 laptop: AC, "Balanced" plan), so it is not battery mode.
+`nvidia-smi -l 2` during the combine (RTX 3050 Laptop): **SM clock 210 MHz (max 2100) at 86-91% utilisation**,
+memory 5001 MHz, performance state **P3** (not P0/P2), 48-52 C (no thermal throttle), PCIe gen3 x8 (gen1 x8
+idle); `power.draw` reads a constant 752 W and `power.limit` N/A, so this laptop's power telemetry is not
+trustworthy and the 210 MHz may be a reporting quirk. If it is real, it explains the slowdown: 2048 cores at
+210 MHz against the 1650 Ti's 1024 at ~1.5 GHz is ~3.6x slower, and the stages are 3-5x slower. A RAM-backed
+48-frame synthetic run on the same laptop gives the same per-stage times as the disk-backed session (column
+FFTs 38 vs 37 ms), so disk and session are ruled out; its GPU run took 7.0 s against 7.1 s on the CPU.
+Next: `nvidia-smi -q -d PERFORMANCE` during a run (clock throttle reasons), then the NVIDIA power-management
+mode ("Prefer maximum performance" for the Python executable), Windows graphics setting and plan, and a rerun. Whole runs: 3050 GPU 398-402 s vs CPU 438 s (the CPU run varies ~15%).
 
 ## Numerics (the output is not bit-identical to the CPU path)
 
