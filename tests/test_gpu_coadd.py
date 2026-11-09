@@ -373,32 +373,7 @@ def test_disk_backed_stack_gives_the_same_result_with_one_read_per_frame(tmp_pat
     del mm
 
 
-# --- explicit frame reads and the slow-GPU self-check ---------------------------------------
-
-
-def test_frame_reader_reads_the_same_bytes_as_the_memmap(tmp_path):
-    rng = np.random.default_rng(3)
-    data = rng.random((5, 12, 17, 3), dtype=np.float32)
-    mm = np.memmap(tmp_path / 'a.f32', np.float32, 'w+', shape=data.shape)
-    mm[...] = data
-    reader = pc._FrameReader(mm)
-    buf = None
-    for j in (3, 0, 4):
-        buf = reader.read(j, buf)                         # the buffer is reused
-        assert np.array_equal(buf, data[j])
-    mm2 = np.memmap(tmp_path / 'a.f32', np.float32, 'r', offset=0, shape=data.shape)
-    assert np.array_equal(pc._FrameReader(mm2).read(2), data[2])
-    short = pc._FrameReader(mm)
-    short.nbytes += 4                                     # reads past the end of the file
-    with pytest.raises(OSError):
-        short.read(4)
-    del mm, mm2
-
-
-def test_frame_reader_declines_what_it_cannot_read(tmp_path):
-    ram = np.zeros((2, 4, 4, 3), np.float32)
-    with pytest.raises(OSError):
-        pc._FrameReader(ram).read(0)                      # not file-backed
+# --- the slow-GPU self-check ---------------------------------------
 
 
 class _SlowNative:
@@ -442,7 +417,7 @@ def _selfcheck_problem(monkeypatch, ms, n=48):
 
 
 def test_self_check_drops_a_gpu_that_is_clearly_slower_than_the_cpu(monkeypatch):
-    A, fake, meas = _selfcheck_problem(monkeypatch, ms=90)          # 90 ms/frame > the 70 ms trigger
+    A, fake, meas = _selfcheck_problem(monkeypatch, ms=130)         # 130 ms/frame > the 100 ms trigger
     probed = []
     res = pc._combine_gpu(A, np.zeros((3, 8, 8), np.float32), list(range(48)), meas, 2, lambda: None,
                           False, cpu_probe=lambda: probed.append(1) or 40.0)
@@ -452,9 +427,9 @@ def test_self_check_drops_a_gpu_that_is_clearly_slower_than_the_cpu(monkeypatch)
 
 
 def test_self_check_keeps_a_gpu_that_is_not_slower(monkeypatch):
-    A, fake, meas = _selfcheck_problem(monkeypatch, ms=90)
+    A, fake, meas = _selfcheck_problem(monkeypatch, ms=130)
     res = pc._combine_gpu(A, np.zeros((3, 8, 8), np.float32), list(range(48)), meas, 2, lambda: None,
-                          False, cpu_probe=lambda: 95.0)             # 90 < 95
+                          False, cpu_probe=lambda: 140.0)            # 130 < 140
     assert res is not None and fake.calls[-1] == 'finish'
 
 
@@ -467,7 +442,7 @@ def test_self_check_costs_nothing_for_a_fast_gpu(monkeypatch):
 
 
 def test_self_check_skips_short_passes(monkeypatch):
-    A, fake, meas = _selfcheck_problem(monkeypatch, ms=90, n=24)
+    A, fake, meas = _selfcheck_problem(monkeypatch, ms=130, n=24)
     probed = []
     res = pc._combine_gpu(A, np.zeros((3, 8, 8), np.float32), list(range(24)), meas, 2, lambda: None,
                           False, cpu_probe=lambda: probed.append(1) or 1.0)

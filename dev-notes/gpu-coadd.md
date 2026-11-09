@@ -71,22 +71,28 @@ profile showed that stacking a batch of disk-backed frames into one array before
 single-read version) cost ~19 ms per frame of host copying; `gpu_coadd_add_list` takes the frames as they
 are (disk-backed 2.0 s vs 1.9 s in RAM for 48 frames).
 
-## Self-check and frame reads (crate 0.67, 2026-11)
+## Self-check (crate 0.67, 2026-11)
 
-- **Self-check.** A GPU held at a low clock by the Windows power plan was 2.5x slower than the CPU and
-  nothing noticed. `_combine_gpu` now times the device over frames 9-24 (the first add call carries the
-  warm-up); only when that exceeds `_GPU_SUSPECT_MS` (70 ms per frame; healthy cards measured 30-50) does it
-  time the CPU path that would run (`cpu_probe`: a warm-up round and a timed round of 2 frames per thread,
-  after which the probe reads ~10-15% high: 88-93 vs 80 ms measured) and drops the GPU, with a note that names
-  the power plan, if the GPU is slower than that (`_GPU_SLOW_FACTOR` 1.0). A healthy GPU pays nothing; passes
-  under 48 frames are not checked. On the Balanced-plan laptop (137 ms per frame against a CPU near 109) it
-  would have stopped the 3050 after 24 frames.
-- **Disk-backed frames** are read with explicit sequential reads (`_FrameReader`, one handle per thread, a
-  small buffer pool, read-ahead `n_thr + 4` frames) instead of `np.array(memmap[j])` page-fault copies:
-  14.7 vs 9.6 ms per 73 MB frame with the file in the cache. On a warm dev machine this changes nothing
-  (the device is the limit, 3.6 vs 3.8 s for 96 frames); it is meant for a cold disk, where the
-  laptop's combine waited 8.9 s of 28.6 s on the host. `ORIGINSTACK_GPU_PROFILE` also reports the summed
-  frame-read and sky/noise time of the host threads.
+A GPU held at a low clock by the Windows power plan was 2.5x slower than the CPU and nothing noticed.
+`_combine_gpu` now times the device over frames 9-24 (the first add call carries the warm-up). Only when that
+exceeds `_GPU_SUSPECT_MS` (100 ms per frame; healthy cards measured 30-71, the throttled 3050 137) does it time
+the CPU path that would run (`cpu_probe`: a warm-up round and a timed round of 2 frames per thread; the probe
+reads ~10-15% high, 88-93 vs 80 ms measured) and drops the GPU, with a note that names the power plan, if the GPU is
+slower than that (`_GPU_SLOW_FACTOR` 1.0). With `verbose` it prints "GPU self-check, GPU x ms per frame, CPU y ms"
+whenever the probe ran. A healthy GPU pays nothing; passes under 48 frames are not checked. The first version
+used 70 ms as the trigger, which is below the healthy 3050's 71 ms per frame, so it would have paid the probe
+(~2.6 s of CPU timing) on a good GPU; hence 100.
+
+**Tried and dropped: explicit sequential reads for a disk-backed stack** (a `_FrameReader` with a buffer pool in
+place of `np.array(memmap[j])`; 9.6 vs 14.7 ms per 73 MB frame with the file cached, no change on the warm dev
+machine). On the 16 GB laptop (Ultimate Performance, Whirlpool, 295 frames): the host stopped waiting on frame
+reads (8.9 s -> 1.0 s) but the device side got slower (add calls 14.9 -> 21.0 s, upload 30 -> 47 ms per frame:
+the readers and the host-to-device copy compete for memory bandwidth), and the combine did not improve
+(30.9 s profiled / 32.2 s against 28.6 s with the memmap copies; whole runs 397-423 s vs 452 s, within the
+laptop's 15-40% run-to-run noise). The host threads' frame reads cost 62.5 s and sky/noise 31.1 s summed over
+6 threads (~210 and ~105 ms per frame per thread), so the host side is not short of time; the GPU path on that
+laptop is bounded by the upload and memory bandwidth at about the CPU's 32 s. `ORIGINSTACK_GPU_PROFILE` keeps the
+summed frame-read and sky/noise report.
 
 ## Numerics (the output is not bit-identical to the CPU path)
 

@@ -39,7 +39,6 @@ from __future__ import annotations
 import collections
 import logging
 import os
-import queue
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -491,44 +490,9 @@ def _gpu_unusable(aligned, C: int, H: int, W: int) -> Optional[str]:
     return None
 
 
-_GPU_SUSPECT_MS = 70.0          # device ms per frame above which the CPU is timed for comparison
+_GPU_SUSPECT_MS = 100.0         # device ms per frame above which the CPU is timed for comparison
 _GPU_SLOW_FACTOR = 1.0          # ... and the GPU is dropped when it is slower than that (the probe reads ~10-15% high)
 _SELFCHECK_MIN_FRAMES = 48      # below this the pass is too short to be worth checking
-
-
-class _FrameReader:
-    """Explicit sequential reads of a memmapped stack's frames (one file handle per thread).
-
-    ``np.array(memmap[j])`` copies through page faults; reading the frame's bytes straight into a
-    buffer was 1.5x faster with the file in the cache (14.7 vs 9.6 ms per 73 MB frame) and
-    avoids the per-page fault cost on a cold disk. The stack must be C-contiguous float32."""
-
-    def __init__(self, mm):
-        self.path = getattr(mm, 'filename', None)
-        self.base = int(getattr(mm, 'offset', 0) or 0)
-        self.shape = mm.shape[1:]
-        self.nbytes = int(np.prod(self.shape)) * 4
-        self._local = threading.local()
-        self.ok = bool(self.path) and mm.flags.c_contiguous and mm.dtype == np.float32 and mm.ndim == 4
-        if self.ok:
-            try:
-                mm.flush()                      # reads through the file must see what was written
-            except Exception:
-                _log.debug("proper coadd: flushing the memmap failed", exc_info=True)
-
-    def read(self, j: int, buf=None) -> np.ndarray:
-        if not self.ok:
-            raise OSError("not a plain float32 file-backed stack")
-        f = getattr(self._local, 'f', None)
-        if f is None:
-            f = self._local.f = open(self.path, 'rb', buffering=0)
-        if buf is None or buf.shape != self.shape:
-            buf = np.empty(self.shape, np.float32)
-        f.seek(self.base + j * self.nbytes)
-        n = f.readinto(memoryview(buf).cast('B'))
-        if n != self.nbytes:
-            raise OSError(f"short read of frame {j}: {n} of {self.nbytes} bytes")
-        return buf
 
 
 def _print_gpu_profile(tm: dict, st: list, memmap: bool) -> None:
@@ -576,21 +540,6 @@ def _combine_gpu(aligned, ref_sig, use, meas, n_thr: int, tick, verbose: bool, c
     prof = os.environ.get('ORIGINSTACK_GPU_PROFILE', '0') not in ('', '0')
     tm = {'wait_host': 0.0, 'add': 0.0, 'finish': 0.0, 'read': 0.0, 'noise': 0.0}
     tm_lock = threading.Lock()
-    reader = _FrameReader(aligned) if memmap else None
-    pool = queue.SimpleQueue()          # frame buffers of a disk-backed stack, reused
-
-    def read_frame(j):
-        buf = None
-        try:
-            buf = pool.get_nowait()
-        except queue.Empty:
-            pass
-        if reader is not None:
-            try:
-                return reader.read(j, buf)
-            except OSError:
-                _log.debug("proper coadd: explicit frame read failed; using the memmap", exc_info=True)
-        return np.array(aligned[j])
 
     def host_prep(j):
         p, F = meas[j]
@@ -598,7 +547,7 @@ def _combine_gpu(aligned, ref_sig, use, meas, n_thr: int, tick, verbose: bool, c
         # that copy is what the device gets (``flush``): with the stack larger than the free RAM
         # the page cache cannot keep it for a second read from the memmap
         t_r = time.time()
-        fr = read_frame(j) if memmap else None
+        fr = np.array(aligned[j]) if memmap else None
         t_n = time.time()
         sky, sig = _sky_noise(fr if memmap else aligned[j])
         if prof:
@@ -642,9 +591,6 @@ def _combine_gpu(aligned, ref_sig, use, meas, n_thr: int, tick, verbose: bool, c
         tm['add'] += dt
         add_log.append((len(batch), dt))
         used += len(batch)
-        if memmap:
-            for b in batch:
-                pool.put(b[5])
 
     ex = ThreadPoolExecutor(max_workers=n_thr)
     try:
@@ -655,7 +601,7 @@ def _combine_gpu(aligned, ref_sig, use, meas, n_thr: int, tick, verbose: bool, c
         batch = []
         # host prep runs ahead of the device; for a disk-backed stack each result carries a
         # frame (~70 MB), so the read-ahead is bounded
-        ahead = n_thr + 4 if memmap else len(use)
+        ahead = n_thr + 8 if memmap else len(use)
         todo = iter(use)
         pending = collections.deque()
 
@@ -684,6 +630,9 @@ def _combine_gpu(aligned, ref_sig, use, meas, n_thr: int, tick, verbose: bool, c
                     g_ms = sum(d for _, d in add_log[1:3]) / max(n_f, 1) * 1000
                     if g_ms > _GPU_SUSPECT_MS:
                         c_ms = cpu_probe()
+                        if verbose and c_ms is not None:
+                            safe_print(f"    proper coadd: GPU self-check, GPU {g_ms:.0f} ms per frame, "
+                                       f"CPU {c_ms:.0f} ms")
                         if c_ms is not None and g_ms > _GPU_SLOW_FACTOR * c_ms:
                             _native.gpu_coadd_abort()
                             safe_print(f"    --gpu-coadd: the GPU takes {g_ms:.0f} ms per frame, the CPU "
