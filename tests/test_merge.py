@@ -440,6 +440,53 @@ class TestSkyOffsetSurface(unittest.TestCase):
         self.assertGreater(max(step.max(), step_right.max()), 50.0)
 
 
+class TestSkyLevelMismatch(unittest.TestCase):
+    """A stack calibrated with a wrong dark carries a ~100,000 ADU pedestal (a Whirlpool
+    combine whose reference had one came out at sky 200k / 121k / 167k against 4-5k for
+    healthy stacks). The merge's offset absorbs it silently; it must say so."""
+
+    def _arrays(self, pedestal):
+        a = np.full((64, 64, 3), 4000.0, np.float32)
+        b = a * 1.0 + np.array(pedestal, np.float32)
+        return a, b, np.ones((64, 64), bool)
+
+    def test_healthy_gradient_is_silent(self):
+        from src.merge import sky_level_mismatch
+        a, b, v = self._arrays([900.0, 600.0, 300.0])
+        self.assertIsNone(sky_level_mismatch(b, a, v, np.ones(3)))
+
+    def test_pedestal_in_the_reference_is_named(self):
+        from src.merge import sky_level_mismatch
+        a, b, v = self._arrays([196000.0, 117000.0, 163000.0])
+        why = sky_level_mismatch(b, a, v, np.array([3.1, 4.6, 3.95]))
+        self.assertIn('R ', why)
+        self.assertIn('pedestal', why)
+
+    def test_pedestal_in_the_input_is_named(self):
+        from src.merge import sky_level_mismatch
+        a, b, v = self._arrays([100000.0, 0.0, 0.0])
+        why = sky_level_mismatch(a, b, v, np.ones(3))
+        self.assertIn('R ', why)
+        self.assertNotIn('G ', why)
+
+    def test_merge_warns_and_records_the_stack(self):
+        import contextlib
+        import io
+
+        import src.merge as m
+        H, W = 256, 320
+        new = (_scene(H=H, W=W) + 200000.0).astype(np.float32)   # reference with a pedestal
+        prev = (_scene(shift=(20.0, 0.0), H=H, W=W) + 800.0).astype(np.float32)
+        with tempfile.TemporaryDirectory() as td:
+            p = os.path.join(td, 'prev.fits')
+            _write_stack(p, prev, nframes=40)
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                _, info = m.merge_previous_stacks(new, 10, [p])
+        self.assertIn('pedestal', buf.getvalue())
+        self.assertEqual(info.get('sky_mismatch'), ['prev.fits'])
+
+
 class TestClippedCoresStayNeutral(unittest.TestCase):
     """Neutral saturated cores must stay neutral through per-channel merge gains."""
 
