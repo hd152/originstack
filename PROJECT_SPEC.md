@@ -76,6 +76,11 @@ For installation, quick start, and common recipes, see [README.md](README.md).
 | `src/transparency.py` | Per-frame transparency from a fixed star ensemble (`--transparency-min`); `to_aligned_yx` (the inverse of `apply_transform`'s convention, tested against it) |
 | `src/distortion.py` | Session-wide radial distortion model (`--distortion-model`): fit, significance test on held-out frames, analytic per-frame displacement fields |
 | `src/session_report.py` | Session diagnostics PNG/CSV (`--session-report`), drift/rotation/periodic-tracking/focus analysis; PIL-only plotting |
+| `src/frame_report.py` | Per-frame health report (`--frame-report`): why each light was kept or rejected, `<stem>_frames.csv/.json`, shown in the desktop app's frame graph |
+| `src/aavso_report.py` | AAVSO Extended Format report from a photometry time series (`--aavso-report`): VSP comparison stars, per-frame ensemble zero point |
+| `src/previous_stacks.py` | Finds earlier `RAWSTACK` stacks of the same target (the desktop app's "add earlier stacks" checkbox fills `--merge`) |
+| `src/drop_files.py` | What a drop on the desktop window means (a folder, or the folder of dropped files) |
+| `src/self_update.py` | In-app update of the installed Windows copy (downloads the release installer, SHA-256 checked) |
 | `src/noise_validation.py` | Odd/even half-stack noise map + consistency map (`--noise-validate`) |
 | `src/moving_objects.py` | Moving-object detection, velocity-space linking, tracked stacking (`--moving-objects`) |
 | `src/lightcurve_analysis.py` | Lomb-Scargle period + BLS/trapezoid transit analysis of light curves (`--lightcurve-analysis`); uses astropy.timeseries |
@@ -334,20 +339,20 @@ mean-variance relationship.
 
 - Reduces star halo prominence for galaxy and nebula targets
 - Blurs a copy of the image and blends back over stars identified by the star mask
-- `--star-reduce-factor` (blend strength), `--star-reduce-sigma` (blur radius)
+- Blend strength and blur radius via `--config star_reduce_factor=…` / `star_reduce_sigma=…` (no CLI flags)
 - Disable with `--no-star-reduce`
 
 ### 16. Local Contrast Enhancement (default on)
 
 - Multiscale local contrast enhancement (MLCE)
 - Enhances fine detail without affecting global dynamic range
-- `--local-contrast-strength`
+- Strength via `--config local_contrast_strength=…` (no CLI flag)
 - Disable with `--no-local-contrast`
 
 ### 17. SCNR — Subtractive Chromatic Noise Reduction
 
 - Suppresses green (or cyan) colour cast in OSC/DSLR images
-- `--scnr-amount`, `--scnr-target {green,cyan}`
+- `--scnr` switches it on; `--config scnr_amount=…` and `scnr_target=green|cyan` tune it
 
 ### 18. Photometric Colour Calibration
 
@@ -373,7 +378,7 @@ mean-variance relationship.
 - Runs two registration passes: one tracking stars, one tracking the comet nucleus
 - Saves `<output>_comet.fits` (comet-registered stack) alongside the star-registered stack
 - `--comet-xy`/`--comet-search-radius` seed and bound nucleus tracking; `--comet-affine` allows an affine (not just translation) comet-frame fit
-- `--comet-blend-sigma` controls blend transition width; `--coma-mask-radius` excludes the coma from star-registration background sampling
+- `--coma-mask-radius` excludes the coma from star-registration background sampling
 - `--comet-radial-renorm` flattens the coma's radial brightness falloff; `--comet-larson-sekanina` applies a Larson-Sekanina rotational-gradient filter to reveal jets/structure (`--comet-ls-rotation` sets the rotation angle)
 - `--comet-designation` + `--observer-site` enable JPL Horizons ephemeris lookup for automatic nucleus position seeding
 
@@ -381,7 +386,7 @@ mean-variance relationship.
 
 - Blends a separate short-exposure stack into the highlight regions of the main stack
 - Recovers detail in saturated bright areas (star cores, galaxy nuclei)
-- `--hdr-short-exptime`, `--hdr-long-exptime` specify the exposure times for proper scaling
+- The short stack is rescaled to the long stack's background level (no exposure-time flags)
 - `--hdr-blend-mode {threshold,fusion}` (default `threshold`): `threshold` is the original sigmoid-threshold spatial blend; `fusion` uses Mertens multiresolution exposure fusion (Laplacian pyramid weighted by local contrast/saturation/well-exposedness) instead, avoiding the seam a hard/sigmoid threshold can leave at the transition band
 
 ### 23. Mosaic Stitching (`--mosaic`)
@@ -730,9 +735,8 @@ with `--config` (keys listed per feature above and in `parse_args`
 ### Comet mode
 
 `--comet-mode` plus: `--comet-xy`, `--comet-search-radius`, `--comet-affine`,
-`--comet-blend-sigma`, `--coma-mask-radius`, `--comet-radial-renorm`,
-`--comet-larson-sekanina`, `--comet-ls-rotation`, `--comet-designation`,
-`--observer-site`, `--comet-detrail`. See `--help` for details.
+`--coma-mask-radius`, `--comet-radial-renorm`, `--comet-larson-sekanina`,
+`--comet-ls-rotation`, `--comet-designation`, `--observer-site`. See `--help` for details.
 
 ### Diagnostics & debugging
 
