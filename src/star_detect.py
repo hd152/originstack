@@ -50,6 +50,10 @@ except Exception:
     _native = None
     HAS_NATIVE = False
 
+import logging
+
+_log = logging.getLogger("originstack")
+
 _SOURCES_DTYPE = np.dtype([
     ('xcentroid', np.float64), ('ycentroid', np.float64),
     ('flux', np.float64), ('peak', np.float64),
@@ -264,7 +268,7 @@ def detect_stars_matched_filter(img: np.ndarray, fwhm: float = 5.5, k_confirm: f
                 out[name] = rows[:, i]
             return out
         except Exception:
-            pass  # fall through to numpy mirror
+            _log.debug("detect_stars_matched_filter: ignored error", exc_info=True)  # fall through to numpy mirror
 
     return _detect_stars_matched_filter_numpy(img, fwhm, k_confirm, cell,
                                               roundness_max, min_pixels)

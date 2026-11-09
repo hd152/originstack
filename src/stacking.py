@@ -294,13 +294,13 @@ def _free_rej_mask(mask: np.ndarray) -> None:
             if hasattr(mask, '_mmap') and mask._mmap is not None:
                 mask._mmap.close()
         except Exception:
-            pass
+            _log.debug("_free_rej_mask: ignored error", exc_info=True)
     del mask
     if path is not None:
         try:
             os.remove(path)
         except Exception:
-            pass
+            _log.debug("_free_rej_mask: ignored error", exc_info=True)
         _cleanup_deregister(path)
 
 
@@ -1835,7 +1835,7 @@ def wavelet_combine(mem_aligned: np.ndarray, levels: int = 4, sigma: float = 3.0
                 try:
                     os.remove(path)
                 except Exception:
-                    pass
+                    _log.debug("wavelet_combine: ignored error", exc_info=True)
 
     return result
 
@@ -2012,7 +2012,7 @@ def run_stacking_phase(
             if _safe < n_align:
                 n_align = _safe
         except Exception:
-            pass
+            _log.debug("run_stacking_phase: ignored error", exc_info=True)
         from src.registration import HAS_NATIVE as _reg_native
         if _reg_native:
             safe_print("    [rust] Lanczos-3 warp (per-frame alignment)")
@@ -2470,7 +2470,7 @@ def run_stacking_phase(
                           f"(avail RAM {avail_mb:.0f} MB, ~{per_worker_mb:.0f} MB/worker)")
                     n_drizzle = safe_workers
             except Exception:
-                pass
+                _log.debug("run_stacking_phase: ignored error", exc_info=True)
 
             def _load_frame(j):
                 return np.ascontiguousarray(mem_rgb[final_indices[j]], dtype=np.float32)
@@ -2606,7 +2606,7 @@ def run_stacking_phase(
         get_ui_events().preview(stacked, 'Linear stack (pre-post-processing)',
                               args=args, min_interval=0.0)
     except Exception:
-        pass
+        _log.debug("run_stacking_phase: ignored error", exc_info=True)
     _phase_timings['finalize'] = time.perf_counter() - _t_finalize
     return stacked, fits_stacked, top, bottom, left, right
 

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import time
 from typing import Dict, List, Optional, Tuple
@@ -10,6 +11,8 @@ import numpy as np
 
 from src.models import FrameInfo, ProcessingStats
 from src.utils import safe_print
+
+_log = logging.getLogger("originstack")
 
 # Sentinel for _to_json — module-level so it's not re-created on every call.
 _SKIP = object()
@@ -415,4 +418,4 @@ def cleanup_checkpoint(output_path: str) -> None:
             import shutil
             shutil.rmtree(ckpt_dir)
         except Exception:
-            pass
+            _log.debug("cleanup_checkpoint: ignored error", exc_info=True)

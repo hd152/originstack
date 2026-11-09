@@ -46,6 +46,10 @@ except Exception:  # pragma: no cover
     _native = None
     _HAS_NATIVE = False
 
+import logging
+
+_log = logging.getLogger("originstack")
+
 
 def _coarse_background_numpy(frame: np.ndarray, grid: int, pct: float) -> np.ndarray:
     """numpy fallback -- see `_coarse_background`."""
@@ -130,7 +134,7 @@ def local_normalize_stack(mem_aligned: np.ndarray, grid: int = 24,
         try:
             mem_aligned.flush()
         except Exception:
-            pass
+            _log.debug("local_normalize_stack: ignored error", exc_info=True)
 
     if verbose:
         safe_print(f"  Local normalization: matched {N} frame backgrounds "

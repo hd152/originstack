@@ -46,6 +46,10 @@ except Exception:  # pragma: no cover
     _ndi = None
     _HAS_SCIPY = False
 
+import logging
+
+_log = logging.getLogger("originstack")
+
 
 def _stack_snr(lum: np.ndarray) -> float:
     """SNR of the running stack: (mean object signal - sky) / sky-noise.
@@ -311,7 +315,7 @@ class LiveStacker:
             save_preview_rgb(stack, prev, **preview_stretch_kw(self.args))
             safe_print(f"  Preview: {prev}")
         except Exception:
-            pass
+            _log.debug("save: ignored error", exc_info=True)
 
 
 def build_session_masters(args, directory: str) -> Tuple[Dict, Dict]:
@@ -345,7 +349,7 @@ def build_session_masters(args, directory: str) -> Tuple[Dict, Dict]:
                 if _probe_data is not None and _probe_data.ndim == 2:
                     _sb = autodetect_bayer_orientation(_probe_data, _sb)
             except Exception:
-                pass
+                _log.debug("build_session_masters: ignored error", exc_info=True)
         args._session_bayer = _sb
 
     return masters, frames

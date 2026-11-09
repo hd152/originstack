@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import contextvars
+import logging
 import os
 import tempfile
 from typing import Dict, List, NamedTuple, Optional, Tuple, Union
@@ -13,6 +14,8 @@ from astropy.io import fits
 
 from src.debayer import luminance
 from src.models import FrameInfo, ProcessingStats
+
+_log = logging.getLogger("originstack")
 
 
 def sigma_clipped_stats(*args, **kwargs):
@@ -334,14 +337,14 @@ def make_master(frames: List[FrameInfo], method: str = 'median',
             try:
                 os.remove(mm_path)
             except Exception:
-                pass
+                _log.debug("make_master: ignored error", exc_info=True)
             return None
         result = np.median(mem[:count], axis=0).astype(np.float32)
         del mem
         try:
             os.remove(mm_path)
         except Exception:
-            pass
+            _log.debug("make_master: ignored error", exc_info=True)
         return result
     else:
         # Small enough for in-memory

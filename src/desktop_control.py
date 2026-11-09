@@ -14,9 +14,12 @@ here.
 from __future__ import annotations
 
 import argparse
+import logging
 import re
 import threading
 from typing import Any, Dict, List, Optional
+
+_log = logging.getLogger("originstack")
 
 
 def load_app_setting(key: str, default=None):
@@ -451,7 +454,7 @@ class RunManager:
                 from src.cleanup import cleanup_now
                 cleanup_now()
             except Exception:
-                pass
+                _log.debug("_run: ignored error", exc_info=True)
             if args is not None and getattr(args, 'output', None):
                 self.last_output = os.path.abspath(str(args.output))
             wv.run_finished(status, error)

@@ -15,12 +15,15 @@ Mirrors the ``get_gpu()`` module-level singleton pattern.
 """
 from __future__ import annotations
 
+import logging
 import os
 import re
 import threading
 import time
 from collections import OrderedDict
 from typing import Any, Dict, Iterable, Optional
+
+_log = logging.getLogger("originstack")
 
 _MAX_LOG_LINES = 500
 _MAX_FRAME_ROWS = 1500        # the frame graph plots every frame of a session
@@ -785,7 +788,7 @@ class UIEvents:
                 return
             notify_windows('OriginStack', msg)
         except Exception:
-            pass
+            _log.debug("_notify: ignored error", exc_info=True)
 
     # ── snapshot for the GUI's poll loop ───────────────────────────────────
 

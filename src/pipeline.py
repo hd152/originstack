@@ -120,14 +120,14 @@ class _MemmapManager:
                 if hasattr(mm, '_mmap') and mm._mmap is not None:
                     mm._mmap.close()
             except Exception:
-                pass
+                _log.debug("cleanup: ignored error", exc_info=True)
         self._memmaps.clear()
         gc.collect()  # flush any remaining mmap references held by GC cycles
         for p in self._files:
             try:
                 os.remove(p)
             except Exception:
-                pass
+                _log.debug("cleanup: ignored error", exc_info=True)
             _cleanup_deregister(p)
         self._files.clear()
         self.store.cleanup()
@@ -827,7 +827,7 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                    or os.path.basename(os.path.dirname(lights[0].path)),
             output=os.path.basename(output_path), n_frames=n)
     except Exception:
-        pass
+        _log.debug("stack_target: ignored error", exc_info=True)
 
     # Check for a checkpoint from a previous interrupted run
     resume_phase = 0
@@ -973,7 +973,7 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                            f"need ~{bytes_needed / 1e9:.2f} GB, "
                            f"{free_bytes / 1e9:.2f} GB free in {tmpdir}")
         except Exception:
-            pass
+            _log.debug("stack_target: ignored error", exc_info=True)
         # RAM (shared memory: Phase 1's worker processes write into these) when it
         # fits beside what the workers themselves will use, temp file otherwise
         _p1_reserve_mb = (os.cpu_count() or 4) * (H_rgb * W_rgb * 4 * 9 / 1e6 + 200)
@@ -1124,7 +1124,7 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                         for _i in range(len(cached_lums)):
                             cached_lums[_i] = None
                 except Exception:
-                    pass
+                    _log.debug("stack_target: ignored error", exc_info=True)
 
                 # Quality metrics CSV export
                 if getattr(args, 'quality_report', None):
@@ -1946,7 +1946,7 @@ def stack_target(frames: List[FrameInfo], output_path: str, args: argparse.Names
                 output=os.path.basename(output_path),
                 total_time=format_time(stats.total_time()))
     except Exception:
-        pass
+        _log.debug("stack_target: ignored error", exc_info=True)
 
     from src.utils import print_header
     print_header("SUMMARY", "=")

@@ -67,7 +67,7 @@ def parse_vsp(chart: dict) -> Optional[dict]:
         try:
             out["ra"], out["dec"] = _sexa_to_deg(chart["ra"], chart["dec"])
         except Exception:
-            pass
+            _log.debug("parse_vsp: ignored error", exc_info=True)
     return out
 
 

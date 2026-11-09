@@ -25,6 +25,8 @@ except Exception:
     def tqdm(iterable, **kwargs):
         return iterable
 
+_log = logging.getLogger("originstack")
+
 
 def setup_logging(level: str = 'WARNING', log_file: Optional[str] = None) -> logging.Logger:
     """Configure the 'originstack' logger hierarchy.
@@ -90,7 +92,7 @@ def safe_print(text: str):
         from src.ui_events import get_ui_events
         get_ui_events().log(text)
     except Exception:
-        pass
+        _log.debug("safe_print: ignored error", exc_info=True)
     try:
         print(text)
     except UnicodeEncodeError:
@@ -176,7 +178,7 @@ def print_phase(phase_num: int, title: str):
         wv.phase(phase_num, title)
         wv.log(f"PHASE {phase_num}: {title.upper()}")
     except Exception:
-        pass
+        _log.debug("print_phase: ignored error", exc_info=True)
     print(f"\n{'=' * 70}")
     print(f"PHASE {phase_num}: {title.upper()}")
     print(f"{'=' * 70}")
@@ -298,7 +300,7 @@ def disable_astropy_network() -> None:
         from astropy.utils import iers
         iers.conf.auto_download = False
     except Exception:
-        pass
+        _log.debug("disable_astropy_network: ignored error", exc_info=True)
 
 
 def parse_timestamp(when: str):
