@@ -1,27 +1,25 @@
 # Roadmap
 
-Working list of what could make OriginStack better, drawn from the open items in the other
-dev-notes and from the 2.20 work on other cameras. Not a promise. Each item says what it needs
+Working list of what could make OriginStack better. Not a promise. Each item says what it needs
 (**data** = a stack or session we do not have; **train** = needs torch and hours of GPU/CPU;
 **code** = can start now) and a rough size (S: a day or less, M: a few days, L: a week or more).
 "Tried and reverted" in CLAUDE.md lists what not to retry blind.
 
-Last reviewed 2026-11-01.
+Last reviewed 2026-11-09. Done items are listed at the bottom so they are not proposed again.
 
-## 1. Finish what 2.20 started: other cameras
+## 1. Other cameras
 
-The learned deconvolver now rescales to the trained star width and loads mono / `.fits.fz` /
-cube FITS. It is verified on Origin, Seestar S50 and LCO mono only.
+The learned deconvolver rescales to the trained star width and loads mono / `.fits.fz` / cube FITS.
+It is verified on Origin, Seestar S50 and LCO mono only.
 
 | Item | Needs | Size |
 |---|---|---|
 | Test on a DSLR/mirrorless stack (1-2"/px, different PSF), a ZWO/QHY mono set, narrowband Ha/OIII/SII | data | S each |
 | Star removal on other cameras (same rescale idea; in progress) | code | M |
 | Ellipticity guard (0.35) against a real trailed-star session | data | S |
-| Stars within ~30 px of the frame edge miss the star-aware restore (detector border): reflect-pad before detection | code | S |
 | Faint-source flux vs Pan-STARRS truth on S50 data (only Origin has it) | code | S |
 | Narrowband workflow end to end: per-filter stacks -> `combine` SHO/HOO with the learned deconvolver on each mono channel and the same blend | data | M |
-| Camera profiles for S50 / S30 / common DSLRs (gain per ISO, colour slopes) like Origin178 | data | M |
+| Camera profiles for S50 / S30 / common DSLRs (gain per ISO, colour slopes) like Origin178 (`src/data/camera_profiles/`) | data | M |
 | Wider-PSF fine-tuning of the network (decided not warranted; revisit only if a camera shows the rescale failing) | train | L |
 
 ## 2. Star removal and star handling
@@ -37,65 +35,64 @@ cube FITS. It is verified on Origin, Seestar S50 and LCO mono only.
 
 ## 3. Calibration and robustness
 
-- Warn (done: #238) and then optionally *rebin or crop* a mismatched master instead of dropping
-  it. **code**, S.
-- Auto-detect and handle a mixed-gain / mixed-binning folder: split into groups with a message,
-  instead of mixing. **code**, M.
 - Flat-less sessions: gradient + vignetting from a per-instrument map exists; extend the
   vignette-map library beyond Origin. **data**, M.
-- Frame-level health report in the desktop app (why each frame was rejected, with a thumbnail).
-  The data exists in the Phase 1 gates. **code**, M.
 - Meridian-flip and field-rotation aware session splitting on non-Origin mounts (rotation
   prediction is Origin-header based). **code**, M.
 
 ## 4. Quality and speed
 
-- ~~Interleave two output pixels in the Lanczos-3 warp row~~ tried 2026-11, 4-9% slower; see
-  native-kernels.md.
-- Phase 3 combine for very large sessions on 16 GB machines: measured, but only on the 8-core
-  laptop. A low-memory profile test on a smaller box. **code**, S.
+- Phase 3 combine for very large sessions: measured on the 8-core laptop and, since 2026-11-09, on a
+  16 GB laptop (300 lights: frame store compressed in Phase 1, aligned stack on disk, no out-of-memory;
+  Phase 1 dropped to 2 workers when only 0.8 GB was free). Open: what dominates the 380-430 s there.
+  **code**, S.
+- `--gpu-coadd`: 2x on a GTX 1650 Ti with the stack in RAM, but 2.5-3x slower than the CPU on two laptop
+  GPUs with a disk-backed stack. A fix for a suspected double read of the memmap is in review (see
+  [gpu-coadd.md](gpu-coadd.md)); until the laptop numbers are in, do not promote it. **code**, S.
 - Re-bench the whole pipeline against current Siril and PixInsight WBPP on the same data once per
   release; keep `bench_vs_siril.py` results in the compare page. **code**, S per release.
 - GPU stays opt-in; revisit only if VRAM-bound workers go away. Low priority.
 
 ## 5. Desktop app and ease of use
 
-- Nn blend / "learned sharpening strength" as a field (config-only today; needs 8 language
-  entries). **code**, S.
-- Before/after slider per Phase 4 step inside the app (the website has it). **code**, M.
-- A first-run "pick your camera" step that sets sensible defaults for non-Origin data and says
-  which learned features apply. **code**, S.
-- Drag-and-drop a folder; remember last folders; one-click "stack tonight + merge with previous".
-  **code**, M.
-- Crash reports: a "copy diagnostics" button (versions, native status, GPU, the config) to make
-  bug reports reproducible. **code**, S.
+- A first-run "pick your camera" step: today the folder scan only shows a note for an unprofiled camera.
+  **code**, S.
 - Linux and macOS desktop builds exist; verify them on real machines each release. **data**, S.
 
 ## 6. Science outputs
 
-- Photometry is calibrated for Origin; extend gain/PTC to other cameras via the profile work
-  above. **data**, M.
-- AAVSO-style export of the photometry time series. **code**, M.
-- Transient detection against a catalogue (Gaia / Minor Planet Center) to cut false positives
-  before the CNN triage. **code**, M.
+- Photometry is calibrated for Origin; extend gain/PTC to other cameras via the profile work above.
+  **data**, M.
+- Transient detection against a catalogue (Gaia / Minor Planet Center) to cut false positives before the
+  CNN triage. **code**, M.
 - Astrometric report for asteroid / comet sessions (MPC 80-column). **code**, M.
 
 ## 7. Project and community
 
-- Release 2.20 (everything since 2.19.0): changelog entry, tag, wheels.
-- Pin the sample session and the website's "other cameras" page as the first thing a new user
-  sees; track downloads (`tools/download_stats.py`) per release. 14-day traffic is ~230 unique
-  visitors and ~14 downloads per release, so the funnel, not features, is the bottleneck.
-- Ask on Cloudy Nights / Seestar groups for volunteer test stacks (DSLR, ZWO, trailed) -- this
-  unblocks most of section 1 and is the highest-value, lowest-effort item.
-- Reviewed translations: the 8 languages are machine-drafted. Ask native speakers to review the
-  home page and desktop app strings. **data**, S each.
-- Code-signing for the Windows installer (policy page exists) to remove the SmartScreen warning.
+- Pin the sample session and the website's "other cameras" page as the first thing a new user sees; track
+  downloads (`tools/download_stats.py`) per release. 14-day traffic was ~230 unique visitors and ~14
+  downloads per release, so the funnel, not features, is the bottleneck.
+- Ask on Cloudy Nights / Seestar groups for volunteer test stacks (DSLR, ZWO, trailed) -- this unblocks most
+  of section 1 and is the highest-value, lowest-effort item.
+- Reviewed translations: the 8 languages are machine-drafted. Ask native speakers to review the home page
+  and desktop app strings. **data**, S each.
+- Code-signing for the Windows installer (policy page exists) to remove the SmartScreen warning; needs a
+  certificate.
+- Run `.github/workflows/samples.yml` once by hand after it lands (the Zenodo zip layout is a guess), and
+  `--update` the baseline if a Linux runner needs it.
 
-## Suggested order
+## Done (do not propose again)
 
-1. Release 2.20, then collect test stacks (section 7 -> unblocks section 1).
-2. Finish star removal for other cameras + bright cores (in progress).
-3. Section 5 quick wins: camera step, diagnostics button, blend field.
-4. Section 3 mixed-gain/binning handling.
-5. Photometry on other cameras + AAVSO export.
+- Release 2.20 and later (VERSION is 2.23.0); the changelog entry is kept per release.
+- Desktop app: copy diagnostics (Help > Report a problem), drag-and-drop a folder, recent folders, a camera
+  note for unprofiled cameras, per-frame rejection reasons in the frame graph (`--frame-report`),
+  before/after of one Phase 4 step, the learned-sharpening strength field (`--nn-deconv-blend`), a one-click
+  "add earlier stacks of this target" checkbox (`previous_stacks.py`).
+- Mixed binning / frame shape / gain / camera in one folder: split into groups
+  (`frame_discovery.differing_settings`); a mismatched master is cropped or dropped with a message
+  (`cli._plan_master_crop`, `_drop_mismatched_masters`).
+- Stars within ~30 px of the frame edge: the learned deconvolver reflect-pads before detection.
+- AAVSO export of the photometry time series (`aavso_report.py`).
+- Performance budget in CI (`tools/perf_budget.py`); weekly sample-session regression workflow.
+- Catalogue prefetch during Phases 1-3 (`prefetch.py`).
+- Tried and dropped: Lanczos warp two-pixel interleave, CPU/GPU frame split of the proper coadd.

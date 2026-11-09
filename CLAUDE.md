@@ -17,8 +17,8 @@ pip install maturin && (cd ext/astro_native && maturin develop --release)
 ### Run tests
 ```bash
 pytest -q
-# Full suite, parallel (pytest-xdist): ~4.5 min on the 8-core laptop. Tests never reach the
-# network (tests/conftest.py _no_network)
+# Full suite, parallel (pytest-xdist): ~1.5 min on the 16-thread dev machine with the native module,
+# ~4 min in CI. Tests never reach the network (tests/conftest.py _no_network)
 pytest -q -n auto
 # Run a single test
 pytest tests/test_core.py::test_calculate_shift_recovery -v
@@ -43,8 +43,17 @@ not `__name__`/root; **OS002** module-level optional-dependency imports in `src/
 **OS004** (warn) every native `#[pyfunction]` needs a test reference; **OS006** no broad `except Exception: pass` (log at debug instead); **OS005** (warn, `--git`)
 bump `ext/astro_native/Cargo.toml` when the crate source changes.
 
+### Performance budget
+```bash
+python tools/perf_budget.py                     # synthetic stack: wall time + peak RSS of the process tree vs tools/data/perf_budget.json (CI, wide time margin)
+python tools/perf_budget.py --record            # store this machine's numbers as the budget (quiet machine)
+python tools/perf_budget.py -d lights/ --label laptop16gb --log perf.jsonl   # report a real session, no budget (low-memory machines)
+```
+The pipeline's own "Peak memory" line counts the main process only (502 MB on a 300-frame session whose
+process tree peaked at 9.3 GB); use this tool when memory matters.
+
 ### Sample sessions and maintenance
-The twelve public sample sessions (Zenodo, CC BY 4.0; page `docs/sample-sessions.html`) double as a regression corpus:
+The twelve public sample sessions (Zenodo, CC BY 4.0; page `docs/sample-sessions.html`) double as a regression corpus (`.github/workflows/samples.yml` runs two of them weekly and on demand, never on PRs):
 ```bash
 python tools/check_samples.py SAMPLES_DIR [--only 01,11]   # stack and compare with tools/data/samples_baseline.json
 python tools/check_samples.py SAMPLES_DIR --update          # accept new values after an intended change
@@ -132,7 +141,7 @@ files from different sessions have landed in the wrong PR before). So:
 | `distortion.py` | Radial distortion model (`--distortion-model`); null result on Origin data |
 | `stacking.py` | Combines (sigma-clip, percentile, ESD, linear fit, IVW, wavelet, median), drizzle (resample / `--drizzle-method splat`, kernels lanczos/psf/magic, `--super-res-iters`), lacosmic, online sigma-clip, `run_stacking_phase`; the numpy combines share one tile driver (`_tile_grid`, `_combine_tiles`) |
 | `quick_look.py` | Desktop app only (`UIEvents.active`): after registration, mean of the 8 sharpest frames warped into the common crop and binned to preview size, published as the `quick-look` named preview before Phase 3's combine; skipped with elastic registration; never touches the stack, a failure is logged and swallowed (a cancel is not) |
-| `proper_coadd.py` | Zackay-Ofek proper coaddition, on by default (`--no-proper-coadd`); `--gpu-coadd` (opt-in; the `gpu` Cargo feature is on by default since crate 0.66.0) runs its combine pass on the GPU via wgpu (`ext/astro_native/src/gpu.rs`, `gpu_coadd.rs`), falling back to the CPU on any failure; output close to, not bit-identical with, the CPU path: [gpu-coadd](dev-notes/gpu-coadd.md) |
+| `proper_coadd.py` | Zackay-Ofek proper coaddition, on by default (`--no-proper-coadd`); `--gpu-coadd` (opt-in; the `gpu` Cargo feature is on by default since crate 0.66.0) runs its combine pass on the GPU via wgpu (`ext/astro_native/src/gpu.rs`, `gpu_coadd.rs`), falling back to the CPU on any failure and declining an integrated GPU; output close to, not bit-identical with, the CPU path. Measured: 2x faster on a GTX 1650 Ti with the stack in RAM, 2.5-3x *slower* than the CPU on two laptop GPUs (Radeon iGPU, RTX 3050) with a disk-backed stack, so do not describe it as a general speed-up: [gpu-coadd](dev-notes/gpu-coadd.md) |
 | `cfa_drizzle.py` | Bayer drizzle (`--cfa-drizzle`, opt-in, not recommended for Origin data) |
 | `full_field.py` | Extend the stack beyond the common crop (`--full-field`, on by default at FRAC 0.5; `--no-full-field` / `--full-field 0` off; skipped silently with drizzle, comet mode, elastic registration, uncertainty map) |
 | `merge.py` | `--merge` and the hierarchical combine (`merge_previous_stacks`) |
@@ -141,6 +150,9 @@ files from different sessions have landed in the wrong PR before). So:
 | `frc.py` | Fourier ring correlation of two half-stacks, SSNR, Wiener-from-halves, per-scale denoiser risk (Noise2Inverse style), method-noise check; `--noise-validate` prints the split-half resolution, `tools/eval_frc.py` |
 | `noise_validation.py` / `noise_model.py` | Odd/even noise maps (`--noise-validate`); measured gain + correlated-noise model for photometry |
 | `moving_objects.py` | Mover detection / tracked stack (`--moving-objects[-stack]`) |
+| `frame_report.py` | Per-frame health report (`--frame-report`): kept/rejected and why, from data the gates already have (`<stem>_frames.csv/.json`, and the desktop frame graph) |
+| `aavso_report.py` | AAVSO Extended Format report from a photometry time series (`--aavso-report`; VSP comparison stars, per-frame ensemble zero point) |
+| `previous_stacks.py` / `drop_files.py` / `self_update.py` | Desktop app helpers, toolkit-free: earlier `RAWSTACK` stacks of the target (the "add earlier stacks" checkbox fills `--merge`); what a drop on the window means; in-app update of the installed Windows copy |
 | `session_report.py` / `session_info.py` | Tracking/trend report (`--session-report`); parse capture-app `info.json`, stack WCS |
 | `dither_report.py` / `aberration.py` | Dither coverage (`--dither-report`); field aberration/tilt (`--aberration-report`) |
 | `postprocess.py` | Phase 4 chain `postprocess_stack`, `_postprocess_early` (cacheable early steps); `StepSnapshots` + `PHASE4_TOGGLES` (desktop app: switch steps off/on after a run, resuming at the first changed step) |
@@ -188,7 +200,7 @@ files from different sessions have landed in the wrong PR before). So:
 ### Rules that must hold
 
 **Settings, checkpoints, `--from-stack`**
-- `stack_fingerprint` hashes lights + Phase 1 (`p1`) and Phase 2-3 (`p23`) settings, taken before `--auto` mutates `args`. **A new Phase 1-3 attribute not in those CLI groups must be added to `_P1_EXTRA`/`_P23_EXTRA`** (Phase-4-only members of those groups go in `_P23_IGNORE`), or changing it silently reuses a stale checkpoint.
+- `stack_fingerprint` hashes lights + Phase 1 (`p1`) and Phase 2-3 (`p23`) settings, taken before `--auto` mutates `args`. **A new Phase 1-3 attribute not in those CLI groups must be added to `_P1_EXTRA`/`_P23_EXTRA`** (Phase-4-only members of those groups go in `_P23_IGNORE`), or changing it silently reuses a stale checkpoint. `tests/test_fingerprint_coverage.py` fails when a Phase 1-3 module reads a CLI setting the fingerprint misses (settings that cannot change the stack go in its `NOT_PIXEL_AFFECTING`).
 - `--from-stack` runs Phase 4 on a previous run's linear FITS with its `<stem>_config.toml`; never writes the input. The early-step cache key is collected from `_postprocess_early`'s own source (`_early_args_read`); a new local crossing the `_postprocess_early` boundary must join its return value. Names read only for side-file paths go in `_EARLY_KEY_IGNORE` (`output` was keyed: every new `-o` missed); a step that writes a side file there must make `_early_cache_usable` false. `save_effective_config` writes lists too (`skip_step`; dropping them re-ran skipped steps on `--from-stack`).
 - Saved configs bake in `--auto`'s derived choices (e.g. `galaxy_mode`) as if user-set; re-running from a config is not the same as re-running `--auto`. `--auto` runs after Phase 1, so its presets must not set a Phase 1 attribute (`pre_gradient_removal` did: it never ran under `--auto`, only from the saved config; `TestNoPhase1Settings`).
 - `--auto` mutates the one shared `args`; `cli._snapshot_args`/`_restore_args` reset it per target, copy mutable containers (`_copy_arg_value`) and delete attributes a target created. Accumulating settings (e.g. `skip_step`) leak otherwise. Tested by `tests/test_auto_state_isolation.py` against the real helpers.
@@ -285,6 +297,7 @@ Details in the linked notes.
 - Per-frame lacosmic as a noise reducer (it was smoothing; fixed noise model now) ([siril-comparison](dev-notes/siril-comparison.md)).
 - Proper coadd outside the core in `--full-field` (normalised convolution, per-tile, MTF filter, Wiener) ([module-notes](dev-notes/module-notes.md)).
 - Widening `--use-gpu` coverage (fewer VRAM-bound workers); GPU stays opt-in.
+- Splitting the proper coadd's frames between CPU and GPU (a merge kernel adds the CPU's half-plane sums to the device's; output matched): slower than GPU-only at every share (4.8-6.6 s vs 4.4 s; the CPU needs the device's power-of-two planes and also prepares the device's frames) ([gpu-coadd](dev-notes/gpu-coadd.md)).
 - Removed denoisers NLM, BM3D, MMT, non-adaptive wavelet + Noise2Self calibration ([module-notes](dev-notes/module-notes.md)).
 - Physical sky model on ~1 deg fields (declines by design).
 - Starless-layer deconvolution and separate-layer stretch.
