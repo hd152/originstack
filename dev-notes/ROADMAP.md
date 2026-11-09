@@ -50,8 +50,8 @@ cube FITS. It is verified on Origin, Seestar S50 and LCO mono only.
 
 ## 4. Quality and speed
 
-- Interleave two output pixels in the Lanczos-3 warp row (the AVX2 lane attempt gained nothing;
-  this one is untried). **code**, M.
+- ~~Interleave two output pixels in the Lanczos-3 warp row~~ tried 2026-11, 4-9% slower; see
+  native-kernels.md.
 - Phase 3 combine for very large sessions on 16 GB machines: measured, but only on the 8-core
   laptop. A low-memory profile test on a smaller box. **code**, S.
 - Re-bench the whole pipeline against current Siril and PixInsight WBPP on the same data once per

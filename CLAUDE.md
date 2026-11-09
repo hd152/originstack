@@ -288,7 +288,7 @@ Details in the linked notes.
 - Removed denoisers NLM, BM3D, MMT, non-adaptive wavelet + Noise2Self calibration ([module-notes](dev-notes/module-notes.md)).
 - Physical sky model on ~1 deg fields (declines by design).
 - Starless-layer deconvolution and separate-layer stretch.
-- AVX2 lanes for the Lanczos-3 warp row: bit-identical, no faster ([native-kernels](dev-notes/native-kernels.md)).
+- AVX2 lanes, or two interleaved output pixels, for the Lanczos-3 warp row: bit-identical, no faster (the pair is 4-9% slower single-thread) ([native-kernels](dev-notes/native-kernels.md)).
 - Camera-wide CFA equalisation prior: 2x2 green offsets vary 5-15 ADU between sessions, 0.4 ADU within one ([camera-profile](dev-notes/camera-profile.md)).
 - Per-unit bad-pixel / vignetting library: the session dark already holds the bad pixels; vignetting gains 0-5% ([camera-profile](dev-notes/camera-profile.md)).
 - Sharper learned deconvolution from more of the same data (stricter seeing cut, cross-night pairs, wider U-Net): all land on v3's width-noise curve at equal noise ([nn-deconv-runbook](dev-notes/nn-deconv-runbook.md)).
