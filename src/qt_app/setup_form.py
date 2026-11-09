@@ -328,6 +328,9 @@ class SetupForm(QWidget):
         self.camera_label = set_role(QLabel(''), 'dim')
         self.camera_label.setWordWrap(True)
         self.camera_label.hide()
+        self.merge_box = QCheckBox('')
+        self.merge_box.hide()
+        self.merge_box.toggled.connect(self._merge_toggled)
         for dest in _COMMON_DESTS:
             field = all_fields.get(dest)
             if field is not None:
@@ -338,6 +341,8 @@ class SetupForm(QWidget):
                 goal_row, row = row, row + 1
             if dest == 'directory':
                 cgrid.addWidget(self.camera_label, row, 0, 1, 5)
+                row += 1
+                cgrid.addWidget(self.merge_box, row, 0, 1, 5)
                 row += 1
         self.goal = GoalPicker(self.model)
         cgrid.addWidget(self.goal, goal_row, 0, 1, 5)
@@ -444,11 +449,30 @@ class SetupForm(QWidget):
         fv = self.fields.get(dest)
         if fv is not None:
             fv.load()
+        if dest == 'merge':
+            self._refresh_merge_box()
         if self.changed_only.isChecked():
             self.refresh_visibility()
         self.refresh_toggle_text()
 
+    def _merge_toggled(self, on: bool) -> None:
+        self.model.set_merge_previous(on)
+
+    def _refresh_merge_box(self) -> None:
+        prev = self.model.previous_stacks
+        self.merge_box.blockSignals(True)
+        if prev:
+            name = self.model.inferred[0] or ''
+            frames = sum(s['frames'] for s in prev)
+            self.merge_box.setText(_(
+                'Add {n} earlier stack(s) of {name} ({frames} frames) to this one',
+                n=len(prev), name=name, frames=frames))
+            self.merge_box.setChecked(self.model.merge_previous())
+        self.merge_box.setVisible(bool(prev))
+        self.merge_box.blockSignals(False)
+
     def _on_scanned(self) -> None:
+        self._refresh_merge_box()
         self.camera_label.setText(self.model.camera_note)
         self.camera_label.setVisible(bool(self.model.camera_note))
         fv = self.fields.get('directory')
