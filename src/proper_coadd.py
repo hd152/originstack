@@ -467,7 +467,7 @@ def _gpu_plane(n: int) -> int:
 def _gpu_unusable(aligned, C: int, H: int, W: int) -> Optional[str]:
     """Why the GPU coadd cannot run on this stack, or None when it can."""
     if _native is None or not hasattr(_native, 'gpu_coadd_begin'):
-        return "this astro_native build has no GPU support (build it with --features gpu)"
+        return "this astro_native build has no GPU support (needs astro_native 0.66+, built with its default features)"
     if not _native.gpu_available():
         return "no usable GPU adapter"
     if C != 3:

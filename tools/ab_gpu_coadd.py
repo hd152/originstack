@@ -1,6 +1,6 @@
 """Compare the CPU and the GPU proper coadd (``--gpu-coadd``) on the same aligned stack.
 
-Needs an astro_native built with ``--features gpu`` (see dev-notes/gpu-coadd.md). The stack is
+Needs an astro_native built with the ``gpu`` feature (default since 0.66.0) (see dev-notes/gpu-coadd.md). The stack is
 either synthetic (a star field with per-frame seeing, transparency and a few cosmic rays) or a
 float32 ``.npy`` of shape (N, H, W, 3) -- the aligned frames -- with an optional ``--reference``
 .npy (H, W, 3), the normal stack the coadd rejects against (default: the mean of the frames).
@@ -60,7 +60,7 @@ def main() -> int:
 
     native = pc._native
     if native is None or not hasattr(native, 'gpu_coadd_begin'):
-        print('astro_native has no GPU support: build it with `maturin build --release --features gpu`')
+        print('astro_native has no GPU support: build it with `maturin build --release` (astro_native 0.66+)')
         return 2
     if not native.gpu_available():
         print('no usable GPU adapter')

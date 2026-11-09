@@ -2101,9 +2101,8 @@ def build_parser() -> argparse.ArgumentParser:
                         'when no PSF can be measured.')
     g_stack.add_argument('--gpu-coadd', dest='gpu_coadd', action='store_true',
                    help='Run the combine pass of the proper coadd on the GPU (Vulkan, DX12 or '
-                        'Metal through wgpu; any vendor). Opt-in: needs an astro_native build '
-                        'with the gpu feature (not in the packaged app or the PyPI wheels, see '
-                        'dev-notes/gpu-coadd.md), a GPU with about 1 GB free, and frames of at most '
+                        'Metal through wgpu; any vendor). Opt-in: needs astro_native '
+                        '0.66 or later (see dev-notes/gpu-coadd.md), a GPU with about 1 GB free, and frames of at most '
                         '4064 px with 3 channels. On a 206-frame session the pass took 9 s '
                         'instead of 17 s and the stack differed from the CPU stack by about '
                         '1e-5 of its noise (float32 on the GPU: close, not bit-identical). '
