@@ -165,3 +165,71 @@ def test_full_field_is_on_by_default_and_can_be_turned_off():
     assert parse_args(['-d', '.', '--full-field', '0.7']).full_field == 0.7
     assert not parse_args(['-d', '.', '--no-full-field']).full_field
     assert not parse_args(['-d', '.', '--full-field', '0']).full_field
+
+
+def _translated_session(seed=5, H=160, W=224, n=12):
+    rng = np.random.default_rng(seed)
+    yy, xx = np.mgrid[0:H, 0:W]
+    scene = (200 + 0.3 * yy + 0.2 * xx).astype(np.float32)
+    frames = [np.ascontiguousarray(scene[..., None] + 5.0 * k + rng.normal(0, 2.0, (H, W, 3)), np.float32)
+              for k in range(n)]
+    shifts = [(float(rng.integers(-15, 16)), float(rng.integers(-15, 16))) for _ in range(n)]
+    core = calc_common_crop(shifts, (H, W))
+    aligned = np.stack([apply_transform(f, shift=s, crop=core) for f, s in zip(frames, shifts)])
+    return frames, shifts, core, aligned.mean(0).astype(np.float32), H, W, n
+
+
+class _CountingFrames:
+    """A frame store that counts reads, like the compressed Phase 1 store (every access
+    there decompresses a whole frame)."""
+
+    def __init__(self, frames):
+        self.frames, self.reads = frames, 0
+
+    def __getitem__(self, i):
+        self.reads += 1
+        return self.frames[i]
+
+
+def test_passes_do_not_change_the_result_and_read_each_frame_once(monkeypatch):
+    """However the windows are grouped into passes over the frames (the memory budget
+    decides), the extension is the same array; with room for all windows every frame is
+    read once -- sky medians included."""
+    frames, shifts, core, core_stack, H, W, n = _translated_session()
+    args = SimpleNamespace(rejection_sigma=3.0, rejection_iters=3)
+    results, reads = [], []
+    for budget in (1 << 30, 600_000, 60_000):
+        monkeypatch.setattr(ff, '_band_budget', lambda b=budget: b)
+        store = _CountingFrames(frames)
+        out, rect, cov = ff.extend_full_field(core_stack, store, list(range(n)), shifts, [None] * n,
+                                              H, W, 3, core, np.linspace(0.8, 1.0, n), args, frac=0.5)
+        results.append((out, rect, cov))
+        reads.append(store.reads)
+    assert reads[0] == n                       # one pass
+    assert reads[0] < reads[1] < reads[2]      # smaller budgets: more passes, never fewer
+    for out, rect, cov in results[1:]:
+        assert rect == results[0][1]
+        np.testing.assert_array_equal(out, results[0][0])
+        np.testing.assert_array_equal(cov, results[0][2])
+
+
+def test_sky_offsets_in_the_pass_match_the_standalone_function():
+    frames, shifts, core, _stack, H, W, n = _translated_session(seed=9)
+    w = np.linspace(0.5, 1.0, n)
+    oy, ox = ff._sky_grid(core)
+    meds = [ff._frame_sky_median(frames[j], shifts[j], None, oy, ox) for j in range(n)]
+    np.testing.assert_array_equal(ff._sky_offsets_from_medians(meds, w),
+                                  ff.frame_sky_offsets(frames, list(range(n)), shifts, [None] * n, core, w))
+
+
+def test_cancel_stops_the_extension():
+    import threading
+
+    from src.models import RunCancelled
+    frames, shifts, core, core_stack, H, W, n = _translated_session()
+    ev = threading.Event()
+    ev.set()
+    args = SimpleNamespace(rejection_sigma=3.0, rejection_iters=3, _cancel_event=ev)
+    with pytest.raises(RunCancelled):
+        ff.extend_full_field(core_stack, frames, list(range(n)), shifts, [None] * n,
+                             H, W, 3, core, np.ones(n), args, frac=0.5)

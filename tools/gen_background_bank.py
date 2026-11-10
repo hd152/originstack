@@ -108,7 +108,7 @@ def main() -> None:
     from src.merge import _pixel_noise
     os.makedirs(args.out, exist_ok=True)
     stacks = sorted(p for p in glob.glob(os.path.join(args.stacks, "*.fits"))
-                    if not p.endswith(".tmp.fits") and "_checkpoint" not in p)
+                    if not p.endswith((".tmp.fits", "_coverage.fits")) and "_checkpoint" not in p)
     for i, p in enumerate(stacks, 1):
         name = os.path.splitext(os.path.basename(p))[0]
         dst = os.path.join(args.out, name + ".npz")
