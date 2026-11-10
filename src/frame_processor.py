@@ -820,6 +820,14 @@ def phase1_layout(args, n: int) -> Tuple[int, int]:
     return workers, 1
 
 
+def phase1_thread_workers(args, n: int, available: int) -> int:
+    """Choose the worker count for the non-process Phase 1 path."""
+    requested = getattr(args, 'parallel', 0)
+    if requested and requested > 0:
+        return max(1, min(requested, n))
+    return min(available, n)
+
+
 def _pin_worker_to_single_thread(rayon_threads: int = _RAYON_WORKER_CAP) -> None:
     """Bound (not necessarily eliminate) each worker process's internal
     threading, so Phase 1's ProcessPoolExecutor parallelism (one process per
@@ -1414,10 +1422,11 @@ def execute_frame_processing(
     elif n >= 2:
         gpu = get_gpu()
         if gpu.active:
-            n_workers = min(gpu.max_gpu_workers(Config.GPU_PHASE1_WORKER_MB,
-                                                Config.GPU_VRAM_RESERVE_MB), n)
+            available_workers = gpu.max_gpu_workers(
+                Config.GPU_PHASE1_WORKER_MB, Config.GPU_VRAM_RESERVE_MB)
         else:
-            n_workers = min(os.cpu_count() or 4, n)
+            available_workers = os.cpu_count() or 4
+        n_workers = phase1_thread_workers(args, n, available_workers)
 
         _adv = getattr(args, 'advanced_metrics', True)
         _sb  = getattr(args, '_session_bayer', None)

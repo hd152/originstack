@@ -32,6 +32,24 @@ From a night of raw frames to a finished image on your own computer: no account,
 
 No Origin session to hand? [Try the free sample](https://originstack.site/try-sample-data.html): 41 frames of the Whirlpool Galaxy, with the steps and the result to expect. Want more to practise on or test with? [Twelve free raw sample sessions](https://originstack.site/sample-sessions.html), one of each kind of target (galaxies, nebulae, a comet, clusters, a narrowband OIII session), 42 to 45 frames each, on Zenodo under CC BY 4.0.
 
+## Profiling
+
+For development builds, `tools/profile_stack.py` runs the same stack command under an
+optional profiler and saves the exact command and environment metadata beside the
+profile. Install Scalene with `pip install -r requirements-dev.txt`. NVIDIA Nsight
+Systems is installed separately from NVIDIA and is useful for CUDA runs:
+
+```powershell
+python tools\profile_stack.py --profiler scalene -- -d lights -o profiled.fits -j 4
+python tools\profile_stack.py --profiler nsight -- -d lights -o profiled.fits --gpu-coadd
+python tools\profile_stack.py --profiler both --output-dir profiling -- -d lights -o profiled.fits
+```
+
+Scalene reports Python CPU time and allocations in `profiling\scalene.html`.
+Nsight Systems writes a `.nsys-rep` capture with the `cuda` and `osrt` traces and
+includes child worker processes. These tools are optional and are not used by normal
+runs or CI.
+
 ![The OriginStack window during a run: session folder and settings on the left, the live preview and recent frames on the right](docs/img/app-running-1200.webp)
 
 *The desktop app mid-run: the live log and phase bar on the left, the stack as it builds on the right. [More about the app](#desktop-app)*
