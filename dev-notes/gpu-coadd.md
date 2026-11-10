@@ -71,6 +71,53 @@ profile showed that stacking a batch of disk-backed frames into one array before
 single-read version) cost ~19 ms per frame of host copying; `gpu_coadd_add_list` takes the frames as they
 are (disk-backed 2.0 s vs 1.9 s in RAM for 48 frames).
 
+Whirlpool on the 16 GB laptop (295 frames, disk-backed stack, ms per frame, profile mode), crate 0.67.0:
+
+| stage | RTX 3050 Laptop | Radeon iGPU | GTX 1650 Ti (synthetic, RAM) |
+|---|---|---|---|
+| upload | 53 | 35 | 16 |
+| prep | 7 | 20 | 3 |
+| row FFTs | 26 | 44 | 6 |
+| transposes | 8 | 64 | 4 |
+| column FFTs | 37 | 121 | 8 |
+| accumulate | 6 | 18 | 3 |
+| device total | 137 | 303 | 41 |
+
+Combine pass without profiling: RTX 3050 **43.6 s** (80.9 s before the single read, 53.1 s with it, CPU
+32.2 s); Radeon 90.0 s. The host is waiting on the device (device 40.3 s of 40.4 s in the host's add calls
+on the 3050; waiting on host prep 1.2 s), so the host side is not the limit. Every 3050 stage is 3-5x
+slower than the same stage on the 1650 Ti, including the FFTs, which touch neither the disk nor the PCIe
+bus: that points at the GPU's clocks or power limit (or contention, or the hybrid-graphics path) on that
+laptop rather than at the pipeline. Both laptops were plugged in (the 3050 laptop: AC, "Balanced" plan), so it is not battery mode.
+`nvidia-smi -l 2` during the combine (RTX 3050 Laptop): **SM clock 210 MHz (max 2100) at 86-91% utilisation**,
+memory 5001 MHz, performance state **P3** (not P0/P2), 48-52 C (no thermal throttle), PCIe gen3 x8 (gen1 x8
+idle); `power.draw` reads a constant 752 W and `power.limit` N/A, so this laptop's power telemetry is not
+trustworthy and the 210 MHz may be a reporting quirk. If it is real, it explains the slowdown: 2048 cores at
+210 MHz against the 1650 Ti's 1024 at ~1.5 GHz is ~3.6x slower, and the stages are 3-5x slower. A RAM-backed
+48-frame synthetic run on the same laptop gives the same per-stage times as the disk-backed session (column
+FFTs 38 vs 37 ms), so disk and session are ruled out; its GPU run took 7.0 s against 7.1 s on the CPU.
+**Resolved: it was real, and it was the Windows power plan.** On "Balanced" the RTX 3050 held a 210 MHz
+compute clock under load; after the user switched the plan to Ultimate Performance the same laptop (idle:
+P3, SM 810 MHz, clock event reasons Idle only; no SW power cap, HW slowdown, thermal or power brake) ran at
+787-1725 MHz in P0/P3 during the combine and every stage dropped to 1650 Ti speed:
+
+| per frame, ms | Balanced (Whirlpool) | Ultimate Performance (Whirlpool) | same, 48 synthetic RAM frames |
+|---|---|---|---|
+| upload | 53 | 30 | 50 |
+| prep / accumulate | 7 / 6 | 3 / 4 | 3 / 4 |
+| row FFTs | 26 | 4 | 4 |
+| transposes | 8 | 3 | 3 |
+| column FFTs | 37 | 6 | 6 |
+| device total | 137 | 50 | 70 |
+
+48 synthetic RAM-backed frames: GPU 4.7 s vs CPU 8.3 s. Whirlpool (295 frames, disk-backed, free RAM 5.3 GB):
+combine **28.6 s on the GPU** (43.6 s on Balanced) against ~32 s on the CPU; Proper coadd stage 38.1 s vs
+53.1 s on the CPU; whole runs 452 s vs 465 s (both slower than the earlier runs on this laptop, which
+varies ~15% with free RAM). The GPU is now waiting on the host: device 14.8 s of the 28.6 s, 8.9 s waiting
+on the frame reads and sky/noise, upload still 30 ms per frame. The Radeon iGPU was not rerun on the new
+plan (90 s on Balanced) and stays declined. Lesson: on a laptop, check the power plan before judging a GPU
+path (`nvidia-smi --query-gpu=clocks.sm,clocks.max.sm,pstate --format=csv -l 2` during a run). Whole runs: 3050 GPU 398-402 s vs CPU 438 s (the CPU run varies ~15%).
+
 ## Self-check (crate 0.67, 2026-11)
 
 A GPU held at a low clock by the Windows power plan was 2.5x slower than the CPU and nothing noticed.
@@ -164,16 +211,14 @@ p99.99 0.006 ADU, mean -8e-4 ADU; the 4547 brightest pixels differ by at most 8e
   disk)**: the GPU combine is *slower* than the CPU one on both its GPUs. Radeon iGPU (Vulkan): 92.6 s vs
   30.8 s CPU; RTX 3050 Laptop (Vulkan): 80.9 s vs 32.2 s CPU (whole runs 431 s vs 382 s and 436 s vs
   438 s, ~15% run-to-run). Output correct (23/23 GPU tests on both). The 2x gain above is the GTX
-  1650 Ti on the 64 GB desktop-class machine with the stack in RAM. Suspected cause, tested:
+  1650 Ti laptop GPU (i9-10885H, 64 GB) with the stack in RAM. Suspected cause, tested:
   with the aligned stack on disk and little free RAM, `host_prep` read each frame
   (`np.array(aligned[j])`) and `gpu_coadd_add` then read it again from the memmap, so the 21 GB were read
   twice. Handing the device the frame already read (one read per frame, read-ahead bounded to
   `n_thr + 8` frames) took the RTX 3050's combine from 80.9 s to **53.1 s** (whole run 436 -> 402 s, CPU
   run 438 s; ~15% run-to-run) and left the Radeon iGPU where it was (92.6 -> 90.0 s). So the double read
   was real but is not the whole story: the combine is still 1.6x (3050) and 2.8x (iGPU) the CPU's 32.2 s.
-  What remains is not identified; candidates are the 70 MB upload per frame, the 36% padding to a
-  2048 x 4096 plane, and a laptop GPU that is simply slower than the 12-thread CPU at this work. Splitting
-  the time on the device (upload, prep, FFT, accumulate) is the next measurement.
+  The stage profile below is the follow-up.
 - Sky and noise per frame are still CPU work (about 3.6 s over 206 frames, hidden behind the device).
 - The experiment also tried a GPU Lanczos warp (about 2x, 7 s of a run), a per-pixel sigma-clip combine
   (6x *slower* than the CPU: per-thread quickselect in local memory), the NN U-Net and the Phase 1 pixel
