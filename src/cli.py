@@ -2107,7 +2107,9 @@ def build_parser() -> argparse.ArgumentParser:
                         'instead of 17 s and the stack differed from the CPU stack by about '
                         '1e-5 of its noise (float32 on the GPU: close, not bit-identical). '
                         'Falls back to the CPU pass, with a note, when the GPU is missing, '
-                        'integrated (slower than the CPU on a real session) or fails.')
+                        'integrated (slower than the CPU on a real session) or fails. On a '
+                        'laptop use a high-performance power plan (Windows "Balanced" held an '
+                        'RTX 3050 at a 210 MHz compute clock, 2.5x slower than the CPU).')
     g_stack.add_argument('--full-field', dest='full_field', type=float, nargs='?',
                          const=0.5, default=0.5, metavar='FRAC',
                    help='Keep the field outside the common crop (on by default; '
