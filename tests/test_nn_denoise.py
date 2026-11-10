@@ -170,6 +170,17 @@ def test_cli_deconvolve_nn_selects_only_the_learned_deconvolver():
     assert parse_args(['-d', 'x', '-o', 'y.fits']).deconvolve_nn is False
 
 
+def test_cli_nn_local_optics_is_explicit_and_saved_in_phase4_config(tmp_path):
+    from src.cli import save_effective_config
+
+    args = parse_args(['-d', 'x', '-o', str(tmp_path / 's.fits'),
+                       '--deconvolve', 'nn', '--nn-local-optics'])
+    assert args.nn_tilt_equalise is True
+    assert 'nn_tilt_equalise' in args._explicit_cli_dests
+    save_effective_config(args, str(tmp_path / 's.fits'))
+    assert 'nn_tilt_equalise = true' in (tmp_path / 's_config.toml').read_text()
+
+
 def test_deconvolve_nn_survives_a_saved_config(tmp_path):
     from src.cli import load_config_file, save_effective_config
     a = parse_args(['-d', 'x', '-o', str(tmp_path / 's.fits'), '--deconvolve', 'nn'])
@@ -232,6 +243,33 @@ def test_phase4_runs_the_deconvolver_at_the_nn_step(monkeypatch):
     args._diagnostic_dir = None
     pp.postprocess_stack(img, args, [], ProcessingStats())
     assert sorted(calls, key=str) == sorted([(ndm.DECONV_MODEL_PATH, 4.0), (None, 4.0)], key=str)   # deconvolver + the blend's denoiser (run side by side)
+
+
+def test_phase4_local_optics_runs_after_nn_deconvolution(monkeypatch):
+    import src.nn_denoise as ndm
+    import src.postprocess as pp
+    from src.models import ProcessingStats
+    seen = []
+
+    def fake_nn(img, strength=1.0, model_path=None, restore_sigma=4.0, fwhm_range=None,
+                star_restore_frac=0.0):
+        return img
+
+    def fake_equalise(img, deconvolve, sigma):
+        seen.append((img.shape, sigma))
+        return img, {'axis': 'x', 'strip_fwhm': [4.0, 3.0], 'target': 3.0, 'blends': [0.5, 0.0]}
+
+    monkeypatch.setattr(ndm, 'nn_denoise', fake_nn)
+    monkeypatch.setattr(ndm, 'model_available', lambda path=None: True)
+    monkeypatch.setattr(pp, 'reduce_chroma_noise', lambda *a, **k: pytest.fail('chroma NR ran'))
+    monkeypatch.setattr('src.psf_field.equalise_tilt', fake_equalise)
+    monkeypatch.setattr('src.background._pixel_noise_sigma', lambda img: 5.0)
+    img = np.full((96, 128, 3), 500, np.float32)
+    args = parse_args(['-d', '.', '--deconvolve', 'nn', '--nn-local-optics',
+                       '--skip-step', 'background'])
+    args._diagnostic_dir = None
+    pp.postprocess_stack(img, args, [], ProcessingStats())
+    assert seen == [((96, 128, 3), 5.0)]
 
 
 def test_nn_deconv_blend_mixes_in_the_denoiser(monkeypatch):

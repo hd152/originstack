@@ -37,6 +37,7 @@ _FIELD_LABELS = {
     'remove_stars': N_('Starless sidecar'),
     'deconvolve_mode': N_('Deconvolution'),
     'nn_deconv_blend': N_('Learned sharpening strength'),
+    'nn_tilt_equalise': N_('Local optical correction'),
     'session_cfa_eq': N_('Session colour equalisation'),
     'ca_correction': N_('Chromatic aberration fix'),
     'cfa_drizzle': N_('Bayer drizzle'),
