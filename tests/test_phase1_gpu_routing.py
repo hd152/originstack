@@ -131,3 +131,8 @@ def test_phase1_layout_uses_three_quarters_of_physical_cores(monkeypatch, physic
     monkeypatch.setattr(psutil, 'cpu_count', lambda logical=True: physical if not logical else 2 * physical)
     assert fp.phase1_layout(_args(), frames) == expected
     assert fp.phase1_layout(_args(parallel=3), frames) == (min(3, frames), fp._RAYON_WORKER_CAP)
+
+
+@pytest.mark.parametrize('parallel, expected', [(0, 16), (1, 1), (3, 3), (40, 20)])
+def test_phase1_thread_workers_honor_requested_parallelism(parallel, expected):
+    assert fp.phase1_thread_workers(_args(parallel=parallel), 20, 16) == expected
