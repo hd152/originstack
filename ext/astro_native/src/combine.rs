@@ -1336,6 +1336,11 @@ pub(crate) fn patch_weighted_sigma_combine_impl<'py>(
     let qm = qmaps.as_array();
     let s = arr.shape();
     let (n, h, w, c) = (s[0], s[1], s[2], s[3]);
+    if c > 8 {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "patch_weighted_sigma_combine_fast supports at most 8 channels",
+        ));
+    }
     let gw: Option<Vec<f32>> = gweights.map(|x| x.as_array().to_vec());
     let gwref = gw.as_deref();
 

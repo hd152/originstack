@@ -738,6 +738,11 @@ pub(crate) fn bilateral_filter<'py>(
     let arr = data.as_array();
     let s = arr.shape();
     let (h, w, c) = (s[0], s[1], s[2]);
+    if c > 8 {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "bilateral_filter supports at most 8 channels",
+        ));
+    }
     let owned: Vec<f32>;
     let flat: &[f32] = match arr.as_slice() {
         Some(sl) => sl,
@@ -763,7 +768,7 @@ pub(crate) fn bilateral_filter<'py>(
 
     let mut out = vec![0f32; h * w * c];
     py.detach(|| {
-        if c == 3 && 2 * radius + 1 <= BILATERAL_BATCH {
+        if c == 3 && 2 * radius < BILATERAL_BATCH {
             out.par_chunks_mut(w * 3).enumerate().for_each_init(Vec::new, |planes, (y, row_out)| {
                 bilateral_row_rgb(flat, y, h, w, radius, &spatial_w, inv_2c2, row_out, planes);
             });
