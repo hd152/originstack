@@ -154,7 +154,14 @@ def test_concurrent_tile_fetches_write_to_different_temp_files(monkeypatch, tmp_
     monkeypatch.setattr(net_query, 'tap_query', lambda *a, **k: Tab(table))
     seen = []
     real_save = np.save
-    monkeypatch.setattr(np, 'save', lambda path, arr: (seen.append(str(path)), real_save(path, arr))[1])
+    both_saving = threading.Barrier(2, timeout=10)     # the two fetches really overlap (a finished thread's id can be reused)
+
+    def save(path, arr):
+        seen.append(str(path))
+        both_saving.wait()
+        return real_save(path, arr)
+
+    monkeypatch.setattr(np, 'save', save)
     real_fetch = local_solve.fetch_tile.__wrapped__          # tests/conftest.py stubs the module attribute
     errors = []
 
