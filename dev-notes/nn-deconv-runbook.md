@@ -513,6 +513,25 @@ targets sharper than the input without teaching the model to invent detail.
 Do not market this as "open-source BlurXTerminator" or promise feature parity. The appropriate
 description is "locally adaptive, artifact-aware neural astronomical deconvolution."
 
+### First implemented slice: local optical correction
+
+OriginStack now exposes the existing conservative field-equalisation pass as:
+
+```powershell
+python originstack.py -d lights -o stacked.fits --deconvolve nn --nn-local-optics
+```
+
+The pass measures unsaturated star widths in overlapping field strips, identifies the
+sharpest populated strip, and applies the learned deconvolver only to softer strips. It
+feathers the joins, measures each strip again, and limits the blend so it does not sharpen
+past the measured sharpest region. It is intentionally opt-in because it adds a second
+neural pass over selected strips and should be validated on the user's optics.
+
+This is a local optical correction for the measured field-width gradient, not a complete
+spatially conditioned BXT-like model: it does not yet model coma, astigmatism, chromatic
+PSF differences, or a full two-dimensional PSF field. The lower-level implementation is in
+`src/psf_field.py`; the setting is Phase 4 only and is preserved in saved configurations.
+
 ## Cross-night pairs: x1 (2026-10-23) -- sharpest yet, noisier; not shipped
 
 Branch `feat/nn-deconv-crossnight`. The seeing pair's target caps sharpening at the session's
@@ -1038,4 +1057,3 @@ detection.
 - `nn_denoise` reuses the first measurement for the restore when `src` is `img` (all finite).
 - Result per call 2.4-3.3x (574 -> 174 ms on Whirlpool, interleaved min-of-5), per NN step ~1.5 s
   saved of ~11 s (the rest is the network, the restore filters and the star mask).
-

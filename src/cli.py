@@ -2072,6 +2072,11 @@ def build_parser() -> argparse.ArgumentParser:
                         'the rest is the neural denoiser output. Lower values leave less sky noise '
                         'and keep faint galaxy contrast, higher values sharpen more. '
                         'Default: automatic (0.75; with --auto galaxies 0.35).')
+    g_post.add_argument('--nn-local-optics', action='store_true',
+                   dest='nn_tilt_equalise',
+                   help='With --deconvolve nn: apply a conservative local optical correction '
+                        'that measures star width across the field and selectively sharpens '
+                        'softer regions toward the sharpest region. Off by default.')
     g_out.add_argument('--export', default=None, metavar='FMT[,FMT]',
                    help='Extra output formats alongside FITS: tiff (32-bit float), '
                         'xisf (PixInsight), png (the preview JPEG\'s image, lossless 8-bit), '
