@@ -467,17 +467,35 @@ pub(crate) fn frame_decode_into(src: &[u8], dst: &mut [u8], itemsize: usize) -> 
         if chunk == 0 || chunk % itemsize != 0 || n != total.div_ceil(chunk) {
             return Err("corrupt chunked frame header".into());
         }
-        let table_end = FRAME_V2_HEADER + 4 * n * itemsize;
+        let table_bytes = 4usize
+            .checked_mul(n)
+            .and_then(|v| v.checked_mul(itemsize))
+            .ok_or_else(|| "chunked frame header is too large".to_string())?;
+        let table_end = FRAME_V2_HEADER
+            .checked_add(table_bytes)
+            .ok_or_else(|| "chunked frame header is too large".to_string())?;
         if src.len() < table_end {
             return Err("truncated chunked frame".into());
         }
         // payload offset of every chunk, from the per-plane stored lengths
-        let mut offsets = Vec::with_capacity(n + 1);
+        let mut offsets = Vec::with_capacity(
+            n.checked_add(1)
+                .ok_or_else(|| "chunked frame has too many chunks".to_string())?,
+        );
         let mut at = table_end;
         offsets.push(at);
         for i in 0..n {
             for p in 0..itemsize {
-                at += (frame_v2_u32(src, FRAME_V2_HEADER + 4 * (i * itemsize + p)) & !FRAME_V2_RAW) as usize;
+                let entry = i
+                    .checked_mul(itemsize)
+                    .and_then(|v| v.checked_add(p))
+                    .and_then(|v| v.checked_mul(4))
+                    .and_then(|v| FRAME_V2_HEADER.checked_add(v))
+                    .ok_or_else(|| "chunked frame header is too large".to_string())?;
+                let len = (frame_v2_u32(src, entry) & !FRAME_V2_RAW) as usize;
+                at = at
+                    .checked_add(len)
+                    .ok_or_else(|| "chunked frame payload is too large".to_string())?;
             }
             offsets.push(at);
         }
@@ -491,10 +509,22 @@ pub(crate) fn frame_decode_into(src: &[u8], dst: &mut [u8], itemsize: usize) -> 
                 let plane = d.len() / itemsize;
                 let mut pos = offsets[i];
                 for (p, sp) in s.chunks_exact_mut(plane).enumerate() {
-                    let e = frame_v2_u32(src, FRAME_V2_HEADER + 4 * (i * itemsize + p));
+                    let entry = i
+                        .checked_mul(itemsize)
+                        .and_then(|v| v.checked_add(p))
+                        .and_then(|v| v.checked_mul(4))
+                        .and_then(|v| FRAME_V2_HEADER.checked_add(v))
+                        .ok_or_else(|| format!("chunk {i} plane {p}: header is too large"))?;
+                    let e = frame_v2_u32(src, entry);
                     let len = (e & !FRAME_V2_RAW) as usize;
-                    let stored = &src[pos..pos + len];
-                    pos += len;
+                    let end = pos
+                        .checked_add(len)
+                        .ok_or_else(|| format!("chunk {i} plane {p}: payload is too large"))?;
+                    if end > src.len() {
+                        return Err(format!("chunk {i} plane {p}: truncated payload"));
+                    }
+                    let stored = &src[pos..end];
+                    pos = end;
                     if e & FRAME_V2_RAW != 0 {
                         if len != plane {
                             return Err(format!("chunk {i} plane {p}: {len} raw bytes; expected {plane}"));

@@ -46,7 +46,7 @@ dependencies = [
 
 [[package]]
 name = "astro_native"
-version = "0.67.0"
+version = "0.67.1"
 dependencies = [
  "lz4_flex",
  "numpy",
