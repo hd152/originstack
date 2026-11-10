@@ -109,6 +109,7 @@ _QUIET_OFF = (
     'nmf_separate',            # writes _star_component/_nebula_component.fits
     'photometric_calibration',  # Gaia/VizieR network queries, per-channel scalar
     'halo_removal',            # halo_removal_method=psf queries Gaia (cached)
+    'dbe_halpha_reference',    # downloads the H-alpha map on first use
     'annotate',
     'verbose',
     'aberration_report',       # writes <output>_aberration.png

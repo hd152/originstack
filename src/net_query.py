@@ -149,6 +149,20 @@ def _http_get(url: str, timeout: float = _DEFAULT_TIMEOUT) -> bytes:
         return resp.read()
 
 
+def fetch_halpha_map(url: str, dest: str, size: int) -> None:
+    """Download the all-sky H-alpha reference map (``halpha_reference``; NASA LAMBDA, a plain
+    GET with no parameters) to ``dest``. Written under a temporary name and renamed, so an
+    interrupted download never leaves a short file; a wrong size is an error."""
+    data = _http_get(url, timeout=120.0)
+    if len(data) != size:
+        raise ValueError(f"H-alpha map download is {len(data)} bytes, expected {size}")
+    os.makedirs(os.path.dirname(dest), exist_ok=True)
+    tmp = dest + '.part'
+    with open(tmp, 'wb') as fh:
+        fh.write(data)
+    os.replace(tmp, dest)
+
+
 def _http_post_form(url: str, fields: Dict[str, str],
                     timeout: float = _DEFAULT_TIMEOUT) -> bytes:
     _require_online(url)

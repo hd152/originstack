@@ -40,8 +40,30 @@ _log = get_logger()
 def _native_usable(data: np.ndarray) -> bool:
     """The native combine kernels require a C-contiguous float32 (N,H,W,C) view.
     A non-matching array (wrong dtype / non-contiguous) falls back to numpy."""
+    if getattr(data, 'decodes', False):     # frame_store.HalfFloatStack: reads are float32 blocks
+        return HAS_NATIVE
     return (HAS_NATIVE and data.ndim == 4 and data.dtype == np.float32
             and data.flags['C_CONTIGUOUS'])
+
+
+def _half_stack_wanted(args, quality_maps, n_final: int, displacement_fields) -> bool:
+    """Hold the aligned stack as float16 (``frame_store.HalfFloatStack``)? Yes on the default
+    path -- the fused native patch-weighted sigma-clip combine, then proper coadd and the
+    noise validation, all of which read it in decoded float32 blocks -- unless
+    ``--aligned-stack full``. The other combines, local normalisation, the moving-object
+    search and the GPU coadd take the stack as one float32 array and keep it. The choice
+    never depends on where the stack is placed, so RAM and disk give the same bits."""
+    if getattr(args, 'aligned_stack', 'half') != 'half':
+        return False
+    return bool(HAS_NATIVE
+                and hasattr(_native, 'patch_weighted_sigma_combine_fast')
+                and args.stack_method in ('sigma_clip', 'winsorized')
+                and quality_maps is not None and len(quality_maps) == n_final
+                and displacement_fields is None
+                and not getattr(args, 'local_normalize', False)
+                and not getattr(args, 'moving_objects', False)
+                and not getattr(args, 'moving_objects_stack', False)
+                and not getattr(args, 'gpu_coadd', False))
 
 
 # Row bands for combining a disk-backed aligned stack: each band of every frame
@@ -61,10 +83,11 @@ def _combine_in_bands(stack: np.ndarray, combine, args, label: str) -> np.ndarra
     ``combine`` must be per-pixel (the band's first row is passed as ``r0`` for
     position-dependent weights), so the result is identical to one call.
     """
-    if not isinstance(stack, np.memmap):
+    half = getattr(stack, 'decodes', False)     # frame_store.HalfFloatStack: always in bands,
+    if not half and not isinstance(stack, np.memmap):    # each decoded to float32 first
         return combine(stack, 0)
     N, H, W, C = stack.shape
-    rows = int(max(1, min(H, _BAND_BYTES // max(N * W * C * stack.itemsize, 1))))
+    rows = int(max(1, min(H, _BAND_BYTES // max(N * W * C * 4, 1))))
     out = np.empty((H, W, C), dtype=np.float32)
     from src.ui_events import get_ui_events
     ui = get_ui_events()
@@ -75,7 +98,7 @@ def _combine_in_bands(stack: np.ndarray, combine, args, label: str) -> np.ndarra
         if ev is not None and ev.is_set():
             raise RunCancelled("cancelled during stacking")
         r1 = min(H, r0 + rows)
-        block = np.ascontiguousarray(stack[:, r0:r1])
+        block = stack.read_band(r0, r1) if half else np.ascontiguousarray(stack[:, r0:r1])
         out[r0:r1] = combine(block, r0)
         del block
         ui.progress(label, b + 1, n_bands)
@@ -1963,8 +1986,14 @@ def run_stacking_phase(
         # process's threads touch it, so no shared memory is needed
         from src.frame_store import FrameStore, announce
         _aligned_store = FrameStore(getattr(args, 'frame_store', 'auto'))
-        mem_aligned, _ = _aligned_store.create('stack_aligned_', 'float32',
+        _half = _half_stack_wanted(args, quality_maps, n_final, displacement_fields)
+        mem_aligned, _ = _aligned_store.create('stack_aligned_', 'float16' if _half else 'float32',
                                                (n_final, crop_h, crop_w, C), reserve_mb=2000.0)
+        if _half:
+            from src.frame_store import HalfFloatStack
+            mem_aligned = HalfFloatStack(mem_aligned)
+            import threading as _threading
+            _scratch = _threading.local()
         announce(_aligned_store)
 
         gpu = get_gpu()
@@ -1979,6 +2008,15 @@ def run_stacking_phase(
                       if displacement_fields is not None and j < len(displacement_fields)
                       else None)
                 # only the crop is warped (the rest is discarded)
+                if _half:
+                    # warp into this thread's float32 buffer, then store it as float16
+                    buf = getattr(_scratch, 'buf', None)
+                    if buf is None:
+                        buf = _scratch.buf = np.empty((crop_h, crop_w, C), np.float32)
+                    apply_transform(rgb, shift=shifts[j], transform=transforms[j], local_field=lf,
+                                    crop=(top, bottom, left, right), out=buf)
+                    mem_aligned.write_frame(j, buf)
+                    return
                 apply_transform(rgb, shift=shifts[j], transform=transforms[j], local_field=lf,
                                 crop=(top, bottom, left, right), out=mem_aligned[j])
 
@@ -2097,6 +2135,9 @@ def run_stacking_phase(
                     raise
                 except Exception as _fexc:
                     _log.debug("native fused patch combine failed (%s); using numpy", _fexc)
+            if not _fused_done and getattr(mem_aligned, 'decodes', False):
+                # the numpy combines need a real array: decode the float16 stack once
+                mem_aligned = mem_aligned.to_float32(_aligned_store)
 
             # Pre-rejection + patch-weighted hybrid stacking (numpy two-pass)
             rej_mask = None

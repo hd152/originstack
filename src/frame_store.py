@@ -223,6 +223,148 @@ class _CompressedFrameArray:
         pass
 
 
+class HalfFloatStack:
+    """The aligned stack (N, H, W, C) held as float16: half the memory, and half the disk
+    traffic when it does not fit in RAM (``--aligned-stack half``, the default where the
+    combine supports it; ``run_stacking_phase``).
+
+    Each frame is stored as ``float16((v - offset) / scale)`` with its own ``offset`` (the
+    frame's median, from a strided sample) and ``scale`` (a power of two that keeps the
+    largest sample inside float16's range), and read back as
+    ``float32(h) * scale + offset``. A float16 keeps 11 bits of mantissa, so a sample is
+    rounded by at most 1/4096 of its distance from the frame's median: around the sky that
+    is thousands of times smaller than the pixel noise (0.10 ADU rms on noise of 500), and
+    on a bright star it stays far below the star's own shot noise. NaN and infinity survive.
+
+    Reading always decodes, into a fresh C-contiguous float32 array, so what a consumer
+    sees does not depend on whether ``raw`` is in RAM or a temp-file memmap: the stack is
+    bit-identical across placements, as it is for the float32 store. It is not bit-identical
+    to the float32 store itself.
+
+    Supports what the combine, the proper coadd and the noise validation use: ``shape``,
+    ``dtype`` (float32, what reads return), ``stack[j]``, ``stack[j, rows, cols]``,
+    ``stack[a:b, ...]``, ``lazy_frame(j)`` (decode only what is indexed) and
+    ``read_band(r0, r1)``. Anything else gets a float32 copy from ``to_float32``."""
+
+    decodes = True          # a read is already a private copy (no need to copy it again)
+
+    def __init__(self, raw):
+        if raw.ndim != 4 or raw.dtype != np.float16:
+            raise ValueError("HalfFloatStack needs an (N, H, W, C) float16 array")
+        self.raw = raw
+        self.shape = tuple(raw.shape)
+        self.ndim = 4
+        self.dtype = np.dtype(np.float32)
+        self.offset = np.zeros(raw.shape[0], np.float32)
+        self.scale = np.ones(raw.shape[0], np.float32)
+
+    def __len__(self) -> int:
+        return self.shape[0]
+
+    def flush(self) -> None:
+        self.raw.flush()
+
+    def write_frame(self, j: int, frame: np.ndarray) -> None:
+        """Store ``frame`` (H, W, C) float32 as frame ``j``. ``frame`` is scratch: it is
+        overwritten with the scaled values."""
+        if frame.dtype != np.float32:
+            raise ValueError("write_frame needs a float32 frame")
+        sample = frame[::16, ::16]
+        fin = sample[np.isfinite(sample)]
+        off = np.float32(np.median(fin)) if fin.size else np.float32(0.0)
+        np.subtract(frame, off, out=frame)
+        with np.errstate(invalid='ignore'):
+            lo, hi = float(np.nanmin(frame)), float(np.nanmax(frame))
+        if not (np.isfinite(lo) and np.isfinite(hi)):
+            # an infinite sample (rare): the scale comes from the finite ones, or the rest of
+            # the frame would overflow float16 too
+            fin = frame[np.isfinite(frame)]
+            lo, hi = (float(fin.min()), float(fin.max())) if fin.size else (0.0, 0.0)
+        peak = max(abs(lo), abs(hi))
+        # the largest sample lands in [8192, 16384): float16 reaches 65504
+        exp = int(np.ceil(np.log2(peak / 16384.0))) if peak > 0 else 0
+        exp = max(-100, min(100, exp))
+        if exp:
+            np.multiply(frame, np.float32(2.0 ** -exp), out=frame)
+        with np.errstate(over='ignore'):        # an infinite sample stays infinite
+            self.raw[j] = frame
+        self.offset[j] = off
+        self.scale[j] = np.float32(2.0 ** exp)
+
+    def _decode(self, part: np.ndarray, j: int) -> np.ndarray:
+        out = np.asarray(part).astype(np.float32)
+        if self.scale[j] != 1.0:
+            np.multiply(out, self.scale[j], out=out)
+        np.add(out, self.offset[j], out=out)
+        return out
+
+    def lazy_frame(self, j: int) -> "_LazyHalfFrame":
+        return _LazyHalfFrame(self, int(j))
+
+    def __getitem__(self, key):
+        first, rest = (key[0], key[1:]) if isinstance(key, tuple) else (key, ())
+        if isinstance(first, (int, np.integer)):
+            j = int(first)
+            if j < 0:
+                j += self.shape[0]
+            return self._decode(self.raw[(j,) + tuple(rest)], j)
+        if isinstance(first, slice):
+            idx = range(*first.indices(self.shape[0]))
+            return np.stack([self._decode(self.raw[(j,) + tuple(rest)], j) for j in idx]) if len(idx) else \
+                np.empty((0,) + np.asarray(self.raw[(slice(0, 0),) + tuple(rest)]).shape[1:], np.float32)
+        raise TypeError("HalfFloatStack is indexed by frame (an integer or a slice) first; "
+                        "use to_float32() for anything else")
+
+    def read_band(self, r0: int, r1: int, workers: int = 8) -> np.ndarray:
+        """Rows ``r0:r1`` of every frame, decoded: (N, r1 - r0, W, C) float32. The frames
+        are read and converted in threads (numpy releases the GIL for both)."""
+        N, _H, W, C = self.shape
+        out = np.empty((N, r1 - r0, W, C), np.float32)
+
+        def one(j):
+            np.copyto(out[j], self.raw[j, r0:r1], casting='same_kind')
+            if self.scale[j] != 1.0:
+                np.multiply(out[j], self.scale[j], out=out[j])
+            np.add(out[j], self.offset[j], out=out[j])
+
+        n = max(1, min(int(workers), N, os.cpu_count() or 4))
+        if n == 1:
+            for j in range(N):
+                one(j)
+        else:
+            from concurrent.futures import ThreadPoolExecutor
+            with ThreadPoolExecutor(max_workers=n, thread_name_prefix='half-read') as pool:
+                for _ in pool.map(one, range(N)):
+                    pass
+        return out
+
+    def to_float32(self, store: "FrameStore", prefix: str = 'stack_aligned_f32_') -> np.ndarray:
+        """The whole stack decoded into a float32 array from ``store`` (RAM or a temp
+        file): for a consumer that needs a real ndarray."""
+        arr, _ = store.create(prefix, 'float32', self.shape, reserve_mb=2000.0)
+        for j in range(self.shape[0]):
+            arr[j] = self[j]
+        return arr
+
+
+class _LazyHalfFrame:
+    """One frame of a ``HalfFloatStack`` that decodes only what is indexed (the proper
+    coadd's measuring pass reads a few star stamps per frame, not the frame)."""
+
+    def __init__(self, stack: HalfFloatStack, j: int):
+        self._stack, self._j = stack, j
+        self.shape = stack.shape[1:]
+        self.ndim = 3
+        self.dtype = stack.dtype
+
+    def __getitem__(self, key):
+        return self._stack._decode(self._stack.raw[self._j][key], self._j)
+
+    def __array__(self, dtype=None, copy=None):
+        a = self._stack[self._j]
+        return a if dtype is None else a.astype(dtype, copy=False)
+
+
 def _require_native_compressor():
     global _NATIVE_COMPRESSOR
     if _NATIVE_COMPRESSOR is not None:

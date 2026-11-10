@@ -140,8 +140,30 @@ def fetch_tile(band: int, r: int, root: Optional[str] = None,
     # a name of its own: the prefetch thread and the main thread can fetch the same tile at once
     tmp = f'{path}.{os.getpid()}.{threading.get_ident()}.tmp.npy'
     np.save(tmp, arr.astype(np.float64))
-    os.replace(tmp, path)
+    _replace_shared(tmp, path)
     return arr
+
+
+def _replace_shared(tmp: str, path: str, tries: int = 6) -> None:
+    """``os.replace(tmp, path)`` when another thread may be replacing ``path`` with the same
+    content at the same moment. Windows refuses one of two simultaneous renames onto one name
+    (PermissionError, "Access is denied"; tests/test_prefetch.py failed 3 runs in 6 on it), so
+    the loser retries briefly, and once a complete file is in place its own copy is dropped."""
+    import time
+    for attempt in range(tries):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:
+            if attempt == tries - 1:
+                if os.path.exists(path):        # the other writer's identical tile won
+                    try:
+                        os.remove(tmp)
+                    except OSError:
+                        _log.debug("tile temp file not removed: %s", tmp, exc_info=True)
+                    return
+                raise
+            time.sleep(0.02 * (attempt + 1))
 
 
 def load_tile(band: int, r: int, root: Optional[str] = None) -> Optional[np.ndarray]:

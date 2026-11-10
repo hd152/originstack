@@ -6,6 +6,36 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+### Changed
+- **The aligned stack is held as 16-bit floats** (`--aligned-stack half`, the default with the
+  default combine): each frame relative to its own sky level, with a per-frame scale, so a sample
+  is rounded by at most 1/4096 of its distance from the sky -- 0.1 ADU rms on 500 ADU of sky
+  noise. Half the memory, so more sessions keep it in RAM, and half the disk traffic when it does
+  not fit: on a 300-frame session on a 16 GB laptop (aligned stack on disk, 21 -> 10.5 GB) the stacking phase went from 3 min 49 s to 2 min 46 s and the whole run from 5 min 48 s to 5 min 0 s. The stack is not bit-identical to earlier releases, at equal quality
+  (same noise, star fluxes within 0.002% median): the pixels move by 0.1-0.7% of the noise (rms;
+  56-frame Rosette, 60-frame Whirlpool). `--aligned-stack full` keeps 32-bit floats. Other stack methods, `--local-normalize`,
+  `--moving-objects` and `--gpu-coadd` always use 32-bit.
+- **The full-field extension reads each frame once** instead of six to eight times: on a 300-frame
+  session on a 16 GB laptop (frames compressed in Phase 1) it took 2 min 4 s, now 24 s. Output
+  unchanged, bit for bit; it now shows progress and stops on Cancel.
+
+- **Proper coadd is reproducible on sessions with wide stars.** Above ~0.4 cycles/px a 5-6 px star's
+  PSF spectrum is below float32 rounding, and the coadd weighted its frames there by that rounding:
+  any sub-noise change in the input (0.2 ADU) moved a Whirlpool stack by a fifth of its noise. Each
+  frame's PSF spectrum now has a floor of 1e-5, so those frequencies -- which carry no signal --
+  combine as an inverse-variance mean. Stacks with stars wider than ~4 px change at pixel scale
+  (a different noise realization, 0.4-0.8% lower pixel noise; star widths and fluxes unchanged).
+
+### Fixed
+- On Windows, the catalogue prefetch thread and the main thread fetching the same Gaia index tile
+  at once could fail one of them with "Access is denied" (two renames onto one file); the second
+  writer now retries and keeps the first one's identical tile.
+
+### Added
+- `--config dbe_halpha_reference=true` (opt-in): background extraction keeps a nebula's large-scale
+  light as the all-sky H-alpha survey map (Finkbeiner 2003) shows it, so a nebula that fills the
+  frame is not fitted away as gradient. Downloads a 12.6 MB map once (see "Network use").
+
 ## [2.24.0] - 2026-11-09
 
 ### Added

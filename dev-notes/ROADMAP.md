@@ -5,7 +5,7 @@ Working list of what could make OriginStack better. Not a promise. Each item say
 **code** = can start now) and a rough size (S: a day or less, M: a few days, L: a week or more).
 "Tried and reverted" in CLAUDE.md lists what not to retry blind.
 
-Last reviewed 2026-11-09. Done items are listed at the bottom so they are not proposed again.
+Last reviewed 2026-11-10. Done items are listed at the bottom so they are not proposed again.
 
 ## 1. Other cameras
 
@@ -44,8 +44,11 @@ It is verified on Origin, Seestar S50 and LCO mono only.
 
 - Phase 3 combine for very large sessions: measured on the 8-core laptop and, since 2026-11-09, on a
   16 GB laptop (300 lights: frame store compressed in Phase 1, aligned stack on disk, no out-of-memory;
-  Phase 1 dropped to 2 workers when only 0.8 GB was free). Open: what dominates the 380-430 s there.
-  **code**, S.
+  Phase 1 dropped to 2 workers when only 0.8 GB was free). What dominated the 380-430 s there (measured
+  2026-11-10, 425 s run): the full-field extension (124 s, now 24 s: each frame read once) and the 21 GB
+  aligned stack on disk, now held as 16-bit floats (10.5 GB: combine 82 -> 40 s; run 425 -> 300 s with
+  both changes). Open: the remaining time is spread over Phase 1 (~60 s), alignment (~53 s), proper
+  coadd (~47 s) and the combine (~40 s). **code**, S.
 - `--gpu-coadd`: solved the mystery of the slow laptop GPU, not yet the speed. The RTX 3050 laptop ran its
   compute clock at 210 MHz of 2100 under the Windows "Balanced" plan; on Ultimate Performance it ran at
   800-1700 MHz and every stage dropped to GTX 1650 Ti speed (synthetic 48 frames: GPU 4.7 s vs CPU 8.3 s;
@@ -58,6 +61,11 @@ It is verified on Origin, Seestar S50 and LCO mono only.
 - Re-bench the whole pipeline against current Siril and PixInsight WBPP on the same data once per
   release; keep `bench_vs_siril.py` results in the compare page. **code**, S per release.
 - GPU stays opt-in; revisit only if VRAM-bound workers go away. Low priority.
+- Nebula-filled frames: the survey H-alpha reference (`--config dbe_halpha_reference=true`) keeps the nebula
+  through DBE (two-night mismatch 0.35 -> 0.20 and 0.34 -> 0.22, light kept x2) but the finished picture
+  barely changes: the sky floor step and the stretch's black point take it out again. Open: let those two
+  read the same reference (a look change; needs the Horsehead / Lagoon / Flaming Star sessions, which are
+  not on the laptop, and a dust map for reflection nebulae). **code**, M.
 
 ## 5. Desktop app and ease of use
 
@@ -102,3 +110,8 @@ It is verified on Origin, Seestar S50 and LCO mono only.
 - Performance budget in CI (`tools/perf_budget.py`); weekly sample-session regression workflow.
 - Catalogue prefetch during Phases 1-3 (`prefetch.py`).
 - Tried and dropped: Lanczos warp two-pixel interleave, CPU/GPU frame split of the proper coadd.
+- Research round 2026-11-10 ([research-2026-11.md](research-2026-11.md)): full-field reads each frame once;
+  16-bit aligned stack; proper coadd PSF-spectrum floor (reproducible with wide stars);
+  survey H-alpha reference for DBE (opt-in); dropped after measuring: NN U-Net on wgpu, more of the dark's
+  pixel pattern, a multi-exposure denoiser, `--stream` for low memory, 3 x 2^k GPU FFT planes, joint
+  multi-frame restoration (ImageMM).

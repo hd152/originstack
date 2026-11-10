@@ -73,6 +73,11 @@ FEATHER_PX = 32
 GRID_STEP = 8
 # Output rows per combine band (memory: N x band x width x 3 float32).
 _BAND_BUDGET_BYTES = 768 * 1024 * 1024
+# ... and at most this much when memory is plentiful (a quarter of what is available): the
+# windows then share one pass over the frames (``_plan_passes``).
+_BAND_BUDGET_MAX_BYTES = 3 * 1024 * 1024 * 1024
+# Frames read and warped at once in a pass (each holds one decompressed frame, ~75 MB).
+_READ_WORKERS = 4
 
 
 def _src_mapping(shift, transform) -> Tuple[np.ndarray, np.ndarray]:
@@ -166,6 +171,30 @@ def _windows(rect, core, feather) -> List[Tuple[int, int, int, int]]:
     return out
 
 
+def _sky_grid(core, n_grid: int = 64) -> Tuple[np.ndarray, np.ndarray]:
+    ct, cb, cl, cr = core
+    gy = np.linspace(ct + 2, cb - 3, n_grid)
+    gx = np.linspace(cl + 2, cr - 3, n_grid)
+    return np.meshgrid(gy, gx, indexing='ij')
+
+
+def _frame_sky_median(rgb, shift, transform, oy: np.ndarray, ox: np.ndarray) -> np.ndarray:
+    """Per-channel median of one frame at the output positions ``(oy, ox)`` (nearest pixel)."""
+    mat, off = _src_mapping(shift, transform)
+    sr = np.rint(mat[0, 0] * oy + mat[0, 1] * ox + off[0]).astype(int)
+    sc = np.rint(mat[1, 0] * oy + mat[1, 1] * ox + off[1]).astype(int)
+    Hs, Ws = rgb.shape[0], rgb.shape[1]
+    ok = (sr >= 0) & (sr < Hs) & (sc >= 0) & (sc < Ws)
+    return np.nanmedian(np.asarray(rgb[sr[ok], sc[ok]], dtype=np.float32), axis=0)
+
+
+def _sky_offsets_from_medians(meds, weights) -> np.ndarray:
+    meds = np.asarray(meds, np.float64)
+    w = np.asarray(weights, np.float64)
+    w = w / w.sum() if w.sum() > 0 else np.full(len(w), 1.0 / len(w))
+    return (meds - (w[:, None] * meds).sum(0)).astype(np.float32)
+
+
 def frame_sky_offsets(mem_rgb, final_indices, shifts, transforms, core, weights,
                       n_grid: int = 64) -> np.ndarray:
     """(n, C) per-frame sky level minus the weighted mean of those levels.
@@ -180,64 +209,132 @@ def frame_sky_offsets(mem_rgb, final_indices, shifts, transforms, core, weights,
 
     Each frame is sampled at the *same* sky positions (an n_grid x n_grid grid
     over the core, mapped into the frame), so field structure cannot leak in as
-    the frames drift; a median over the frame's own area did exactly that."""
-    ct, cb, cl, cr = core
-    gy = np.linspace(ct + 2, cb - 3, n_grid)
-    gx = np.linspace(cl + 2, cr - 3, n_grid)
-    oy, ox = np.meshgrid(gy, gx, indexing='ij')
-    meds = []
-    for j, idx in enumerate(final_indices):
-        rgb = mem_rgb[idx]
-        mat, off = _src_mapping(shifts[j], transforms[j])
-        sr = np.rint(mat[0, 0] * oy + mat[0, 1] * ox + off[0]).astype(int)
-        sc = np.rint(mat[1, 0] * oy + mat[1, 1] * ox + off[1]).astype(int)
-        Hs, Ws = rgb.shape[0], rgb.shape[1]
-        ok = (sr >= 0) & (sr < Hs) & (sc >= 0) & (sc < Ws)
-        a = np.asarray(rgb[sr[ok], sc[ok]], dtype=np.float32)
-        meds.append(np.nanmedian(a, axis=0))
-    meds = np.asarray(meds, np.float64)
-    w = np.asarray(weights, np.float64)
-    w = w / w.sum() if w.sum() > 0 else np.full(len(w), 1.0 / len(w))
-    return (meds - (w[:, None] * meds).sum(0)).astype(np.float32)
+    the frames drift; a median over the frame's own area did exactly that.
+
+    ``extend_full_field`` measures the same medians inside its first pass over the
+    frames (``_combine_windows``) instead of calling this: one read of every frame less."""
+    oy, ox = _sky_grid(core, n_grid)
+    meds = [_frame_sky_median(mem_rgb[idx], shifts[j], transforms[j], oy, ox)
+            for j, idx in enumerate(final_indices)]
+    return _sky_offsets_from_medians(meds, weights)
 
 
-def _combine_window(win, mem_rgb, final_indices, shifts, transforms, H, W, C,
-                    weights, sigma, iters, sky_off=None):
-    """Weighted sigma-clipped mean of the frames covering ``win``, plus the
-    per-pixel frame count. Uncovered samples are NaN. ``sky_off`` ((n, C)) is
-    subtracted from each frame first (``frame_sky_offsets``)."""
+def _band_budget() -> int:
+    """Bytes of warped window samples held at once: a quarter of the available memory,
+    between ``_BAND_BUDGET_BYTES`` and ``_BAND_BUDGET_MAX_BYTES``. Only the number of
+    passes over the frames depends on it, never a pixel."""
+    try:
+        from src.frame_store import _available_mb
+        avail_mb, _total = _available_mb()
+    except Exception:
+        avail_mb = None
+    if not avail_mb:
+        return _BAND_BUDGET_BYTES
+    return int(min(_BAND_BUDGET_MAX_BYTES, max(_BAND_BUDGET_BYTES, 0.25 * avail_mb * 1024 * 1024)))
+
+
+def _plan_passes(windows, uses, C: int, budget: int) -> List[List[Tuple[int, int, int]]]:
+    """Group the windows' row bands ``(window index, r0, r1)`` into passes whose warped
+    samples fit ``budget`` bytes together. A window taller than the budget is split into
+    row bands (at least 8 rows each), as before; bands are packed in order."""
+    jobs = []
+    for wi, (t, b, lft, rgt) in enumerate(windows):
+        h = b - t
+        if not uses[wi] or h <= 0:
+            continue
+        per_row = len(uses[wi]) * (rgt - lft) * C * 4
+        band = max(8, int(budget // max(per_row, 1)))
+        for r0 in range(0, h, band):
+            r1 = min(h, r0 + band)
+            jobs.append(((wi, r0, r1), per_row * (r1 - r0)))
+    passes, cur, used = [], [], 0
+    for job, nbytes in jobs:
+        if cur and used + nbytes > budget:
+            passes.append(cur)
+            cur, used = [], 0
+        cur.append(job)
+        used += nbytes
+    if cur:
+        passes.append(cur)
+    return passes
+
+
+def _combine_windows(windows, mem_rgb, final_indices, shifts, transforms, H, W, C,
+                     weights, sigma, iters, core, args=None):
+    """Weighted sigma-clipped mean of the frames covering each window, plus the per-pixel
+    frame count: ``[(out, count), ...]`` in ``windows`` order. Uncovered samples are NaN.
+    Each frame's sky offset (``frame_sky_offsets``) is subtracted first.
+
+    Every frame is read once per pass, and a pass fills as many windows as the memory budget
+    allows (``_plan_passes``); the per-frame sky medians are taken in the first pass. Reading
+    a frame is not free: Phase 1's compressed store (low-memory machines) decompresses the
+    whole 75 MB frame on every access, and the previous window-by-window, band-by-band loop
+    plus the separate sky pass read every frame six to eight times -- 2 min 4 s of a 7 min
+    300-frame run on a 16 GB laptop for 3% more area. The warp and the combine are per
+    pixel, so the grouping changes no output value."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    from src.models import RunCancelled
     from src.registration import apply_transform
     from src.stacking import sigma_clip_combine
-    t, b, lft, rgt = win
-    h, w = b - t, rgt - lft
-    rows = np.arange(t, b)
-    cols = np.arange(lft, rgt)
-    covs = [frame_coverage(shifts[j], transforms[j], rows, cols, H, W)
-            for j in range(len(final_indices))]
-    use = [j for j, cv in enumerate(covs) if cv.any()]
-    out = np.zeros((h, w, C), np.float32)
-    count = np.zeros((h, w), np.int32)
-    if not use:
-        return out, count
-    per_row = len(use) * w * C * 4
-    band = max(8, int(_BAND_BUDGET_BYTES // max(per_row, 1)))
-    for r0 in range(0, h, band):
-        r1 = min(h, r0 + band)
-        stack = np.empty((len(use), r1 - r0, w, C), np.float32)
-        for k, j in enumerate(use):
+    from src.ui_events import get_ui_events
+
+    n = len(final_indices)
+    covs, uses = [], []
+    for (t, b, lft, rgt) in windows:
+        rows, cols = np.arange(t, b), np.arange(lft, rgt)
+        cv = [frame_coverage(shifts[j], transforms[j], rows, cols, H, W) for j in range(n)]
+        covs.append(cv)
+        uses.append([j for j in range(n) if cv[j].any()])
+    outs = [(np.zeros((b - t, rgt - lft, C), np.float32), np.zeros((b - t, rgt - lft), np.int32))
+            for (t, b, lft, rgt) in windows]
+    passes = _plan_passes(windows, uses, C, _band_budget())
+    oy, ox = _sky_grid(core)
+    meds: List = [None] * n
+    sky_off = None
+    cancel = getattr(args, '_cancel_event', None)
+    ui = get_ui_events()
+    total = max(1, len(passes) * n)
+    w32 = np.asarray(weights, np.float32)
+
+    for pi, jobs in enumerate(passes):
+        slots = [{j: k for k, j in enumerate(uses[wi])} for (wi, _r0, _r1) in jobs]
+        stacks = [np.empty((len(uses[wi]), r1 - r0, windows[wi][3] - windows[wi][2], C), np.float32)
+                  for (wi, r0, r1) in jobs]
+        # the first pass visits every frame (sky medians); later ones only the frames in use
+        need = range(n) if pi == 0 else sorted(set().union(*[set(uses[wi]) for (wi, _a, _b) in jobs]))
+
+        def one(j, jobs=jobs, slots=slots, stacks=stacks, first=(pi == 0)):
+            if cancel is not None and cancel.is_set():
+                raise RunCancelled("cancelled during the full-field extension")
             rgb = np.asarray(mem_rgb[final_indices[j]])
             if rgb.dtype != np.float32 or not rgb.flags['C_CONTIGUOUS']:
                 rgb = np.ascontiguousarray(rgb, dtype=np.float32)
-            apply_transform(rgb, shift=shifts[j], transform=transforms[j],
-                            crop=(t + r0, t + r1, lft, rgt), out=stack[k])
-            if sky_off is not None:
-                stack[k] -= sky_off[j]
-            stack[k][~covs[j][r0:r1]] = np.nan
-        out[r0:r1] = sigma_clip_combine(stack, sigma=sigma, max_iters=iters,
-                                        weights=np.asarray(weights, np.float32)[use],
-                                        use_mad=True)
-        count[r0:r1] = np.sum([covs[j][r0:r1] for j in use], axis=0)
-    return out, count
+            if first:
+                meds[j] = _frame_sky_median(rgb, shifts[j], transforms[j], oy, ox)
+            for (wi, r0, r1), slot, stack in zip(jobs, slots, stacks):
+                k = slot.get(j)
+                if k is None:
+                    continue
+                t, _b, lft, rgt = windows[wi]
+                apply_transform(rgb, shift=shifts[j], transform=transforms[j],
+                                crop=(t + r0, t + r1, lft, rgt), out=stack[k])
+                stack[k][~covs[wi][j][r0:r1]] = np.nan
+
+        with ThreadPoolExecutor(max_workers=_READ_WORKERS, thread_name_prefix='full-field') as pool:
+            for k, _ in enumerate(pool.map(one, need)):   # re-raises a frame's exception (a cancel too)
+                ui.progress('Full field', pi * n + k + 1, total)
+        if sky_off is None:
+            sky_off = _sky_offsets_from_medians(meds, weights)
+        for (wi, r0, r1), stack in zip(jobs, stacks):
+            use = uses[wi]
+            stack -= sky_off[use][:, None, None, :]            # NaN (uncovered) stays NaN
+            out, count = outs[wi]
+            out[r0:r1] = sigma_clip_combine(stack, sigma=sigma, max_iters=iters,
+                                            weights=w32[use], use_mad=True)
+            count[r0:r1] = np.sum([covs[wi][j][r0:r1] for j in use], axis=0)
+        del stacks
+    return outs
 
 
 def _fit_gain_offset(src: np.ndarray, ref: np.ndarray, smooth: float = 3.0) -> Tuple[float, float]:
@@ -301,10 +398,10 @@ def extend_full_field(stacked: np.ndarray, mem_rgb, final_indices, shifts, trans
     out = np.zeros((B - T, R - L, C), np.float32)
     have = np.zeros((B - T, R - L), bool)
     coverage = np.full((B - T, R - L), len(final_indices), np.int32)
-    sky_off = frame_sky_offsets(mem_rgb, final_indices, shifts, transforms, core, weights)
-    for win in _windows(rect, core, feather):
-        part, cnt = _combine_window(win, mem_rgb, final_indices, shifts, transforms,
-                                    H, W, C, weights, sigma, iters, sky_off)
+    windows = _windows(rect, core, feather)
+    parts = _combine_windows(windows, mem_rgb, final_indices, shifts, transforms,
+                             H, W, C, weights, sigma, iters, core, args)
+    for win, (part, cnt) in zip(windows, parts):
         sl = (slice(win[0] - T, win[1] - T), slice(win[2] - L, win[3] - L))
         out[sl] = part
         have[sl] = True
