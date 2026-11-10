@@ -1,17 +1,18 @@
 {
- "note": "OriginStack 2.21.0; stacked with -v on the unzipped Zenodo sessions",
+ "note": "OriginStack 2.21.0; stacked with -v on the unzipped Zenodo sessions. Session 01 re-baselined at 2.24.0 (2026-11-09): since 2.23.0 its dark calibration changed (stack FWHM 2.85 -> 2.48, noise 176 -> 90, 43 of 45 frames accepted); sessions 02-12 still hold their 2.21.0 values (11 re-checked at 2.24.0 on a Linux runner: OK)",
  "sessions": {
   "01_face-on_spiral_galaxy_M51_Whirlpool": {
-   "accepted": 45,
-   "frame_fwhm": 2.7,
-   "integration_min": 13.0,
-   "seconds": 61.0,
-   "stack_fwhm": 2.85,
-   "stack_noise": 176.42,
+   "accepted": 43,
+   "frame_fwhm": 3.2,
+   "integration_min": 14.3,
+   "returncode": 0,
+   "seconds": 52.0,
+   "stack_fwhm": 2.48,
+   "stack_noise": 90.38,
    "target": "Whirlpool Galaxy",
    "target_type": "Galaxy",
    "total": 45,
-   "warnings": 0
+   "warnings": 1
   },
   "02_large_galaxy_NGC253_Sculptor": {
    "accepted": 45,
