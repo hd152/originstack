@@ -104,3 +104,6 @@ ext/**/target/
 # Phase 4 harness data/output (tools/bench_phase4.py)
 bench_phase4_data/
 bench_phase4_out/
+
+# Optional Scalene and Nsight Systems profiling artifacts
+profiling/

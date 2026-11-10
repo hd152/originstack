@@ -225,13 +225,35 @@ def fit_psf(img: np.ndarray, stars: np.ndarray, p0=None):
     return p, (S_all - bg[:, None]).sum(1)
 
 
-def render_psf_into(p, plane: np.ndarray) -> None:
-    """The unit-sum PSF written into ``plane``'s four corners, centred on index [0, 0] (the FFT
-    origin); the rest of ``plane`` must stay zero."""
+# Floor under every frame's PSF spectrum (a delta of this weight added at the PSF's centre;
+# the spectrum's value at zero frequency is 1). The PSF plane is transformed in float32, whose
+# rounding leaves |P| ~1e-8 of noise: for a 5.8 px FWHM star the true spectrum is below that
+# from ~0.4 cycles/px on (8.5e-9 at 0.45 against a float32 FFT's 1.0e-8, 7.8e-10 at Nyquist
+# against 6.9e-9), so there the coadd weighted its frames by rounding noise. Pure noise either
+# way (no signal reaches those frequencies), but a different, equally good noise realization
+# for any change in the last digits of the input: 0.2 ADU of added noise moved a 60-frame
+# Whirlpool stack by 28 ADU rms, a fifth of its noise, all of it above 0.35 cycles/px. With the
+# floor, frequencies the PSF does not reach combine as a whitened inverse-variance mean of the
+# frames, and frequencies it does change by at most floor / |P|. research-2026-11.md.
+_PSF_FLOOR = 1e-5
+
+
+def psf_kernel(p) -> np.ndarray:
+    """The (2R+1)^2 PSF kernel the combine uses: the unit-sum Moffat plus ``_PSF_FLOOR`` at
+    its centre (float64)."""
     R = _PSF_R
     yy, xx = np.mgrid[-R:R + 1, -R:R + 1].astype(np.float64)
     k = _moffat_grid(yy, xx, p)
     k /= k.sum()
+    k[R, R] += _PSF_FLOOR
+    return k
+
+
+def render_psf_into(p, plane: np.ndarray) -> None:
+    """``psf_kernel(p)`` written into ``plane``'s four corners, centred on index [0, 0] (the
+    FFT origin); the rest of ``plane`` must stay zero."""
+    R = _PSF_R
+    k = psf_kernel(p)
     plane[:R + 1, :R + 1] = k[R:, R:]
     plane[:R + 1, -R:] = k[R:, :R]
     plane[-R:, :R + 1] = k[:R, R:]
@@ -531,7 +553,6 @@ def _combine_gpu(aligned, ref_sig, use, meas, n_thr: int, tick, verbose: bool, c
         safe_print(f"    --gpu-coadd: {why}; using the CPU")
         return None
     R = _PSF_R
-    yy, xx = np.mgrid[-R:R + 1, -R:R + 1].astype(np.float64)
     wsum, w2f, sky_acc = np.zeros(C), np.zeros(C), np.zeros(C)
     used = 0
     add_log = []                        # (frames, seconds) of each add call
@@ -556,8 +577,7 @@ def _combine_gpu(aligned, ref_sig, use, meas, n_thr: int, tick, verbose: bool, c
                 tm['noise'] += time.time() - t_n
         if not (np.all(np.isfinite(sig)) and np.all(sig > 0)):
             return None
-        k = _moffat_grid(yy, xx, p)
-        k /= k.sum()
+        k = psf_kernel(p)
         return j, F, sky, sig, k, fr
 
     def flush(batch):
@@ -699,7 +719,9 @@ def proper_coadd(aligned, reference: np.ndarray, fwhm: float = 5.0,
     # --- per-frame measurements ------------------------------------------------
     def measure(j):
         tick_measure()
-        return FrameMeasurer(stars, p_ref).measure(aligned[j])   # stamps and samples only
+        # stamps and samples only (a float16 stack decodes just those: lazy_frame)
+        lazy = getattr(aligned, 'lazy_frame', None)
+        return FrameMeasurer(stars, p_ref).measure(lazy(j) if lazy is not None else aligned[j])
 
     # 2 threads: the fit is ~6 ms of small-array numpy/scipy calls per frame and holds
     # the GIL most of the time -- 8 threads took 9.8 ms per frame, 2 take 5.4 (532-frame
@@ -777,7 +799,8 @@ def proper_coadd(aligned, reference: np.ndarray, fwhm: float = 5.0,
             # one sequential read into RAM: the strided sky/noise samples below touched
             # nearly every page of a disk-backed aligned frame once per channel (34 s of
             # a 531-frame session's 37 s proper coadd)
-            fr = np.array(aligned[j])
+            # (a float16 stack's read is already a private decoded copy)
+            fr = aligned[j] if getattr(aligned, 'decodes', False) else np.array(aligned[j])
             sky, sig = _sky_noise(fr)
             if not (np.all(np.isfinite(sig)) and np.all(sig > 0)):
                 nbad += 1

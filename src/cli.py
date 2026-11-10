@@ -2418,6 +2418,15 @@ def build_parser() -> argparse.ArgumentParser:
                                       Config.DRIZZLE_PSF_KERNEL_SIZE))
     g_core.add_argument('--use-gpu', action='store_true',
                    help='Use CuPy for available operations (experimental)')
+    g_stack.add_argument('--aligned-stack', choices=['half', 'full'], default='half',
+                   help='How the aligned frames are held between alignment and the combine. '
+                        'half (default): 16-bit floats relative to each frame\'s sky level -- '
+                        'half the memory, and half the disk traffic on a session that does not '
+                        'fit in RAM; each sample is rounded by at most 1/4096 of its distance '
+                        'from the sky level, thousands of times below the noise. Used with the '
+                        'default combine (sigma-clip with patch weighting, proper coadd); other '
+                        'stack methods, --local-normalize, --moving-objects and --gpu-coadd '
+                        'keep 32-bit floats. full: 32-bit floats always, as in earlier releases.')
     g_core.add_argument('--frame-store', choices=['auto', 'ram', 'disk'], default='auto',
                    help='Where the per-session frame arrays live (tens of GB on long '
                         'sessions). auto (default): the aligned stack in RAM when it fits '
@@ -3010,6 +3019,11 @@ def build_parser() -> argparse.ArgumentParser:
         # DBE's colour (H-alpha excess) emission mask; --auto turns it on for
         # emission nebulae (background._halpha_excess_mask).
         dbe_halpha_mask=False,
+        # DBE with the survey H-alpha map (Finkbeiner 2003) taken out first and put back after,
+        # so a nebula that fills the frame is not fitted away as gradient (halpha_reference.py).
+        # Off: measured on one two-night target only (NGC 2244: mismatch 0.35 -> 0.21, light
+        # kept 0.21 -> 0.42). Downloads a 12.6 MB map once. `--config dbe_halpha_reference=true`.
+        dbe_halpha_reference=False,
         # Background sampling masks bright stars out to where their wing sinks below
         # Config.WING_MASK_K pixel sigmas (background.wing_aware_star_mask), not just the
         # 4 px core. Off: on Pleiades, Orion and Omega it changed the preview by ~0.1/255

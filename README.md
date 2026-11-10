@@ -32,6 +32,24 @@ From a night of raw frames to a finished image on your own computer: no account,
 
 No Origin session to hand? [Try the free sample](https://originstack.site/try-sample-data.html): 41 frames of the Whirlpool Galaxy, with the steps and the result to expect. Want more to practise on or test with? [Twelve free raw sample sessions](https://originstack.site/sample-sessions.html), one of each kind of target (galaxies, nebulae, a comet, clusters, a narrowband OIII session), 42 to 45 frames each, on Zenodo under CC BY 4.0.
 
+## Profiling
+
+For development builds, `tools/profile_stack.py` runs the same stack command under an
+optional profiler and saves the exact command and environment metadata beside the
+profile. Install Scalene with `pip install -r requirements-dev.txt`. NVIDIA Nsight
+Systems is installed separately from NVIDIA and is useful for CUDA runs:
+
+```powershell
+python tools\profile_stack.py --profiler scalene -- -d lights -o profiled.fits -j 4
+python tools\profile_stack.py --profiler nsight -- -d lights -o profiled.fits --gpu-coadd
+python tools\profile_stack.py --profiler both --output-dir profiling -- -d lights -o profiled.fits
+```
+
+Scalene reports Python CPU time and allocations in `profiling\scalene.html`.
+Nsight Systems writes a `.nsys-rep` capture with the `cuda` and `osrt` traces and
+includes child worker processes. These tools are optional and are not used by normal
+runs or CI.
+
 ![The OriginStack window during a run: session folder and settings on the left, the live preview and recent frames on the right](docs/img/app-running-1200.webp)
 
 *The desktop app mid-run: the live log and phase bar on the left, the stack as it builds on the right. [More about the app](#desktop-app)*
@@ -756,6 +774,7 @@ python originstack.py -d <dir> -o <output.fits> [options]
 | `--from-stack STACK.fits` | Re-run post-processing only, on an earlier run's linear stack |
 | `--spike-reject` | Remove cosmic-ray / hot-pixel spikes on the raw mosaic before debayering (cheap; `--auto` turns it on for < 20 frames, mean stacking or drizzle) |
 | `--frame-store {auto,ram,disk}` | Keep per-session frame arrays in RAM when there is room (auto), always (ram), or in temp files (disk) |
+| `--aligned-stack {half,full}` | How the aligned frames are held before the combine: `half` (default) as 16-bit floats relative to each frame's sky level -- half the memory and half the disk traffic, rounding thousands of times below the noise; `full` as 32-bit floats, as in earlier releases. Other stack methods, `--local-normalize`, `--moving-objects` and `--gpu-coadd` always use 32-bit |
 | `--compress-phase1` / `--no-compress-phase1` | Phase 1 frames that do not fit the safe RAM budget go to temp files; they are compressed automatically only when they exceed 1.5x the available RAM (uncompressed temp files would thrash the page cache) or the temp disk cannot hold them uncompressed. Either flag forces compression on or off |
 | `--no-wcs-refine` | Keep the session `info.json` WCS as mapped onto the stack, without the Gaia refinement |
 | `--gpu-phase1 {auto,on,off}` | With `--use-gpu`: run Phase 1 on the GPU or the CPU pool (auto picks) |
@@ -788,6 +807,7 @@ desktop app's saved `<stem>_config.toml` carry them too.
 | Key | Default | Effect |
 |-----|---------|--------|
 | `halo_removal_method` | `gaussian` | With `--halo-removal`: `psf` = Gaia-anchored extended-PSF subtraction |
+| `dbe_halpha_reference` | `false` | Background extraction keeps the nebula's large-scale light as the all-sky H-alpha survey map (Finkbeiner 2003) shows it: the map, scaled to the image, is taken out before DBE and put back after. Used only on fields with H-alpha structure the image follows; needs a stack position. Downloads the 12.6 MB map once |
 | `nn_tilt_equalise` | `false` | With `--deconvolve nn`: second network pass per strip along a star-width gradient |
 | `deconvolve_target_ratio` | unset | With `--deconvolve rl`: deconvolve to this fraction of the measured PSF width (e.g. `0.8`) instead of to a point |
 | `session_dark_scale` | `true` | Fit the dark's glow scale per session (Phase 1) |
@@ -1014,6 +1034,7 @@ OriginStack works entirely on your machine. It goes online in these cases only, 
 | Gaia star index tiles | `--plate-solve` (built-in solver), and on a normal run with a session `info.json` solve (to correct that WCS on the stack; `--no-wcs-refine` turns it off), for sky areas not yet in the local index | Sky coordinates of a 5°×5° tile; tiles are cached, so each area is fetched once |
 | astrometry.net | `--plate-solve --plate-solver astrometry` (or `auto` when the built-in solver fails) | The image, to solve its position (needs your API key) |
 | Gaia / VizieR / SIMBAD catalogues | Colour calibration on a normal run with a sky position (`--no-color-calibrate` turns it off); `--photometry`, `--photometry-timeseries`, `--annotate`; `--halo-removal` with `halo_removal_method=psf` | Sky coordinates of the field. Gaia results are cached next to the star index (`gaia_cones/`), so the same field on another night or a `--from-stack` rerun is answered locally, also under `--offline`; `ORIGINSTACK_NO_GAIA_CACHE=1` turns that off |
+| H-alpha survey map (NASA LAMBDA) | `--config dbe_halpha_reference=true`, the first time only | Nothing — a plain download of one 12.6 MB all-sky file, kept next to the star index (`halpha/`); `ORIGINSTACK_HALPHA_MAP` points at a copy instead |
 | AAVSO VSP | `--aavso-report` | The variable star's name or the target's sky coordinates, to fetch the comparison-star chart |
 | JPL Horizons | Comet mode with a designation: on a normal run when the target is a comet (`C/2025 R2`, `3I/ATLAS`, ... from the `OBJECT` header, session or folder name), or `--comet-designation` | The comet designation, three observation times and the session's GPS position rounded to 0.1° (about 10 km); three requests per run |
 | Self-update check | Once per CLI run or desktop-app launch | Nothing — an anonymous GET of GitHub's public releases API, no request parameters, no identifying data |

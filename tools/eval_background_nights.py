@@ -13,6 +13,7 @@ catches it).
 
 Usage:
     python tools/eval_background_nights.py --bank C:/nn_work/nnbg/bank --method dbe wavelet
+    python tools/eval_background_nights.py --bank BANK --stacks STACKS --method dbe dbe_ref
 """
 from __future__ import annotations
 
@@ -70,6 +71,15 @@ def extract(cap, method):
     with contextlib.redirect_stdout(io.StringIO()):
         if method == "dbe":
             return bg.dynamic_background_extraction(cap["rgb"].copy(), verbose=False, **kw)
+        if method == "dbe_ref":
+            # DBE with the survey H-alpha reference taken out first (src/halpha_reference.py);
+            # needs the stack's WCS: ``cap["header"]`` (main() fills it from --stacks)
+            from src.halpha_reference import reference_model
+            model, note = reference_model(cap["rgb"], cap.get("header"))
+            cap["ref_note"] = note
+            rgb = cap["rgb"].copy() if model is None else cap["rgb"] - model
+            out = bg.dynamic_background_extraction(rgb, verbose=False, **kw)
+            return out if model is None else out + model
         if method == "wavelet":
             for k in ("masked_frac_thresh", "outlier_sigma", "outlier_iters"):
                 kw.pop(k, None)
@@ -80,7 +90,9 @@ def extract(cap, method):
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--bank", required=True)
-    ap.add_argument("--method", nargs="+", default=["dbe"], choices=["dbe", "wavelet"])
+    ap.add_argument("--method", nargs="+", default=["dbe"], choices=["dbe", "wavelet", "dbe_ref"])
+    ap.add_argument("--stacks", help="folder of the linear stacks the bank was captured from "
+                                     "(their headers give dbe_ref the WCS)")
     ap.add_argument("--json")
     args = ap.parse_args()
     from src.merge import _detect_stars, _lum, _match_flux_scale, _pixel_noise, _register_stack
@@ -95,6 +107,11 @@ def main() -> None:
         if len(ps) < 2:
             continue
         ca, cb = (pickle.load(open(p, "rb")) for p in ps[:2])
+        if args.stacks:
+            from astropy.io import fits
+            for cap, p in zip((ca, cb), ps[:2]):
+                sp = os.path.join(args.stacks, os.path.basename(p)[:-len("_full.pkl")] + ".fits")
+                cap["header"] = fits.getheader(sp) if os.path.exists(sp) else None
         A, B = ca["rgb"], cb["rgb"]
         H, W = A.shape[:2]
         bh, bw = B.shape[:2]
@@ -129,6 +146,8 @@ def main() -> None:
             _, res = robust_line(T[k], Db[k])
             kc, _ = robust_line(T[k], Ab_b[k])
             results[t][name] = {"mismatch": float(np.sqrt(np.mean(res ** 2)) / sig), "kept": float(kc[0])}
+            if name == "dbe_ref":
+                results[t][name]["reference"] = [ca.get("ref_note"), cb.get("ref_note")]
         print(f"{t:22s} " + "  ".join(f"{n}: mismatch {r['mismatch']:6.3f} kept {r['kept']:6.3f}"
                                      for n, r in results[t].items()), flush=True)
     if args.json:

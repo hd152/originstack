@@ -236,6 +236,13 @@ def test_decompress_frame_into_rejects_bad_input():
         native.decompress_frame_into(encoded[:-3], np.empty(64, np.uint8), 4)
 
 
+def test_decompress_frame_into_rejects_oversized_chunk_payload():
+    encoded = bytearray(native.compress_frame_chunked(np.arange(64, dtype=np.uint8), 4))
+    encoded[24:28] = (len(encoded) + 1).to_bytes(4, 'little')
+    with pytest.raises(ValueError, match='truncated|too large'):
+        native.decompress_frame_into(bytes(encoded), np.empty(64, np.uint8), 4)
+
+
 @pytest.mark.parametrize("use_mad", [True, False])
 @pytest.mark.parametrize("winsorize", [False, True])
 @pytest.mark.parametrize("weighted", [False, True])
@@ -635,6 +642,18 @@ def test_fused_patch_combine_matches_numpy(use_mad):
     got = native.patch_weighted_sigma_combine_fast(d, qm, gw, 3.0, 3, use_mad)
     assert got.shape == ref.shape and got.dtype == np.float32
     assert float(np.max(np.abs(ref.astype(np.float64) - got))) < 1.0
+
+
+def test_bilateral_filter_rejects_more_than_eight_channels():
+    with pytest.raises(ValueError, match='at most 8 channels'):
+        native.bilateral_filter(np.zeros((2, 2, 9), dtype=np.float32), 1.0, 1.0, 1)
+
+
+def test_fused_patch_combine_rejects_more_than_eight_channels():
+    data = np.zeros((2, 2, 2, 9), dtype=np.float32)
+    qmaps = np.ones((2, 2, 2), dtype=np.float32)
+    with pytest.raises(ValueError, match='at most 8 channels'):
+        native.patch_weighted_sigma_combine_fast(data, qmaps)
 
 
 def test_warp_shift_fast_path():

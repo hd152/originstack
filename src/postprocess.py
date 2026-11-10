@@ -71,6 +71,23 @@ except Exception:
     _HAS_NATIVE_MEDIAN = False
 
 
+def _halpha_reference_model(stacked: np.ndarray, args):
+    """The survey H-alpha model DBE must not remove (``dbe_halpha_reference``), or None with a
+    note in the log; never fails the run (``halpha_reference.reference_model``)."""
+    try:
+        from src.halpha_reference import reference_model
+        from src.pipeline import stack_header_for_phase4
+        model, note = reference_model(stacked, stack_header_for_phase4(args))
+    except Exception as e:
+        _log.debug("H-alpha reference failed", exc_info=True)
+        model, note = None, f"failed ({e})"
+    if model is None:
+        safe_print(f"    H-alpha reference not used: {note}")
+    else:
+        safe_print(f"    H-alpha reference kept out of the background fit: {note}")
+    return model
+
+
 def _median_filter_per_channel(stacked: np.ndarray, size: int) -> np.ndarray:
     """``scipy.ndimage.median_filter(stacked, size=(size, size, 1))`` --
     independent per-channel 2D median, not a 3D one -- routed through the
@@ -563,6 +580,10 @@ def _postprocess_early(stacked: np.ndarray, args: argparse.Namespace,
                        f"(patch={dbe_patch}px, robust local regression, sigma={args.bg_clip_sigma})...")
             _entropy_bg = getattr(args, 'entropy_bg', False)
             _diffuse_threshold = getattr(args, 'dbe_diffuse_threshold_sigma', 1.0)
+            _ha_model = (_halpha_reference_model(stacked, args)
+                         if getattr(args, 'dbe_halpha_reference', False) else None)
+            if _ha_model is not None:
+                stacked = stacked - _ha_model
             stacked = dynamic_background_extraction(
                 stacked, patch_size=dbe_patch, clip_sigma=args.bg_clip_sigma,
                 verbose=args.verbose, star_mask=_bg_star_mask,
@@ -571,6 +592,9 @@ def _postprocess_early(stacked: np.ndarray, args: argparse.Namespace,
                 diffuse_threshold_sigma=_diffuse_threshold,
                 halpha_sigma=(Config.DBE_HALPHA_SIGMA
                               if getattr(args, 'dbe_halpha_mask', False) else 0.0))
+            if _ha_model is not None:
+                stacked += _ha_model
+                del _ha_model
             safe_print(f"  ✓ Dynamic Background Extraction ({format_time(time.time() - bg_start)})")
         elif bg_method == 'wavelet':
             dbe_patch = getattr(args, 'dbe_patch_size', Config.DBE_PATCH_SIZE)

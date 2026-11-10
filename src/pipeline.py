@@ -43,7 +43,7 @@ from src.io_fits import (
     preview_stretch_kw,
     save_preview_rgb,
 )
-from src.models import FrameInfo, ProcessingStats
+from src.models import FrameInfo, ProcessingStats, RunCancelled
 from src.plate_solve import solve_plate
 from src.postprocess import postprocess_stack
 from src.quality import complete_quality_metrics
@@ -677,6 +677,8 @@ def _apply_full_field(args, stacked, final, final_indices, mem_rgb, shifts, tran
     try:
         res = extend_full_field(stacked, mem_rgb, final_indices, shifts, transforms,
                                 H, W, C, crop, weights, args, frac=float(args.full_field))
+    except RunCancelled:
+        raise
     except Exception as exc:
         safe_print(f"  WARNING: full field failed ({exc}); keeping the common crop")
         _log.debug("full field failed", exc_info=True)

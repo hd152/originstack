@@ -6,22 +6,55 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+### Changed
+- **The aligned stack is held as 16-bit floats** (`--aligned-stack half`, the default with the
+  default combine): each frame relative to its own sky level, with a per-frame scale, so a sample
+  is rounded by at most 1/4096 of its distance from the sky -- 0.1 ADU rms on 500 ADU of sky
+  noise. Half the memory, so more sessions keep it in RAM, and half the disk traffic when it does
+  not fit: on a 300-frame session on a 16 GB laptop (aligned stack on disk, 21 -> 10.5 GB) the stacking phase went from 3 min 49 s to 2 min 46 s and the whole run from 5 min 48 s to 5 min 0 s. The stack is not bit-identical to earlier releases, at equal quality
+  (same noise, star fluxes within 0.002% median): the pixels move by 0.1-0.7% of the noise (rms;
+  56-frame Rosette, 60-frame Whirlpool). `--aligned-stack full` keeps 32-bit floats. Other stack methods, `--local-normalize`,
+  `--moving-objects` and `--gpu-coadd` always use 32-bit.
+- **The full-field extension reads each frame once** instead of six to eight times: on a 300-frame
+  session on a 16 GB laptop (frames compressed in Phase 1) it took 2 min 4 s, now 24 s. Output
+  unchanged, bit for bit; it now shows progress and stops on Cancel.
+
+- **Proper coadd is reproducible on sessions with wide stars.** Above ~0.4 cycles/px a 5-6 px star's
+  PSF spectrum is below float32 rounding, and the coadd weighted its frames there by that rounding:
+  any sub-noise change in the input (0.2 ADU) moved a Whirlpool stack by a fifth of its noise. Each
+  frame's PSF spectrum now has a floor of 1e-5, so those frequencies -- which carry no signal --
+  combine as an inverse-variance mean. Stacks with stars wider than ~4 px change at pixel scale
+  (a different noise realization, 0.4-0.8% lower pixel noise; star widths and fluxes unchanged).
+
+### Fixed
+- On Windows, the catalogue prefetch thread and the main thread fetching the same Gaia index tile
+  at once could fail one of them with "Access is denied" (two renames onto one file); the second
+  writer now retries and keeps the first one's identical tile.
+
+### Added
+- `--config dbe_halpha_reference=true` (opt-in): background extraction keeps a nebula's large-scale
+  light as the all-sky H-alpha survey map (Finkbeiner 2003) shows it, so a nebula that fills the
+  frame is not fitted away as gradient. Downloads a 12.6 MB map once (see "Network use").
+
+## [2.24.0] - 2026-11-09
+
 ### Added
 - **`--gpu-coadd`: the proper coadd's combine pass on the GPU** (opt-in; Vulkan, DX12 or Metal through wgpu, any vendor). On a real 206-frame session on a GTX 1650 Ti (stack in RAM) the pass took 9 s instead of 17 s (on a laptop with an RTX 3050 the combine was 2.5x *slower* than the CPU while Windows ran the "Balanced" power plan, because the GPU idled at a 210 MHz compute clock; on the Ultimate Performance plan it took 28.6 s against about 32 s on the CPU, and 4.7 s against 8.3 s on 48 RAM-backed frames; a Radeon iGPU was 3x slower and is declined) and the stack differed from the CPU stack by about 1e-5 of its noise (float32 on the GPU: close, not bit-identical). The GPU code is in every `astro_native` build (the `gpu` Cargo feature is on by default, crate 0.66.0: wheel 1.0 -> 3.2 MB, import +3-4 ms); the run falls back to the CPU pass, with a note, when the GPU is missing, too small or fails. Details, numbers and limits: [dev-notes/gpu-coadd.md](dev-notes/gpu-coadd.md); `tools/ab_gpu_coadd.py` compares the two paths.
+- **One-click "add earlier stacks"** (desktop app): after choosing a folder, a checkbox under it offers the earlier stacks of the same target found next to the folder, in the output folder or in the last output folder (`previous_stacks.py`: a `RAWSTACK` stack whose `OBJECT` matches) and fills `--merge` with them.
 
 ### Changed
 - **`--gpu-coadd` checks itself**: when the device takes over 100 ms per frame it times the CPU and falls back to it (with a note naming the power plan) if the GPU is slower; a healthy GPU is not delayed.
-- **Catalogue prefetch**: the Gaia index tiles under the field and the colour-calibration Gaia cone are fetched in a background thread from the start of Phase 1 (the field is known from `info.json` or the pointing keywords), instead of after stacking. A cold run saved the ~7 s of network wait (3.7 s per tile, 3.1 s for the cone); a warm cache saves nothing and nothing changes in the result. `src/prefetch.py`.
+- **Catalogue prefetch**: the Gaia index tiles under the field and the first Gaia cone query of the colour calibration are fetched in a background thread from the start of Phase 1 (the field is known from `info.json` or the pointing keywords), instead of after stacking. The run waits at most 10 s, and only for the tiles; the deeper colour-calibration queries (their magnitude cut comes from the stack) are not prefetched. A cold index tile took 2-14 s (64 s once) on the archive, so this hides a few seconds to tens of seconds of network wait, bounded by the stacking time; a warm cache saves nothing and the result does not change. `src/prefetch.py`.
 - **`--gpu-coadd` declines an integrated GPU**: on an AMD Radeon iGPU the combine pass took 92.6 s against 30.8 s on the CPU (output identical to 1.3e-5 of the noise), so the run uses the CPU, with a note. Name the adapter (`ORIGINSTACK_GPU_ADAPTER`) or set `ORIGINSTACK_GPU_ALLOW_INTEGRATED=1` to use it anyway.
-
-### Fixed
-- A red (and green) strip along the bottom edge of a Whirlpool stack: the Phase 4 edge-band step smoothed its depth profile with a kernel as wide as a tenth of the 400-row band, which smeared the ~35 row strip (R +390, G +120 ADU) into its surroundings. At the edge it removed only 60% (R +95 left), and 40-100 rows deep it over-subtracted (R -60). The smoothing is now 2-3 rows; the edge medians match the interior (R 164 / G 326 / B 162 against 160 / 324 / 164) on that stack, and the Black Eye and Sagittarius stacks are unchanged to a few ADU.
-
-### Changed
 - `--merge` and the hierarchical combine now warn when a stack's sky, after its flux scale, is more than 4x and 5,000 ADU away from the current stack's in any channel (`merge.sky_level_mismatch`; the stack is listed in `merge_info['sky_mismatch']`). The sky offset used to absorb it silently: a Whirlpool combine whose reference session had been calibrated with a mixed-exposure dark library (the pre-2.23 dark-temperature-model bug, +~100,000 ADU) came out at sky 200k / 121k / 167k ADU against 4-5k for healthy stacks, the other sessions rescaled onto it. Re-running that session with 2.23 or later gives a normal stack (sky 3.9k / 5.2k / 4.7k on the same lights).
 - Colour calibration no longer hides a clamp: when a fit wants a channel scale outside 0.5-2 (colour-index/SPCC fits, the Phase 4 gray-locus step) the log now says which channels and what the fit wanted (a Whirlpool combine reported "R x0.500 B x0.500" as a plain success while the fit wanted R x0.33, B x0.34 -- the stack's channels were on different scales), and the solar fit's "implausible scales" message gives the star count and scatter and says the fit is not noisy. Values applied are unchanged.
 - The NN deconvolution step measures the stars' FWHM several times faster (about 1.7 s -> 0.2-0.3 s for its two measurements on a 2000 x 3000 stack): the ~60 star fits run as one batched Levenberg-Marquardt solve instead of one scipy fit each, and the second measurement of the same image is no longer repeated. Same stars, same accept/reject decisions, FWHM identical to ~1e-6 on five real stacks.
 - Linux and macOS bundles drop the same unused Qt payload as the Windows one (QML, Quick, PDF, Network, Qt translations, unused image plugins); the path tokens now match the Linux/macOS wheel layout.
+- The `--nn-deconv-blend` field in the desktop app is labelled "Learned sharpening strength" (it was "Nn deconv blend"), with translations.
+- Project: 125 silent `except Exception: pass` handlers in `src/` now log at debug level on the `originstack` logger and the convention linter (OS006) rejects new ones; `tests/test_fingerprint_coverage.py` fails when a Phase 1-3 setting is missing from the checkpoint fingerprint; `tools/perf_budget.py` and a CI step check time and peak memory of a synthetic stack; `.github/workflows/samples.yml` stacks two public sample sessions weekly; `astro_native` 0.67.0 (the GPU coadd is built in by default; `ORIGINSTACK_GPU_PROFILE=1` prints a per-stage GPU timing).
+
+### Fixed
+- A red (and green) strip along the bottom edge of a Whirlpool stack: the Phase 4 edge-band step smoothed its depth profile with a kernel as wide as a tenth of the 400-row band, which smeared the ~35 row strip (R +390, G +120 ADU) into its surroundings. At the edge it removed only 60% (R +95 left), and 40-100 rows deep it over-subtracted (R -60). The smoothing is now 2-3 rows; the edge medians match the interior (R 164 / G 326 / B 162 against 160 / 324 / 164) on that stack, and the Black Eye and Sagittarius stacks are unchanged to a few ADU.
 
 ## [2.23.0] - 2026-11-06
 
