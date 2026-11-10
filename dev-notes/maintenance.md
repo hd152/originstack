@@ -29,8 +29,9 @@ The 2.21.0 release followed these steps; `6395855` (2.20.0) has the same shape.
    Creating the release pushes the tag, which starts `.github/workflows/release.yml`: it checks
    `VERSION` equals the tag, builds Windows (installer, portable exe, zip), macOS arm64 and x86_64
    and Linux, and uploads nine files to the release. Check that all nine arrive.
-4. A native-kernel change also needs `ext/astro_native/Cargo.toml` bumped and a `native-v<version>` tag
-   (see `.github/workflows/native-wheels.yml`). Releases that change no Rust need neither.
+4. A native-kernel change also needs `ext/astro_native/Cargo.toml` bumped (lint rule OS005). There is no
+   native-wheel tag and no PyPI upload: the crate is not published (decided 2026-11-09), the downloads bundle
+   their own build, and `.github/workflows/native-wheels.yml` only builds and smoke-tests the wheels on PRs.
 
 Do not tag a release without deciding to: the tag triggers builds and public downloads.
 

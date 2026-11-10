@@ -321,7 +321,7 @@ python -m maturin build --release --features triage
 # the GPU proper coadd (wgpu; --gpu-coadd) is built in by default; leave it out with
 python -m maturin build --release --no-default-features
 ```
-PyPI wheels (Windows x64, Linux x86_64 manylinux, macOS arm64 and x86_64, plus an sdist) come from `.github/workflows/native-wheels.yml`: it builds and smoke-tests on every PR that touches `ext/astro_native/`, and publishes only on a `native-v<Cargo version>` tag (or a manual run with `publish`), through the `pypi` environment with trusted publishing. The crate version lives in `Cargo.toml` only (`pyproject.toml` reads it).
+`.github/workflows/native-wheels.yml` builds the wheels (Windows x64, Linux x86_64 manylinux, macOS arm64 and x86_64) and an sdist and smoke-tests each wheel on every PR that touches `ext/astro_native/` (and on a manual run); they are kept as workflow artifacts and **not published**: the crate is not on PyPI (decided 2026-11-09; the app downloads bundle their own native module), so there are no `native-v*` tags. The crate version lives in `Cargo.toml` only (`pyproject.toml` reads it).
 The startup banner reports native status (`native_status()`); accelerated steps log `[rust] ...`. Benchmark kernel changes with [tools/bench_native.py](tools/bench_native.py).
 
 ### Optional dependencies

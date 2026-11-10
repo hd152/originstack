@@ -1,25 +1,16 @@
 name: astro_native wheels
 
-# Builds the astro_native wheels and sdist for PyPI. Nothing is published unless the run is a
-# `native-v<version>` tag push (or a manual run with `publish` ticked), and then only through the
-# `pypi` environment with trusted publishing (no token stored here). A plain manual run builds,
-# smoke-tests and keeps the wheels as workflow artifacts.
+# Builds the astro_native wheels and sdist and smoke-tests each wheel in a clean environment, on
+# every PR that touches the crate (so a broken Linux or macOS build shows up in the PR) and on a
+# manual run. Nothing is published: the crate is not on PyPI (decided 2026-11-09; the app downloads
+# bundle their own native module). The wheels are kept as workflow artifacts.
 
 on:
-  push:
-    tags: ['native-v*']
-  # Crate or workflow changes build and smoke-test every wheel (never publishes), so a broken
-  # Linux or macOS build shows up in the PR rather than at release time.
   pull_request:
     paths:
       - 'ext/astro_native/**'
       - '.github/workflows/native-wheels.yml'
   workflow_dispatch:
-    inputs:
-      publish:
-        description: Publish to PyPI (needs the `pypi` environment and a trusted publisher)
-        type: boolean
-        default: false
 
 permissions:
   contents: read
@@ -79,34 +70,7 @@ jobs:
           command: sdist
           args: --out dist --manifest-path ext/astro_native/Cargo.toml
 
-      # A release tag must name the crate version it publishes (native-v0.63.1 <-> Cargo.toml).
-      - name: Check tag matches Cargo.toml
-        if: startsWith(github.ref, 'refs/tags/native-v')
-        shell: bash
-        run: |
-          crate=$(sed -n 's/^version *= *"\(.*\)"/\1/p' ext/astro_native/Cargo.toml | head -n1)
-          tag="${GITHUB_REF_NAME#native-v}"
-          echo "crate $crate, tag $tag"
-          test "$crate" = "$tag"
-
       - uses: actions/upload-artifact@v7
         with:
           name: wheels-sdist
           path: dist
-
-  publish:
-    needs: [wheels, sdist]
-    if: startsWith(github.ref, 'refs/tags/native-v') || (github.event_name == 'workflow_dispatch' && inputs.publish)
-    runs-on: ubuntu-latest
-    environment: pypi
-    permissions:
-      id-token: write
-    steps:
-      - uses: actions/download-artifact@v8
-        with:
-          pattern: wheels-*
-          merge-multiple: true
-          path: dist
-
-      - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
