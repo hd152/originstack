@@ -176,7 +176,16 @@ class GaiaMatch:
     plate_scale: float
 
 
-def match_gaia_field(img_rgb, header, *, max_rows: int = 1200,
+# The cone query ``match_gaia_field`` sends (the default colour calibration, ``solar``, and
+# photometry go through it); ``src/prefetch.py`` issues the same one ahead of time, so the
+# Gaia cache can answer it.
+GAIA_FIELD_COLUMNS = ("source_id", "ra", "dec", "phot_g_mean_mag",
+                      "phot_bp_mean_mag", "phot_rp_mean_mag")
+GAIA_FIELD_NOT_NULL = ("phot_g_mean_mag", "phot_bp_mean_mag", "phot_rp_mean_mag")
+GAIA_FIELD_ROWS = 1200
+
+
+def match_gaia_field(img_rgb, header, *, max_rows: int = GAIA_FIELD_ROWS,
                      verbose: bool = False, min_g: Optional[float] = None) -> Optional[GaiaMatch]:
     """Detect stars, cone-search Gaia DR3, project it via the header WCS,
     and cross-match by pixel position. Returns a :class:`GaiaMatch` or
@@ -221,11 +230,9 @@ def match_gaia_field(img_rgb, header, *, max_rows: int = 1200,
     from src.net_query import gaia_cone_search
     catalog = gaia_cone_search(
         ra0, dec0, min(search_radius_deg, 2.0),
-        ["source_id", "ra", "dec", "phot_g_mean_mag",
-         "phot_bp_mean_mag", "phot_rp_mean_mag"],
+        list(GAIA_FIELD_COLUMNS),
         max_rows=max_rows,
-        require_not_null=["phot_g_mean_mag", "phot_bp_mean_mag",
-                          "phot_rp_mean_mag"],
+        require_not_null=list(GAIA_FIELD_NOT_NULL),
         min_mag=min_g)
     if catalog is None or len(catalog) < 8:
         _log.warning("Photometry: Gaia query returned %s stars -- skipping",

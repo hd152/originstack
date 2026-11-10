@@ -31,6 +31,7 @@ from __future__ import annotations
 import logging
 import math
 import os
+import threading
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Sequence, Tuple
 
@@ -136,7 +137,8 @@ def fetch_tile(band: int, r: int, root: Optional[str] = None,
     arr = arr[np.all(np.isfinite(arr), axis=1)]
     path = _tile_path(band, r, root)
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = path + '.tmp.npy'
+    # a name of its own: the prefetch thread and the main thread can fetch the same tile at once
+    tmp = f'{path}.{os.getpid()}.{threading.get_ident()}.tmp.npy'
     np.save(tmp, arr.astype(np.float64))
     os.replace(tmp, path)
     return arr
