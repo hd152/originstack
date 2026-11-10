@@ -48,7 +48,7 @@
         <ul>
           <li><strong>Add your earlier stacks in one click.</strong> Choose a folder and, if you have already stacked the same target, a checkbox offers to add those earlier stacks to this one.</li>
           <li><strong>An optional GPU for the final combine.</strong> <code>--gpu-coadd</code> runs the last combining step on the graphics card (any maker). On the card it was built on it is nearly twice as fast; on a laptop it is about as fast as the processor, and it needs the laptop&rsquo;s high-performance power plan. It checks itself and goes back to the processor when the card is slower, and it is off unless you ask for it.</li>
-          <li><strong>Star catalogues load while you wait for the stack.</strong> The lookups the colour and position steps need now happen in the background during stacking, so the first run on a new field no longer pauses for them afterwards.</li>
+          <li><strong>Star catalogues load while you wait for the stack.</strong> The star lookups the position step needs, and the first one the colour step needs, now happen in the background while the frames are processed, so the first run on a new field pauses less afterwards. A slow catalogue server can never hold a run up for more than a few seconds.</li>
           <li><strong>A clearer name for the sharpening strength.</strong> The setting is now called &ldquo;Learned sharpening strength&rdquo;.</li>
           <li><strong>Fixes and clearer warnings.</strong> A red and green strip along the bottom edge of some stacks is gone, and merging stacks with very different sky brightness, or a colour fit that hits its limit, now says so in the log.</li>
         </ul>
