@@ -27,6 +27,15 @@ match the `VERSION` file and `v*` git tags.
   (a different noise realization, 0.4-0.8% lower pixel noise; star widths and fluxes unchanged).
 
 ### Fixed
+- **Per-frame star width (FWHM) is measured, not stepped.** Phase 1 counted the pixels above half
+  maximum on the 2x-reduced detection image, so on a full-size frame every value was 2.26, 3.19 or
+  3.91 px (a 2.0-2.2 px star flipped between the first two at random) and read 0.3-0.7 px wide; and
+  finishing an accepted frame's metrics then halved it. Everything after Phase 1 read the halved
+  value: the registration residual gate, the frame report and its effective exposure, the quality
+  weights, `--auto`'s star-width rules. It is now measured from adaptive second moments on the
+  full-resolution frame (true width to 0.05 px on synthetic stars, ~4 ms per frame), and kept
+  through completion. Frame scores, the frame report and `--auto` choices change; the default
+  stack (proper coadd measures its own PSFs) barely does.
 - On Windows, the catalogue prefetch thread and the main thread fetching the same Gaia index tile
   at once could fail one of them with "Access is denied" (two renames onto one file); the second
   writer now retries and keeps the first one's identical tile.

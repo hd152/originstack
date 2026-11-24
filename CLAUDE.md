@@ -288,6 +288,7 @@ Details in the linked notes.
 - Native rustfft `rfft2_batch` for proper coadd; Moffat closed-form spectrum; batched/AVX2 coadd accumulate; `FILE_ATTRIBUTE_TEMPORARY`; Phase 1 arrays in RAM ([native-kernels](dev-notes/native-kernels.md)).
 - Phase 1 write-behind / reused output slots (no gain, CPU/memory bound; more workers than physical cores is slower) ([native-kernels](dev-notes/native-kernels.md)).
 - Pre-touching frame-store pages from a parent thread: workers still fault their own views ([pipeline-notes](dev-notes/pipeline-notes.md)).
+- Faster Phase 1 compressed writes (2026-11-24): `lz4_flex` unsafe encode/decode (no default features) and coding + writing `compress_frame_chunked_to_file` a batch of chunks at a time (same bytes): with 6 single-threaded processes the write went 270-290 -> 345-390 ms per 75 MB frame, reads unchanged. The codec is memory-bandwidth bound under Phase 1's worker count (70 ms alone, ~280 ms six at once); the 810 ms/frame "Memmap write" on a busy laptop was that plus low free RAM, not Defender or the rename (1-18 ms).
 - Measuring proper-coadd PSFs inside the alignment loop (GIL contention).
 - Subsampled sigma-clipped medians for CFA equalisation (period-4 structure biases them).
 - RCD per-Bayer-site stages (stops vectorising); RCD strips without a buffer pool.

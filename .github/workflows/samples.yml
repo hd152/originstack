@@ -15,6 +15,11 @@ on:
         description: "Session name prefixes, comma-separated (e.g. 01,11); empty = the default pair"
         required: false
         default: ""
+      update:
+        description: "Write the run's values as a new baseline (artifact samples-baseline; commit it by hand)"
+        type: boolean
+        required: false
+        default: false
 
 jobs:
   samples:
@@ -74,4 +79,20 @@ jobs:
           PY
 
       - name: Stack and compare with the baseline
+        if: ${{ github.event.inputs.update != 'true' }}
         run: python tools/check_samples.py samples --only "$ONLY"
+
+      # --update merges these sessions' values into the checked-out baseline; the job uploads it
+      # with the logs, and a maintainer reviews and commits it (CI never pushes)
+      - name: Stack and write a new baseline
+        if: ${{ github.event.inputs.update == 'true' }}
+        run: python tools/check_samples.py samples --only "$ONLY" --update
+
+      - name: Upload the baseline and logs
+        if: ${{ always() && github.event.inputs.update == 'true' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: samples-baseline-${{ github.run_id }}
+          path: |
+            tools/data/samples_baseline.json
+            sample_check_out/*.log

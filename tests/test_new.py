@@ -432,6 +432,59 @@ class TestMeasureFwhm(unittest.TestCase):
         self.assertLess(fwhm_small, fwhm_large)
 
 
+class TestPhase1Fwhm(unittest.TestCase):
+    """The Phase 1 FWHM on a full-size frame (star detection on the 2x-reduced grid):
+    the true width, not the half-max pixel count's 2.26/3.19/3.91 steps, and not halved when
+    complete_quality_metrics finishes an accepted frame."""
+
+    @staticmethod
+    def _field(fwhm, shape=(1600, 1600), n=60, seed=3):
+        rng = np.random.default_rng(seed)
+        H, W = shape
+        s = fwhm / 2.3548
+        img = np.full(shape, 1000.0, np.float32)
+        for _ in range(n):
+            y, x = rng.uniform(40, H - 40), rng.uniform(40, W - 40)
+            y0, x0 = int(y), int(x)
+            gy, gx = np.mgrid[y0 - 15:y0 + 16, x0 - 15:x0 + 16]
+            img[y0 - 15:y0 + 16, x0 - 15:x0 + 16] += (
+                rng.uniform(2e4, 1e5) / (2 * np.pi * s * s)
+                * np.exp(-((gy - y) ** 2 + (gx - x) ** 2) / (2 * s * s))).astype(np.float32)
+        img += rng.normal(0, 20, shape).astype(np.float32)
+        return img
+
+    def test_gate_fwhm_is_the_true_width(self):
+        from src.quality import compute_quality_metrics
+        got = {f: compute_quality_metrics(self._field(f), level='gate')['fwhm'] for f in (2.0, 2.6, 3.0)}
+        for true, val in got.items():
+            self.assertAlmostEqual(val, true, delta=0.1, msg=f"{got}")
+
+    def test_completion_keeps_the_gate_fwhm(self):
+        from src.quality import complete_quality_metrics, compute_quality_metrics
+        img = self._field(2.6)
+        m = compute_quality_metrics(img, level='gate')
+        gate_fwhm = m['fwhm']
+        complete_quality_metrics(img, m)
+        self.assertEqual(m['fwhm'], gate_fwhm)
+
+    def test_saturated_cores_are_skipped(self):
+        from src.quality import measure_fwhm_moments
+        img = self._field(2.6, shape=(400, 400), n=0)
+        yy, xx = np.indices(img.shape)
+        s = 2.6 / 2.3548
+        srcs = []
+        for k, (y, x) in enumerate([(100.3, 100.6), (200.5, 300.2), (300.7, 120.4)]):
+            img += (5e4 * np.exp(-((yy - y) ** 2 + (xx - x) ** 2) / (2 * s * s))).astype(np.float32)
+            srcs.append((y, x, 1e4))
+        # the brightest star, wide and clipped flat at 3000 ADU over its core
+        star = 1e6 * np.exp(-((yy - 250.2) ** 2 + (xx - 80.4) ** 2) / (2 * 3.0 ** 2))
+        img = np.maximum(img, np.minimum(1000 + star, 3000).astype(np.float32))
+        srcs.append((250.2, 80.4, 1e7))
+        arr = np.zeros(len(srcs), dtype=[('ycentroid', 'f8'), ('xcentroid', 'f8'), ('flux', 'f8')])
+        arr['ycentroid'], arr['xcentroid'], arr['flux'] = zip(*srcs)
+        self.assertAlmostEqual(measure_fwhm_moments(img, arr), 2.6, delta=0.1)
+
+
 # ===========================================================================
 # Quality metrics — MAD estimator, advanced_metrics flag, SEP fast path,
 # FWHM scaling, and _process_single_frame preloaded_data path
