@@ -4,7 +4,7 @@ from __future__ import annotations
 import functools
 import logging
 from dataclasses import dataclass
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -237,6 +237,45 @@ def measure_fwhm(img: np.ndarray, star_positions: Optional[object], cutout_radiu
         if len(fwhms) >= 20:
             break
 
+    return float(np.median(fwhms)) if fwhms else 0.0
+
+
+def measure_fwhm_moments(img: np.ndarray, star_positions: Optional[object],
+                         coord_scale: float = 1.0, max_stars: int = 20) -> float:
+    """Median FWHM (px of ``img``) of the brightest unsaturated stars, from adaptive
+    Gaussian-weighted second moments (``psf_field.star_fwhm``), or 0.0 without a usable star.
+
+    ``star_positions`` may come from a reduced grid: ``coord_scale`` maps them onto ``img``.
+    The Phase 1 metric used to be ``measure_fwhm`` on the 2x-reduced detection image: a 2 px
+    star covers 1-3 of its pixels, so every frame read 2.26, 3.19 or 3.91 px and a 2.0-2.2 px
+    star flipped between the first two at random (0.3-0.7 px wide, synthetic Gaussians).
+    These read the true width to 0.05 px and cost ~4 ms per frame for 20 stars."""
+    from src.psf_field import star_fwhm
+    if star_positions is None or len(star_positions) == 0:
+        return 0.0
+    H, W = img.shape
+    try:
+        order = np.argsort(np.asarray(star_positions['flux']))[::-1]
+    except (KeyError, TypeError, ValueError):
+        order = np.arange(len(star_positions))
+    ys = np.asarray(star_positions['ycentroid'], dtype=np.float64) * coord_scale
+    xs = np.asarray(star_positions['xcentroid'], dtype=np.float64) * coord_scale
+    fwhms: List[float] = []
+    for i in order[:Config.FWHM_MAX_STARS]:
+        y, x = float(ys[i]), float(xs[i])
+        iy, ix = int(round(y)), int(round(x))
+        if not (2 <= iy < H - 2 and 2 <= ix < W - 2):
+            continue
+        core = img[iy - 1:iy + 2, ix - 1:ix + 2]
+        peak = float(core.max())
+        # a clipped (flat-topped) core reads wide: three or more pixels within 0.5% of the peak
+        if peak > 0 and int(np.count_nonzero(core >= 0.995 * peak)) >= 3:
+            continue
+        f = star_fwhm(img, y, x)
+        if f is not None and 0.5 <= f < 2.5 * Config.FWHM_CUTOUT_RADIUS:
+            fwhms.append(f)
+            if len(fwhms) >= max_stars:
+                break
     return float(np.median(fwhms)) if fwhms else 0.0
 
 
@@ -888,7 +927,10 @@ def compute_quality_metrics(img: np.ndarray, level: str = 'full',
             sources_s['ycentroid'] /= _star_ds
         star_count = int(existing_metrics.get('star_count', len(sources_s)))
         star_snr = float(existing_metrics.get('star_snr', 0.0))
-        fwhm = float(existing_metrics.get('fwhm', 0.0)) / _star_ds
+        # the gate pass stored it in full-resolution pixels; dividing it by _star_ds here
+        # halved every completed frame's FWHM (what registration, weights, the frame report
+        # and --auto read) on frames >= 1500 px
+        fwhm = float(existing_metrics.get('fwhm', 0.0))
     elif level != 'quick':
         # matched-filter (the only detector) -- see detect_stars_auto's
         # docstring for why this must be the single dispatch point rather
@@ -926,9 +968,9 @@ def compute_quality_metrics(img: np.ndarray, level: str = 'full',
             except Exception:
                 star_count = 0
 
-        # FWHM — measured in downsampled space, scaled back to full-res pixels.
+        # FWHM on the full-resolution frame at the stars found on the reduced grid
         if star_count > 0 and sources_s is not None:
-            fwhm = measure_fwhm(img_s_stars, sources_s) * _star_ds
+            fwhm = measure_fwhm_moments(img, sources_s, coord_scale=_star_ds)
 
     # Strehl proxy and atmospheric dispersion — expensive per-star cutout work;
     # only run when the caller opts in via advanced_metrics.
@@ -1020,7 +1062,7 @@ def compute_quality_metrics(img: np.ndarray, level: str = 'full',
 
     # Star positions were detected on the downsampled img_s_stars grid;
     # rescale to full-resolution pixel coordinates before returning. FWHM is
-    # already rescaled above (line ~890); strehl/dispersion/ellipticity/
+    # already in full-resolution pixels; strehl/dispersion/ellipticity/
     # zernike consumers above this point used the still-downsampled sources_s
     # against the still-downsampled img_s_stars, so they stay internally
     # consistent -- this rescale only affects what callers outside this
