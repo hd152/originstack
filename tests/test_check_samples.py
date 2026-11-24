@@ -72,6 +72,46 @@ def test_stack_metrics_measure_width_and_noise(tmp_path):
     assert cs.stack_metrics(str(wide))['stack_fwhm'] > m['stack_fwhm'] + 1.0
 
 
+def test_stack_metrics_read_the_colour_calibration(tmp_path):
+    plain = tmp_path / 'p.fits'
+    _stack_fits(str(plain))
+    assert cs.stack_metrics(str(plain))['colour_calibrated'] is False
+    cal = tmp_path / 'c.fits'
+    _stack_fits(str(cal))
+    with fits.open(cal, mode='update') as h:
+        h[0].header['COLCAL'] = True
+        for c, v in zip('RGB', (0.69, 1.0, 1.0134)):
+            h[0].header[f'COLCAL_{c}'] = v
+    m = cs.stack_metrics(str(cal))
+    assert m['colour_calibrated'] is True and m['colour_scales'] == [0.69, 1.0, 1.0134]
+
+
+def test_parse_log_reads_why_colour_calibration_did_not_run():
+    assert cs.parse_log(LOG + "\n  Colour calibration: not enough well-measured Gaia stars -- skipped\n")[
+        'colour_note'] == 'not enough well-measured Gaia stars'
+    assert cs.parse_log(LOG + "\n  WARNING: colour calibration failed: timed out\n")['colour_note'] == 'failed: timed out'
+    assert cs.parse_log("  Offline mode: no network requests will be made")['colour_note'] == 'offline'
+    assert 'colour_note' not in cs.parse_log(LOG + "\n  Colour calibration: R x0.690 G x1.000 B x1.013 (6 Gaia stars)\n")
+
+
+def test_missing_colour_calibration_skips_the_noise_not_the_rest():
+    """The weekly check's M51 noise went 90.38 <-> 105.26 on one commit: Gaia was not reached."""
+    base = {'accepted': 43, 'total': 45, 'stack_fwhm': 2.48, 'stack_noise': 90.38}     # pre-flag baseline
+    uncal = dict(base, stack_noise=105.26, colour_calibrated=False, colour_note='failed: timed out')
+    assert cs.compare(base, uncal) == []
+    note = cs.colour_mismatch(base, uncal)
+    assert 'did not run' in note and 'timed out' in note and '90.38 -> 105.26' in note
+    # the other numbers are still compared
+    assert any('stack_fwhm' in p for p in cs.compare(base, dict(uncal, stack_fwhm=3.5)))
+    # a calibrated run against the same baseline: noise compared as before
+    assert cs.colour_mismatch(base, dict(base, colour_calibrated=True)) is None
+    assert any('stack_noise' in p for p in cs.compare(base, dict(base, stack_noise=105.26, colour_calibrated=True)))
+    # both uncalibrated (e.g. a session Gaia never calibrates): compared
+    flagged = dict(base, colour_calibrated=False)
+    assert cs.colour_mismatch(flagged, dict(flagged)) is None
+    assert any('stack_noise' in p for p in cs.compare(flagged, dict(flagged, stack_noise=130.0)))
+
+
 def test_adopt_builds_a_baseline_from_logs_and_stacks(tmp_path, capsys):
     (tmp_path / '04_demo.log').write_text(LOG, encoding='utf-8')
     _stack_fits(str(tmp_path / '04_demo.fits'))

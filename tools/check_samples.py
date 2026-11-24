@@ -14,6 +14,8 @@ session with ``--comet-mode``) and the run is compared with ``tools/data/samples
   * frames accepted (within 1) and the minutes of light stacked (within 2%);
   * the median per-frame star width from the quality table (within 15%);
   * on the stack itself: the median FWHM of its unsaturated stars and its pixel noise (within 15%);
+    the noise only when the run's Gaia colour calibration agrees with the baseline's (its scales
+    move the noise by ~15%: a run that could not reach Gaia gets a note, not a failure);
   * wall time is reported against the baseline and flagged only above 3x (machines differ).
 
 A difference is not necessarily a bug (an intended change moves these numbers): look, then run
@@ -61,6 +63,11 @@ def parse_log(text: str) -> Dict[str, object]:
     if m:
         out['seconds'] = round(int(m.group(1) or 0) * 60 + float(m.group(2)), 1)
     out['warnings'] = len(re.findall(r'WARNING', text))
+    # why Gaia colour calibration did not run, when the log says (see colour_mismatch)
+    m = re.search(r'Colour calibration: (no stack WCS|not enough well-measured Gaia stars) -- skipped'
+                  r'|colour calibration failed: (.*)|(Offline mode)', text)
+    if m:
+        out['colour_note'] = (m.group(1) or (f"failed: {m.group(2).strip()}" if m.group(2) else 'offline')).strip()
     return out
 
 
@@ -78,8 +85,10 @@ def tile_noise(lum: np.ndarray, tile: int = 64) -> float:
     return float(np.percentile(sig, 20))
 
 
-def stack_metrics(path: str) -> Dict[str, float]:
+def stack_metrics(path: str) -> Dict[str, object]:
     """Median FWHM of the stack's unsaturated stars and its per-pixel noise (luminance), ADU."""
+    from astropy.io import fits
+
     from src.debayer import luminance
     from src.merge import load_merge_stack
     from src.psf_field import bright_unsaturated, star_fwhm
@@ -87,7 +96,11 @@ def stack_metrics(path: str) -> Dict[str, float]:
     stack, _meta = load_merge_stack(path)
     lum = luminance(stack).astype(np.float32)
     sigma = tile_noise(lum)
-    out = {'stack_noise': round(sigma, 2)}
+    out: Dict[str, object] = {'stack_noise': round(sigma, 2)}
+    hdr = fits.getheader(path)
+    out['colour_calibrated'] = bool(hdr.get('COLCAL', False))
+    if out['colour_calibrated']:
+        out['colour_scales'] = [round(float(hdr.get(f'COLCAL_{c}', 1.0)), 4) for c in 'RGB']
     src = detect_stars_auto(lum, sigma, background=float(np.median(lum)))
     if src is not None and len(src) >= 10:
         idx = bright_unsaturated(lum, src, 300, sigma)
@@ -98,9 +111,30 @@ def stack_metrics(path: str) -> Dict[str, float]:
     return out
 
 
+def colour_mismatch(base: Dict[str, object], cur: Dict[str, object]) -> Optional[str]:
+    """Why ``stack_noise`` cannot be compared, or None.
+
+    The noise is in ADU of the saved linear stack, which is Gaia colour-calibrated: when the
+    calibration does not run (Gaia unreachable or short of stars on that run), the same stack
+    reads ~15% noisier (x1.147 on M51). The weekly check failed on exactly that, twice on one
+    commit (M51 90.38 <-> 105.26, comet 105.72 <-> 120.50). Baselines made before this was
+    recorded hold no ``colour_calibrated``; they were stacked online and are taken as calibrated
+    here (a run that does calibrate is compared with them as before)."""
+    b, c = base.get('colour_calibrated'), cur.get('colour_calibrated')
+    if c is None or b == c or (b is None and c):
+        return None
+    why = f" ({cur['colour_note']})" if not c and cur.get('colour_note') else ''
+    state = 'did not run' if not c else 'ran (the baseline is uncalibrated)'
+    return (f"colour calibration {state}{why}: stack_noise not compared "
+            f"({base.get('stack_noise')} -> {cur.get('stack_noise')}; calibration changes it ~15%)")
+
+
 def compare(base: Dict[str, object], cur: Dict[str, object]) -> List[str]:
-    """Differences between a baseline entry and a current run (empty = within tolerance)."""
+    """Differences between a baseline entry and a current run (empty = within tolerance).
+    A colour-calibration mismatch is not one of them (``colour_mismatch``): it skips the
+    noise comparison and is reported as a note."""
     problems: List[str] = []
+    skip = {'stack_noise'} if colour_mismatch(base, cur) else set()
     for key in ('target', 'target_type'):
         if base.get(key) != cur.get(key):
             problems.append(f"{key}: {base.get(key)!r} -> {cur.get(key)!r}")
@@ -109,7 +143,7 @@ def compare(base: Dict[str, object], cur: Dict[str, object]) -> List[str]:
             problems.append(f"frames accepted: {base['accepted']}/{base.get('total')} -> {cur.get('accepted')}/{cur.get('total')}")
     for key in ('integration_min', 'frame_fwhm', 'stack_fwhm', 'stack_noise'):
         b, c = base.get(key), cur.get(key)
-        if b is None:
+        if b is None or key in skip:
             continue
         if c is None:
             problems.append(f'{key}: {b} -> missing')
@@ -201,9 +235,18 @@ def main(argv: Optional[List[str]] = None) -> int:
         ratio = (res.get('seconds') or 0) / base[n]['seconds'] if n in base and base[n].get('seconds') else None
         if ratio and ratio > TIME_FLAG:
             problems.append(f"slow: {res.get('seconds')} s against {base[n]['seconds']} s ({ratio:.1f}x)")
+        note = None if a.update else colour_mismatch(base.get(n, {}), res)
+        cal = res.get('colour_calibrated')
+        if cal and res.get('colour_scales'):
+            cal_text = 'colour R/G/B x' + '/'.join(f'{v:.3f}' for v in res['colour_scales'])
+        elif cal is False:
+            cal_text = 'colour not calibrated' + (f" ({res['colour_note']})" if res.get('colour_note') else '')
+        else:
+            cal_text = 'colour ?'
         print(f"{n}: {'OK' if not problems else 'DIFFERS'}  accepted {res.get('accepted')}/{res.get('total')}, "
-              f"stack FWHM {res.get('stack_fwhm')}, noise {res.get('stack_noise')}, {res.get('seconds')} s"
-              + ''.join('\n    ' + p for p in problems))
+              f"stack FWHM {res.get('stack_fwhm')}, noise {res.get('stack_noise')}, {cal_text}, {res.get('seconds')} s"
+              + ''.join('\n    ' + p for p in problems)
+              + (f"\n    note: {note}" if note else ''))
         failed += bool(problems)
     if a.update:
         merged = {**base, **cur}
