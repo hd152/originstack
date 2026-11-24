@@ -6,6 +6,8 @@ match the `VERSION` file and `v*` git tags.
 
 ## [Unreleased]
 
+## [2.25.0] - 2026-11-24
+
 ### Changed
 - **The aligned stack is held as 16-bit floats** (`--aligned-stack half`, the default with the
   default combine): each frame relative to its own sky level, with a per-frame scale, so a sample
@@ -34,8 +36,9 @@ match the `VERSION` file and `v*` git tags.
   value: the registration residual gate, the frame report and its effective exposure, the quality
   weights, `--auto`'s star-width rules. It is now measured from adaptive second moments on the
   full-resolution frame (true width to 0.05 px on synthetic stars, ~4 ms per frame), and kept
-  through completion. Frame scores, the frame report and `--auto` choices change; the default
-  stack (proper coadd measures its own PSFs) barely does.
+  through completion. Frame scores, the frame report and `--auto` choices change, and the default
+  stack slightly: proper coadd picks its PSF stars with a detector sized to the frames' median
+  FWHM, which now gets the real width (Whirlpool: 2.3 px instead of 1.6, clamped to 2.0).
 - On Windows, the catalogue prefetch thread and the main thread fetching the same Gaia index tile
   at once could fail one of them with "Access is denied" (two renames onto one file); the second
   writer now retries and keeps the first one's identical tile.
@@ -44,6 +47,11 @@ match the `VERSION` file and `v*` git tags.
 - `--config dbe_halpha_reference=true` (opt-in): background extraction keeps a nebula's large-scale
   light as the all-sky H-alpha survey map (Finkbeiner 2003) shows it, so a nebula that fills the
   frame is not fitted away as gradient. Downloads a 12.6 MB map once (see "Network use").
+- `--nn-local-optics` (with `--deconvolve nn`, opt-in): a local optical correction for a star-width
+  gradient across the field. Star widths are measured in overlapping strips and the learned
+  deconvolver sharpens only the softer strips, feathered, never past the sharpest strip's
+  measured width. A second network pass over those strips; not a model of coma, astigmatism or
+  colour-dependent PSFs.
 
 ## [2.24.0] - 2026-11-09
 
