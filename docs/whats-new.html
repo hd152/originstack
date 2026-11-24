@@ -40,6 +40,22 @@
 </header>
 
 <main>
+<section id="v2-25">
+  <div class="wrap">
+    <h2>2.25 <small class="when">24 November 2026</small></h2>
+    <div class="releases">
+      <article id="v2-25-0"><h3>2.25.0 <span>24 Nov</span></h3>
+        <ul>
+          <li><strong>Faster on laptops with little memory.</strong> The aligned frames are now kept at half the size, and the step that extends the picture past the common area reads each frame once instead of six to eight times. On a 300-frame session on a 16&nbsp;GB laptop the whole run went from 5&nbsp;min&nbsp;48&nbsp;s to about 5&nbsp;minutes, and the edge step from 2&nbsp;minutes to 24&nbsp;seconds.</li>
+          <li><strong>Star sizes in the frame list are now measured properly.</strong> The star width shown for each frame used to come out at one of a few fixed values, and the number used after the first phase was half the real one. It is now the measured width. The frame graph, the frame report and the automatic settings all use it, so the frames picked as sharpest are the sharpest.</li>
+          <li><strong>Steadier results with wide stars.</strong> Two runs on the same frames could differ by a fifth of the noise when the stars were 5&ndash;6 pixels wide. They now agree.</li>
+          <li><strong>Optional: even out a soft side of the field.</strong> With the learned sharpening on, <code>--nn-local-optics</code> measures how wide the stars are across the picture and sharpens only the softer parts, never beyond the sharpest part. It is off unless you ask for it.</li>
+          <li><strong>Optional: keep a nebula that fills the frame.</strong> <code>--config dbe_halpha_reference=true</code> uses an all-sky hydrogen-alpha map so the background step does not remove a large nebula as if it were a gradient. It downloads a 12.6&nbsp;MB map once.</li>
+        </ul>
+      </article>
+    </div>
+  </div>
+</section>
 <section id="v2-24">
   <div class="wrap">
     <h2>2.24 <small class="when">9 November 2026</small></h2>
